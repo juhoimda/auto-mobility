@@ -17,13 +17,18 @@ MESH_DIR="$DATA_DIR/meshes"
 ISAAC_DIR="$DATA_DIR/isaac_sim"
 LOG_DIR="$DATA_DIR/logs"
 
+RAM_BAG_DIR="/dev/shm/ros2_bags"
+STORAGE_FORMAT="mcap"
+
 RGB_TOPIC="/camera/camera/color/image_raw"
+RGB_COMPRESSED_TOPIC="/camera/camera/color/image_raw/compressed"
 DEPTH_TOPIC="/camera/camera/aligned_depth_to_color/image_raw"
+DEPTH_COMPRESSED_TOPIC="/camera/camera/aligned_depth_to_color/compressedDepth"
 CAMERA_INFO_TOPIC="/camera/camera/color/camera_info"
 POINTS_TOPIC="/camera/camera/depth/color/points"
 IMU_TOPIC="/camera/camera/imu"
 
-mkdir -p "$BAG_DIR" "$DB_DIR" "$POINTCLOUD_DIR" "$MESH_DIR" "$ISAAC_DIR" "$LOG_DIR"
+mkdir -p "$BAG_DIR" "$DB_DIR" "$POINTCLOUD_DIR" "$MESH_DIR" "$ISAAC_DIR" "$LOG_DIR" "$RAM_BAG_DIR"
 
 if [ -f "$PROJECT_DIR/install/setup.bash" ]; then
     source "$PROJECT_DIR/install/setup.bash"

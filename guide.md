@@ -58,17 +58,21 @@ source install/setup.bash
 
 ---
 
-### 3) rosbag2 센서 데이터 녹화 (`record.sh`)
-* **담당 역할**: 카메라 센서 데이터(RGB, Depth, IMU, PointCloud) 및 TF 트랜스폼 정보를 rosbag2로 녹화합니다.
+### 3) rosbag2 센서 데이터 녹화 (`record.sh`) - *VMware 가상화 최적화*
+* **담당 역할**: 카메라 센서 데이터(RGB, Depth, IMU, TF)를 rosbag2로 녹화합니다.
+* **VMware 최적화 기법**:
+  1. **MCAP 포맷 (`-s mcap`)**: sqlite3의 디스크 쓰기 병목을 우회하는 고성능 스트리밍 포맷 사용
+  2. **RAM 디스크 (`/dev/shm`) 녹화**: VMDK 가상 디스크 쓰기 지연을 예방하기 위해 RAM 영역에 작성 후 정지 시 `$BAG_DIR`로 이관
+  3. **토픽 압축 (`CompressedImage` / `compressedDepth`)**: I/O 대역폭 90% 이상 감축
 * **실행 명령어**:
   ```bash
-  # 기본 이름(capture_날짜_시간)으로 녹화
-  ./scripts/record.sh
-
-  # 특정 이름으로 녹화 (예: room1)
+  # 기본 압축 토픽 + MCAP + RAM 디스크 녹화 (권장)
   ./scripts/record.sh room1
+
+  # 비압축 원본 토픽 녹화 (Native Ubuntu 권장)
+  ./scripts/record.sh --raw room1
   ```
-* **저장 위치**: `./ros2_data/bags/room1`
+* **저장 위치**: `./ros2_data/bags/room1` (녹화 중에는 `/dev/shm/ros2_bags/room1`)
 
 ---
 

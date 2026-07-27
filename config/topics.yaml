@@ -1,7 +1,9 @@
 # ROS2 Topics configuration for RealSense D435i & Visual SLAM
 camera:
   rgb_topic: "/camera/camera/color/image_raw"
+  rgb_compressed_topic: "/camera/camera/color/image_raw/compressed"
   depth_topic: "/camera/camera/aligned_depth_to_color/image_raw"
+  depth_compressed_topic: "/camera/camera/aligned_depth_to_color/compressedDepth"
   camera_info_topic: "/camera/camera/color/camera_info"
   pointcloud_topic: "/camera/camera/depth/color/points"
   imu_topic: "/camera/camera/imu"

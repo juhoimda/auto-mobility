@@ -14,6 +14,18 @@ def generate_launch_description():
         description='Path to rtabmap.db'
     )
 
+    rgb_transport_arg = DeclareLaunchArgument(
+        'rgb_transport',
+        default_value='compressed',
+        description='Transport type for RGB image (e.g. raw, compressed)'
+    )
+
+    depth_transport_arg = DeclareLaunchArgument(
+        'depth_transport',
+        default_value='compressedDepth',
+        description='Transport type for Depth image (e.g. raw, compressedDepth)'
+    )
+
     rtabmap_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(rtabmap_launch_dir, 'launch', 'rtabmap.launch.py')
@@ -22,6 +34,8 @@ def generate_launch_description():
             'rgb_topic': '/camera/camera/color/image_raw',
             'depth_topic': '/camera/camera/aligned_depth_to_color/image_raw',
             'camera_info_topic': '/camera/camera/color/camera_info',
+            'rgb_transport': LaunchConfiguration('rgb_transport'),
+            'depth_transport': LaunchConfiguration('depth_transport'),
             'frame_id': 'camera_link',
             'approx_sync': 'true',
             'visual_odometry': 'true',
@@ -34,5 +48,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         database_path_arg,
+        rgb_transport_arg,
+        depth_transport_arg,
         rtabmap_launch
     ])
