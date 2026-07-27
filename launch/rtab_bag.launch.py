@@ -3,6 +3,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
@@ -14,16 +15,30 @@ def generate_launch_description():
         description='Path to rtabmap.db'
     )
 
-    rgb_transport_arg = DeclareLaunchArgument(
-        'rgb_transport',
-        default_value='compressed',
-        description='Transport type for RGB image (e.g. raw, compressed)'
+    # 압축 RGB 이미지 자동 해제 노드
+    republish_rgb_node = Node(
+        package='image_transport',
+        executable='republish',
+        name='republish_rgb',
+        arguments=['compressed', 'raw'],
+        remappings=[
+            ('in/compressed', '/camera/camera/color/image_raw/compressed'),
+            ('out', '/camera/camera/color/image_raw')
+        ],
+        parameters=[{'use_sim_time': True}]
     )
 
-    depth_transport_arg = DeclareLaunchArgument(
-        'depth_transport',
-        default_value='compressedDepth',
-        description='Transport type for Depth image (e.g. raw, compressedDepth)'
+    # 압축 Depth 이미지 자동 해제 노드
+    republish_depth_node = Node(
+        package='image_transport',
+        executable='republish',
+        name='republish_depth',
+        arguments=['compressedDepth', 'raw'],
+        remappings=[
+            ('in/compressedDepth', '/camera/camera/aligned_depth_to_color/image_raw/compressedDepth'),
+            ('out', '/camera/camera/aligned_depth_to_color/image_raw')
+        ],
+        parameters=[{'use_sim_time': True}]
     )
 
     rtabmap_launch = IncludeLaunchDescription(
@@ -34,8 +49,6 @@ def generate_launch_description():
             'rgb_topic': '/camera/camera/color/image_raw',
             'depth_topic': '/camera/camera/aligned_depth_to_color/image_raw',
             'camera_info_topic': '/camera/camera/color/camera_info',
-            'rgb_transport': LaunchConfiguration('rgb_transport'),
-            'depth_transport': LaunchConfiguration('depth_transport'),
             'frame_id': 'camera_link',
             'approx_sync': 'true',
             'visual_odometry': 'true',
@@ -48,7 +61,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         database_path_arg,
-        rgb_transport_arg,
-        depth_transport_arg,
+        republish_rgb_node,
+        republish_depth_node,
         rtabmap_launch
     ])
