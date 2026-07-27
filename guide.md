@@ -28,7 +28,7 @@ ROS2 워크스페이스에서 패키지를 빌드하고 환경 변수를 로드�
 cd ~/ros2_ws
 
 # 패키지 빌드
-colcon build --packages-select auto-mobility
+colcon build --packages-select auto_mobility
 
 # 환경 변수 반영
 source install/setup.bash
@@ -42,7 +42,7 @@ source install/setup.bash
 * **담당 역할**: 카메라 및 센서 토픽(RGB, Depth, CameraInfo, PointCloud, IMU, TF)이 정상적으로 발행되고 있는지 확인합니다.
 * **실행 명령어**:
   ```bash
-  ros2 run auto-mobility check.sh
+  ros2 run auto_mobility check.sh
   # 또는
   ./scripts/check.sh
   ```
@@ -53,7 +53,7 @@ source install/setup.bash
 * **담당 역할**: RGB, Aligned Depth, PointCloud, IMU(가속도계/자이로) 동기화 스트리밍을 시작합니다.
 * **실행 명령어**:
   ```bash
-  ros2 launch auto-mobility camera.launch.py
+  ros2 launch auto_mobility camera.launch.py
   ```
 
 ---
@@ -63,10 +63,10 @@ source install/setup.bash
 * **실행 명령어**:
   ```bash
   # 기본 이름(capture_날짜_시간)으로 녹화
-  ros2 run auto-mobility record.sh
+  ros2 run auto_mobility record.sh
 
   # 특정 이름으로 녹화 (예: room1)
-  ros2 run auto-mobility record.sh room1
+  ros2 run auto_mobility record.sh room1
   ```
 * **저장 위치**: `~/ros2_data/bags/room1`
 
@@ -76,10 +76,10 @@ source install/setup.bash
 * **담당 역할**: 녹화한 센서 데이터를 `--loop --clock` 옵션으로 반복 재생합니다.
 * **실행 명령어**:
   ```bash
-  ros2 run auto-mobility play.sh BAG_NAME
+  ros2 run auto_mobility play.sh BAG_NAME
 
   # 예시
-  ros2 run auto-mobility play.sh room1
+  ros2 run auto_mobility play.sh room1
   ```
 
 ---
@@ -89,7 +89,7 @@ source install/setup.bash
 * **실행 명령어**:
   ```bash
   # DB 이름을 지정하여 실행
-  ros2 run auto-mobility run_live.sh room1_live
+  ros2 run auto_mobility run_live.sh room1_live
   ```
 * **저장 위치**: `~/ros2_data/databases/room1_live.db`
 
@@ -99,7 +99,7 @@ source install/setup.bash
 * **담당 역할**: `play.sh`로 재생 중인 rosbag2 데이터 기반으로 `use_sim_time:=true` 설정으로 SLAM을 수행합니다.
 * **실행 명령어**:
   ```bash
-  ros2 run auto-mobility run_bag.sh room1_result
+  ros2 run auto_mobility run_bag.sh room1_result
   ```
 * **저장 위치**: `~/ros2_data/databases/room1_result.db`
 
@@ -110,7 +110,7 @@ source install/setup.bash
 * **실행 명령어**:
   ```bash
   # 사용법: export_pointcloud.sh <DB_파일명> [출력_파일명.ply]
-  ros2 run auto-mobility export_pointcloud.sh room1_result.db room1_cloud.ply
+  ros2 run auto_mobility export_pointcloud.sh room1_result.db room1_cloud.ply
   ```
 * **저장 위치**: `~/ros2_data/pointclouds/room1_cloud.ply`
 
@@ -131,28 +131,28 @@ source install/setup.bash
 ### 🔴 Step 1. 실환경 데이터 수집 (Data Collection)
 ```bash
 # [터미널 1] RealSense 카메라 실행
-ros2 launch auto-mobility camera.launch.py
+ros2 launch auto_mobility camera.launch.py
 
 # [터미널 2] 토픽 상태 확인
-ros2 run auto-mobility check.sh
+ros2 run auto_mobility check.sh
 
 # [터미널 3] rosbag 녹화 시작 (이동하며 촬영 후 Ctrl+C 종료)
-ros2 run auto-mobility record.sh my_room_01
+ros2 run auto_mobility record.sh my_room_01
 ```
 
 ### 🔵 Step 2. 데이터 재생 및 3D SLAM (Offline Processing)
 ```bash
 # [터미널 1] 녹화된 bag 반복 재생
-ros2 run auto-mobility play.sh my_room_01
+ros2 run auto_mobility play.sh my_room_01
 
 # [터미널 2] SLAM 실행 (맵핑 완료 후 Ctrl+C 종료)
-ros2 run auto-mobility run_bag.sh my_room_01_db
+ros2 run auto_mobility run_bag.sh my_room_01_db
 ```
 
 ### 🟢 Step 3. Digital Twin용 3D Mesh 생성 (Mesh Reconstruction)
 ```bash
 # 1. DB에서 PointCloud 추출
-ros2 run auto-mobility export_pointcloud.sh my_room_01_db.db my_room_01_cloud.ply
+ros2 run auto_mobility export_pointcloud.sh my_room_01_db.db my_room_01_cloud.ply
 
 # 2. Open3D 기반 Mesh 정제 및 3D 모델(.obj) 생성
 python3 scripts/process_mesh_open3d.py ~/ros2_data/pointclouds/my_room_01_cloud.ply ~/ros2_data/meshes/my_room_01_mesh.obj

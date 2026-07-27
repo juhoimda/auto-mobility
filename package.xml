@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypeneds="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>digital_twin_pkg</name>
+  <name>auto_mobility</name>
   <version>0.1.0</version>
   <description>ROS2 package for RealSense D435i Visual SLAM, Rosbag Recording, and Open3D Mesh Generation for Digital Twin</description>
   <maintainer email="user@todo.todo">User</maintainer>
