@@ -1,0 +1,59 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C++ compiled files & build artifacts
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.exe
+*.a
+*.lib
+*.out
+*.app
+build/
+bin/
+lib/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+
+# ROS / ROS2 build and log artifacts
+install/
+log/
+.colcon/
+
+# Point Cloud / 3D Asset / Dataset files (large files)
+*.ply
+*.pcd
+*.obj
+*.stl
+*.fbx
+*.usd
+*.usda
+*.usdc
+*.bag
+*.mcap
+*.db3
+
+# Python Environments & Tools
+.venv/
+venv/
+env/
+ENV/
+*.venv
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Logs & Temporary Files
+*.log
+*.tmp
+*.temp
