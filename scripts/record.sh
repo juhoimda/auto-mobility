@@ -58,6 +58,11 @@ if [ "$USE_COMPRESSED" = true ]; then
     RECORD_TOPICS+=(
         "$RGB_COMPRESSED_TOPIC"
         "$DEPTH_COMPRESSED_TOPIC"
+        "/camera/camera/aligned_depth_to_color/image_raw/compressedDepth"
+        "/camera/camera/aligned_depth_to_color/compressedDepth"
+        "/camera/camera/depth/image_rect_raw/compressedDepth"
+        "/camera/camera/aligned_depth_to_color/image_raw"
+        "/camera/camera/depth/image_rect_raw"
         "$CAMERA_INFO_TOPIC"
         "$IMU_TOPIC"
         /tf
@@ -67,6 +72,8 @@ else
     RECORD_TOPICS+=(
         "$RGB_TOPIC"
         "$DEPTH_TOPIC"
+        "/camera/camera/depth/image_rect_raw"
+        "/camera/camera/aligned_depth_to_color/image_raw"
         "$CAMERA_INFO_TOPIC"
         "$POINTS_TOPIC"
         "$IMU_TOPIC"
