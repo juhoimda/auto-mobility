@@ -10,7 +10,7 @@ def generate_launch_description():
     
     database_path_arg = DeclareLaunchArgument(
         'database_path',
-        default_value='~/ros2_data/databases/rtabmap_bag.db',
+        default_value='./ros2_data/databases/rtabmap_bag.db',
         description='Path to rtabmap.db'
     )
 

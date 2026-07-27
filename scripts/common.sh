@@ -4,8 +4,11 @@ set -e
 
 source /opt/ros/$ROS_DISTRO/setup.bash
 
-WORKSPACE="$HOME/ros2_ws"
-DATA_DIR="$HOME/ros2_data"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+WORKSPACE="${WORKSPACE:-$PROJECT_DIR}"
+DATA_DIR="$PROJECT_DIR/ros2_data"
 
 BAG_DIR="$DATA_DIR/bags"
 DB_DIR="$DATA_DIR/databases"
@@ -22,6 +25,8 @@ IMU_TOPIC="/camera/camera/imu"
 
 mkdir -p "$BAG_DIR" "$DB_DIR" "$POINTCLOUD_DIR" "$MESH_DIR" "$ISAAC_DIR" "$LOG_DIR"
 
-if [ -f "$WORKSPACE/install/setup.bash" ]; then
-    source "$WORKSPACE/install/setup.bash"
+if [ -f "$PROJECT_DIR/install/setup.bash" ]; then
+    source "$PROJECT_DIR/install/setup.bash"
+elif [ -f "$HOME/ros2_ws/install/setup.bash" ]; then
+    source "$HOME/ros2_ws/install/setup.bash"
 fi
