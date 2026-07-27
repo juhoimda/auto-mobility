@@ -15,10 +15,11 @@ def generate_launch_description():
             launch_arguments={
                 'enable_sync': 'true',
                 'align_depth.enable': 'true',
-                'pointcloud.enable': 'true',
-                'enable_accel': 'true',
-                'enable_gyro': 'true',
-                'unite_imu_method': '2'
+                'rgb_camera.profile': '640x480x15',
+                'depth_module.profile': '640x480x15',
+                'pointcloud.enable': 'false',
+                'enable_accel': 'false',
+                'enable_gyro': 'false'
             }.items()
         )
     ])
