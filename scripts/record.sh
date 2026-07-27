@@ -65,6 +65,8 @@ if [ "$USE_COMPRESSED" = true ]; then
         "/camera/camera/depth/image_rect_raw"
         "$CAMERA_INFO_TOPIC"
         "$IMU_TOPIC"
+        "/camera/camera/accel/sample"
+        "/camera/camera/gyro/sample"
         /tf
         /tf_static
     )

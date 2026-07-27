@@ -18,8 +18,9 @@ def generate_launch_description():
                 'depth_module.depth_profile': '640x480x15',
                 'rgb_camera.color.profile': '640x480x15',
                 'pointcloud.enable': 'false',
-                'enable_accel': 'false',
-                'enable_gyro': 'false'
+                'enable_accel': 'true',
+                'enable_gyro': 'true',
+                'unite_imu_method': '2'
             }.items()
         )
     ])

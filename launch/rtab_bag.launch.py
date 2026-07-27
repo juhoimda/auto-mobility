@@ -51,6 +51,8 @@ def generate_launch_description():
             'camera_info_topic': '/camera/camera/color/camera_info',
             'frame_id': 'camera_link',
             'approx_sync': 'true',
+            'approx_sync_max_interval': '0.05',
+            'topic_queue_size': '30',
             'visual_odometry': 'true',
             'use_sim_time': 'true',
             'rviz': 'true',
