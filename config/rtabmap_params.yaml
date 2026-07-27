@@ -1,0 +1,19 @@
+# RTAB-Map parameters configuration
+rtabmap:
+  ros__parameters:
+    subscribe_depth: true
+    subscribe_rgb: true
+    subscribe_stereo: false
+    subscribe_scan: false
+    subscribe_scan_cloud: false
+    frame_id: "camera_link"
+    odom_frame_id: "odom"
+    map_frame_id: "map"
+    publish_tf: true
+    approx_sync: true
+    
+    # RTAB-Map internal parameters
+    Rtabmap/DetectionRate: "1.0"
+    RGBD/LinearUpdate: "0.1"
+    RGBD/AngularUpdate: "0.1"
+    Mem/IncrementalMemory: "true"
