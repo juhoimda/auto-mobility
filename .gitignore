@@ -21,10 +21,11 @@ cmake-build-*/
 CMakeCache.txt
 CMakeFiles/
 
-# ROS / ROS2 build and log artifacts
+# ROS / ROS2 build, data and log artifacts
 install/
 log/
 .colcon/
+ros2_data/
 
 # Point Cloud / 3D Asset / Dataset files (large files)
 *.ply
