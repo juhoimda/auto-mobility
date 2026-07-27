@@ -1,0 +1,20 @@
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Name: RGB Image
+      Topic: /camera/camera/color/image_raw
+      Value: true
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Depth PointCloud
+      Topic: /camera/camera/depth/color/points
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Value: true
+  Global Options:
+    Fixed Frame: map
+    Frame Rate: 30
