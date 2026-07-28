@@ -126,8 +126,8 @@ check_fps() {
 
 echo ""
 echo "📊 핵심 센서 데이터 FPS 점검 중..."
-check_fps "$RGB_TOPIC" 15
-check_fps "$DEPTH_TOPIC" 15
+check_fps "${RECORD_TOPICS[0]}" 15
+check_fps "${RECORD_TOPICS[1]}" 15
 
 echo ""
 echo "▶️ 녹화를 시작합니다. 종료하려면 Ctrl+C를 누르세요..."
