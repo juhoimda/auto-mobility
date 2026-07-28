@@ -3,11 +3,14 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
-USE_COMPRESSED=false
+USE_COMPRESSED=true
 DB_NAME=""
 
 for arg in "$@"; do
     case $arg in
+        --raw)
+            USE_COMPRESSED=false
+            ;;
         --compressed)
             USE_COMPRESSED=true
             ;;

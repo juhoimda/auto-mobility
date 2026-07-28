@@ -19,7 +19,7 @@ def generate_launch_description():
 
     use_compressed_arg = DeclareLaunchArgument(
         'use_compressed',
-        default_value='false',
+        default_value='true',
         description='Whether the bag was recorded with compressed topics'
     )
 
@@ -37,15 +37,29 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('use_compressed'))
     )
 
-    # 압축 Depth 이미지 자동 해제 노드 (use_compressed가 true일 때만 실행)
+    # 압축 Depth 이미지 자동 해제 노드 (/camera/camera/depth/image_rect_raw/compressedDepth)
     republish_depth_node = Node(
         package='image_transport',
         executable='republish',
         name='republish_depth',
         arguments=['compressedDepth', 'raw'],
         remappings=[
+            ('in/compressedDepth', '/camera/camera/depth/image_rect_raw/compressedDepth'),
+            ('out', '/camera/camera/depth/image_rect_raw')
+        ],
+        parameters=[{'use_sim_time': True}],
+        condition=IfCondition(LaunchConfiguration('use_compressed'))
+    )
+
+    # 압축 Depth 이미지 호환용 자동 해제 노드 (/camera/camera/aligned_depth_to_color/image_raw/compressedDepth)
+    republish_depth_aligned_node = Node(
+        package='image_transport',
+        executable='republish',
+        name='republish_depth_aligned',
+        arguments=['compressedDepth', 'raw'],
+        remappings=[
             ('in/compressedDepth', '/camera/camera/aligned_depth_to_color/image_raw/compressedDepth'),
-            ('out', '/camera/camera/aligned_depth_to_color/image_raw')
+            ('out', '/camera/camera/depth/image_rect_raw')
         ],
         parameters=[{'use_sim_time': True}],
         condition=IfCondition(LaunchConfiguration('use_compressed'))
@@ -61,8 +75,8 @@ def generate_launch_description():
             'camera_info_topic': '/camera/camera/color/camera_info',
             'frame_id': 'camera_link',
             'approx_sync': 'true',
-            'approx_sync_max_interval': '0.08',
-            'topic_queue_size': '10',
+            'approx_sync_max_interval': '0.15',
+            'topic_queue_size': '30',
             'visual_odometry': 'true',
             'use_sim_time': 'true',
             'rviz': 'true',
@@ -76,5 +90,6 @@ def generate_launch_description():
         use_compressed_arg,
         republish_rgb_node,
         republish_depth_node,
+        republish_depth_aligned_node,
         rtabmap_launch
     ])

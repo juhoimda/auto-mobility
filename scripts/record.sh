@@ -3,12 +3,15 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
-USE_COMPRESSED=false
+USE_COMPRESSED=true
 NAME=""
-FORCE_RAW=true
+FORCE_RAW=false
 
 for arg in "$@"; do
     case $arg in
+        --raw)
+            FORCE_RAW=true
+            ;;
         --compressed)
             FORCE_RAW=false
             ;;
