@@ -1,36 +1,31 @@
+import os
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node
+from launch.actions import IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
-    depth_profile_arg = DeclareLaunchArgument('depth_profile', default_value='640x480x15')
-    rgb_profile_arg = DeclareLaunchArgument('rgb_profile', default_value='640x480x15')
-
+    realsense_launch_dir = get_package_share_directory('realsense2_camera')
+    
     return LaunchDescription([
-        depth_profile_arg,
-        rgb_profile_arg,
-        Node(
-            package='realsense2_camera',
-            executable='realsense2_camera_node',
-            name='camera',
-            namespace='camera',
-            output='screen',
-            parameters=[{
-                'enable_sync': False,
-                'align_depth.enable': True,
-                'depth_module.profile': LaunchConfiguration('depth_profile'),
-                'depth_module.depth_profile': LaunchConfiguration('depth_profile'),
-                'rgb_camera.profile': LaunchConfiguration('rgb_profile'),
-                'rgb_camera.color_profile': LaunchConfiguration('rgb_profile'),
-                'rgb_camera.color.profile': LaunchConfiguration('rgb_profile'),
-                'pointcloud.enable': False,
-                'enable_accel': True,
-                'enable_gyro': True,
-                'unite_imu_method': 1,
-                'gyro_fps': 200,
-                'accel_fps': 100
-            }]
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(realsense_launch_dir, 'launch', 'rs_launch.py')
+            ),
+            launch_arguments={
+                'camera_name': 'camera',
+                'camera_namespace': 'camera',
+                'enable_sync': 'false',
+                'align_depth.enable': 'true',
+                'depth_module.depth_profile': '640x480x15',
+                'rgb_camera.color_profile': '640x480x15',
+                'pointcloud.enable': 'false',
+                'enable_accel': 'true',
+                'enable_gyro': 'true',
+                'unite_imu_method': '1',
+                'gyro_fps': '200',
+                'accel_fps': '100'
+            }.items()
         )
     ])
 
