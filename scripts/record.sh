@@ -75,9 +75,9 @@ else
     )
 fi
 
-# 4. 사전 상태 검사 (카메라 노드 실행 여부 확인)
+# 4. 사전 상태 및 FPS 검사 (제안서 핵심: RGB, Depth, IMU, CameraInfo, TF)
 echo "=========================================="
-echo "🎥 ROS2 Bag 녹화 시작 준비"
+echo "🎥 ROS2 Bag 녹화 사전 상태 점검"
 echo " 임시 저장소 (RAM): $TEMP_OUTPUT"
 echo " 최종 저장소 (SSD): $FINAL_OUTPUT"
 echo " 저장 포맷        : $STORAGE_FORMAT (MCAP)"
@@ -87,8 +87,10 @@ echo "=========================================="
 MISSING_TOPIC=false
 for topic in "${RECORD_TOPICS[@]}"; do
     if ! ros2 topic list | grep -qx "$topic"; then
-        echo "❌ [오류] 필수 토픽이 발행되고 있지 않습니다: $topic"
+        echo "❌ [오류] 필수 토픽 미발행: $topic"
         MISSING_TOPIC=true
+    else
+        echo "✅ [정상] 토픽 확인: $topic"
     fi
 done
 
@@ -98,7 +100,38 @@ if [ "$MISSING_TOPIC" = true ]; then
     exit 1
 fi
 
+# 5. 핵심 센서 토픽 FPS(주파수) 실시간 검증 (최소 10 FPS 권장)
+check_fps() {
+    local topic="$1"
+    local min_fps="$2"
+    echo -n "🔍 [$topic] FPS 측정 중 (약 2초 소요)... "
+    
+    # ros2 topic hz 출력에서 average rate 추출
+    local hz_output=$(timeout 2.5 ros2 topic hz "$topic" 2>&1 || true)
+    local rate=$(echo "$hz_output" | grep "average rate:" | tail -n 1 | awk '{print $3}')
+    
+    if [ -z "$rate" ]; then
+        echo "⚠️  [경고] FPS 측정 불가 (데이터 흐름 없음)"
+        return 1
+    fi
+
+    # 소수점 제거 후 정수 비교
+    local rate_int=$(printf "%.0f" "$rate" 2>/dev/null || echo 0)
+    if [ "$rate_int" -lt "$min_fps" ]; then
+        echo "⚠️  [경고] 현재 $rate Hz (권장: ${min_fps} Hz 이상) - 프레임수가 낮습니다!"
+    else
+        echo "✅ [정상] $rate Hz (안정)"
+    fi
+}
+
+echo ""
+echo "📊 핵심 센서 데이터 FPS 점검 중..."
+check_fps "$RGB_TOPIC" 15
+check_fps "$DEPTH_TOPIC" 15
+
+echo ""
 echo "▶️ 녹화를 시작합니다. 종료하려면 Ctrl+C를 누르세요..."
 ros2 bag record -s "$STORAGE_FORMAT" -o "$TEMP_OUTPUT" "${RECORD_TOPICS[@]}"
+
 
 
