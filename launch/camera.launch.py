@@ -6,8 +6,8 @@ def generate_launch_description():
     Intel RealSense D435i 최소 핵심 런치 파일
     - RGB (640x480@15fps)
     - Depth (640x480@15fps)
-    - IMU (/camera/camera/imu 가속도+자이로 통합 토픽)
-    - Infra 비활성화 (가상머신 USB 대역폭 초과 방지)
+    - IMU (/camera/camera/imu 가속도+자이로 통합 토픽 ~185Hz)
+    - auto_exposure_priority: False (어두운 실내에서 FPS가 1Hz로 폭락하는 현상 차단)
     """
     return LaunchDescription([
         Node(
@@ -25,6 +25,7 @@ def generate_launch_description():
                 'enable_accel': True,
                 'enable_gyro': True,
                 'unite_imu_method': 1,
+                'rgb_camera.auto_exposure_priority': False,
             }]
         )
     ])
