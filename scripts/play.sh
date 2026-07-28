@@ -16,5 +16,7 @@ if [ ! -d "$BAG_PATH" ]; then
     exit 1
 fi
 
-echo "Playing rosbag2: $BAG_PATH (--loop --clock)"
-ros2 bag play "$BAG_PATH" --loop --clock
+RATE=${2:-0.5}
+
+echo "Playing rosbag2: $BAG_PATH (--loop --clock -r $RATE)"
+ros2 bag play "$BAG_PATH" --loop --clock -r "$RATE"
