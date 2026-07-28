@@ -26,7 +26,7 @@ def generate_launch_description():
             'approx_sync': 'true',
             'visual_odometry': 'true',
             'rviz': 'true',
-            'rtabmap_viz': 'true',
+            'rtabmap_viz': 'false',
             'database_path': LaunchConfiguration('database_path')
         }.items()
     )
