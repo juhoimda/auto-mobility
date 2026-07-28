@@ -9,7 +9,7 @@ check_topic_with_fps() {
     if ros2 topic list | grep -qx "$topic"; then
         echo -n "  [O] $topic "
         if [ -n "$min_fps" ]; then
-            local hz_output=$(timeout 2.0 ros2 topic hz "$topic" 2>&1 || true)
+            local hz_output=$(timeout 4.5 ros2 topic hz "$topic" 2>&1 || true)
             local rate=$(echo "$hz_output" | grep "average rate:" | tail -n 1 | awk '{print $3}')
             if [ -n "$rate" ]; then
                 local rate_int=$(printf "%.0f" "$rate" 2>/dev/null || echo 0)

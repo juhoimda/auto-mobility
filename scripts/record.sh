@@ -106,8 +106,8 @@ check_fps() {
     local min_fps="$2"
     echo -n "🔍 [$topic] FPS 측정 중 (약 2초 소요)... "
     
-    # ros2 topic hz 출력에서 average rate 추출
-    local hz_output=$(timeout 2.5 ros2 topic hz "$topic" 2>&1 || true)
+    # ros2 topic hz 출력에서 average rate 추출 (DDS 구독 연결 시간 고려 4.5초 설정)
+    local hz_output=$(timeout 4.5 ros2 topic hz "$topic" 2>&1 || true)
     local rate=$(echo "$hz_output" | grep "average rate:" | tail -n 1 | awk '{print $3}')
     
     if [ -z "$rate" ]; then
