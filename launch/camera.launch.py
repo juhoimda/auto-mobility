@@ -3,9 +3,9 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     """
-    Intel RealSense D435i 최소 핵심 런치 파일 (가상머신 CPU/USB 최적화)
-    - RGB (640x480@15fps, YUYV 포맷 - CPU 색상 변환 오버헤드 제거)
-    - Depth (640x480@15fps, Z16)
+    Intel RealSense D435i 최소 핵심 런치 파일 (가상머신 FPS 최적화)
+    - RGB (640x480@15fps, YUYV)
+    - Depth (848x480@15fps, D435i 센서 하드웨어 네이티브 해상도)
     - IMU (/camera/camera/imu 가속도+자이로 통합 ~185Hz)
     """
     return LaunchDescription([
@@ -16,7 +16,7 @@ def generate_launch_description():
             namespace='camera',
             output='screen',
             parameters=[{
-                'depth_module.depth_profile': '640x480x15',
+                'depth_module.depth_profile': '848x480x15',
                 'rgb_camera.color_profile': '640x480x15',
                 'rgb_camera.color_format': 'YUYV',
                 'enable_infra1': False,
