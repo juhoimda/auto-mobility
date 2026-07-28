@@ -19,6 +19,7 @@ def generate_launch_description():
                 'depth_module.depth_profile': '640x480x15',
                 'rgb_camera.color_profile': '640x480x15',
                 'rgb_camera.color_format': 'RGB8',
+                'align_depth.enable': True,
                 'enable_infra1': False,
                 'enable_infra2': False,
                 'enable_infra': False,

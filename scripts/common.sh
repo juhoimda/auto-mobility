@@ -22,8 +22,8 @@ STORAGE_FORMAT="mcap"
 
 RGB_TOPIC="/camera/camera/color/image_raw"
 RGB_COMPRESSED_TOPIC="/camera/camera/color/image_raw/compressed"
-DEPTH_TOPIC="/camera/camera/depth/image_rect_raw"
-DEPTH_COMPRESSED_TOPIC="/camera/camera/depth/image_rect_raw/compressedDepth"
+DEPTH_TOPIC="/camera/camera/aligned_depth_to_color/image_raw"
+DEPTH_COMPRESSED_TOPIC="/camera/camera/aligned_depth_to_color/image_raw/compressedDepth"
 CAMERA_INFO_TOPIC="/camera/camera/color/camera_info"
 IMU_TOPIC="/camera/camera/imu"
 

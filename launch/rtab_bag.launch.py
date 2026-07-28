@@ -37,14 +37,14 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('use_compressed'))
     )
 
-    # 압축 Depth 이미지 자동 해제 노드 (/camera/camera/depth/image_rect_raw/compressedDepth)
+    # 압축 Depth 이미지 자동 해제 노드 (/camera/camera/aligned_depth_to_color/image_raw/compressedDepth)
     republish_depth_node = Node(
         package='image_transport',
         executable='republish',
         name='republish_depth',
         arguments=['compressedDepth', 'raw'],
         remappings=[
-            ('in/compressedDepth', '/camera/camera/depth/image_rect_raw/compressedDepth'),
+            ('in/compressedDepth', '/camera/camera/aligned_depth_to_color/image_raw/compressedDepth'),
             ('out', '/camera/camera/depth/image_rect_raw')
         ],
         parameters=[{'use_sim_time': True}],
