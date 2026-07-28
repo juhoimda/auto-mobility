@@ -3,9 +3,9 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     """
-    Intel RealSense D435i 초경량 가상머신(VMware) 최적화 런치 파일
-    - RGB (424x240@15fps, YUYV - 가상머신 USB 대역폭 부담 75% 감소)
-    - Depth (424x240@15fps - D435i 초경량 네이티브 해상도)
+    Intel RealSense D435i 최소 핵심 런치 파일 (RTAB-Map SLAM 호환 424x240 RGB8)
+    - RGB (424x240@15fps, RGB8 - RTAB-Map SLAM 필수 규격)
+    - Depth (424x240@15fps, Z16 16UC1)
     - IMU (/camera/camera/imu 가속도+자이로 통합 ~185Hz)
     """
     return LaunchDescription([
@@ -18,7 +18,7 @@ def generate_launch_description():
             parameters=[{
                 'depth_module.depth_profile': '424x240x15',
                 'rgb_camera.color_profile': '424x240x15',
-                'rgb_camera.color_format': 'YUYV',
+                'rgb_camera.color_format': 'RGB8',
                 'enable_infra1': False,
                 'enable_infra2': False,
                 'enable_infra': False,
