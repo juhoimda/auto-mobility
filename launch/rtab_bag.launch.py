@@ -28,11 +28,7 @@ def generate_launch_description():
         package='image_transport',
         executable='republish',
         name='republish_rgb',
-        arguments=['compressed', 'raw'],
-        remappings=[
-            ('in/compressed', '/camera/camera/color/image_raw/compressed'),
-            ('out', '/camera/camera/color/image_raw')
-        ],
+        arguments=['compressed', 'raw', '--ros-args', '-r', 'in/compressed:=/camera/camera/color/image_raw/compressed', '-r', 'out:=/camera/camera/color/image_raw'],
         parameters=[{'use_sim_time': True}],
         condition=IfCondition(LaunchConfiguration('use_compressed'))
     )
@@ -42,11 +38,7 @@ def generate_launch_description():
         package='image_transport',
         executable='republish',
         name='republish_depth',
-        arguments=['compressedDepth', 'raw'],
-        remappings=[
-            ('in/compressedDepth', '/camera/camera/aligned_depth_to_color/image_raw/compressedDepth'),
-            ('out', '/camera/camera/depth/image_rect_raw')
-        ],
+        arguments=['compressedDepth', 'raw', '--ros-args', '-r', 'in/compressedDepth:=/camera/camera/aligned_depth_to_color/image_raw/compressedDepth', '-r', 'out:=/camera/camera/depth/image_rect_raw'],
         parameters=[{'use_sim_time': True}],
         condition=IfCondition(LaunchConfiguration('use_compressed'))
     )
