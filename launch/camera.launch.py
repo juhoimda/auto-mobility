@@ -10,6 +10,7 @@ def generate_launch_description():
             namespace='camera',
             output='screen',
             parameters=[{
+                'initial_reset': True,
                 'enable_sync': False,
                 'align_depth': {
                     'enable': True
