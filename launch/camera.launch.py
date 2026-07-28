@@ -17,10 +17,14 @@ def generate_launch_description():
                 'align_depth.enable': 'true',
                 'depth_module.depth_profile': '1280x720x15',
                 'rgb_camera.color_profile': '1280x720x15',
+                'depth_module.profile': '1280x720x15',
+                'rgb_camera.profile': '1280x720x15',
                 'pointcloud.enable': 'false',
                 'enable_accel': 'true',
                 'enable_gyro': 'true',
-                'unite_imu_method': '2'
+                'unite_imu_method': '1',
+                'gyro_fps': '200',
+                'accel_fps': '63'
             }.items()
         )
     ])
