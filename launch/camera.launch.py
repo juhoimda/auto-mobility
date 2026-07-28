@@ -10,24 +10,20 @@ def generate_launch_description():
             name='camera',
             namespace='camera',
             output='screen',
-            parameters=[{
-                'enable_sync': False,
-                'align_depth': {'enable': True},
-                'depth_module': {
-                    'profile': '640x480x15',
-                    'depth_profile': '640x480x15'
-                },
-                'rgb_camera': {
-                    'profile': '640x480x15',
-                    'color_profile': '640x480x15'
-                },
-                'pointcloud': {'enable': False},
-                'enable_accel': True,
-                'enable_gyro': True,
-                'unite_imu_method': 1,
-                'gyro_fps': 200,
-                'accel_fps': 100
-            }]
+            ros_arguments=[
+                '-p', 'enable_sync:=false',
+                '-p', 'align_depth.enable:=true',
+                '-p', 'depth_module.profile:=640x480x15',
+                '-p', 'depth_module.depth_profile:=640x480x15',
+                '-p', 'rgb_camera.profile:=640x480x15',
+                '-p', 'rgb_camera.color_profile:=640x480x15',
+                '-p', 'pointcloud.enable:=false',
+                '-p', 'enable_accel:=true',
+                '-p', 'enable_gyro:=true',
+                '-p', 'unite_imu_method:=1',
+                '-p', 'gyro_fps:=200',
+                '-p', 'accel_fps:=100'
+            ]
         )
     ])
 
