@@ -71,7 +71,7 @@ def generate_launch_description():
             'rviz': 'true',
             'rtabmap_viz': 'false',
             'database_path': LaunchConfiguration('database_path'),
-            'rtabmap_args': '--Odom/ResetCountdown 1 --Vis/MinInliers 10'
+            'rtabmap_args': '--Vis/MinInliers 10'
         }.items()
     )
 
