@@ -10,7 +10,7 @@ def generate_launch_description():
             namespace='camera',
             output='screen',
             ros_arguments=[
-                '-p', 'initial_reset:=true',
+                '-p', 'initial_reset:=false',
                 '-p', 'enable_sync:=false',
                 '-p', 'enable_infra1:=false',
                 '-p', 'enable_infra2:=false',
