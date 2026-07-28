@@ -57,7 +57,7 @@ def generate_launch_description():
         ),
         launch_arguments={
             'rgb_topic': '/camera/camera/color/image_raw',
-            'depth_topic': '/camera/camera/aligned_depth_to_color/image_raw',
+            'depth_topic': '/camera/camera/depth/image_rect_raw',
             'camera_info_topic': '/camera/camera/color/camera_info',
             'frame_id': 'camera_link',
             'approx_sync': 'true',

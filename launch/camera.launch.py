@@ -13,7 +13,7 @@ def generate_launch_description():
                 'initial_reset': True,
                 'enable_sync': False,
                 'align_depth': {
-                    'enable': True
+                    'enable': False
                 },
                 'depth_module': {
                     'depth_profile': '640x480x15'
