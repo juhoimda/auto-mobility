@@ -13,8 +13,8 @@ def generate_launch_description():
             parameters=[{
                 'enable_sync': True,
                 'align_depth.enable': True,
-                'depth_module.profile': '848x480x30',
-                'rgb_camera.profile': '848x480x30',
+                'depth_module.profile': '640x480x30',
+                'rgb_camera.profile': '640x480x30',
                 'pointcloud.enable': False,
                 'enable_accel': True,
                 'enable_gyro': True,
