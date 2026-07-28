@@ -10,7 +10,7 @@ def generate_launch_description():
             namespace='camera',
             output='screen',
             parameters=[{
-                'initial_reset': True,
+                'initial_reset': False,
                 'enable_sync': True,
                 'enable_infra1': False,
                 'enable_infra2': False,
@@ -21,7 +21,7 @@ def generate_launch_description():
                 'pointcloud.enable': False,
                 'enable_accel': True,
                 'enable_gyro': True,
-                'unite_imu_method': 2,
+                'unite_imu_method': 1,
                 'gyro_fps': 200,
                 'accel_fps': 100,
             }]
