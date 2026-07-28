@@ -69,11 +69,15 @@ def generate_launch_description():
             'approx_sync': 'true',
             'approx_sync_max_interval': '0.15',
             'topic_queue_size': '30',
+            'qos_image': '1',
+            'qos_depth': '1',
+            'always_process_most_recent_frame': 'false',
             'visual_odometry': 'true',
             'use_sim_time': 'true',
             'rviz': 'true',
             'rtabmap_viz': 'false',
-            'database_path': LaunchConfiguration('database_path')
+            'database_path': LaunchConfiguration('database_path'),
+            'rtabmap_args': '--Odom/ResetCountdown 1 --Vis/MinInliers 10'
         }.items()
     )
 
