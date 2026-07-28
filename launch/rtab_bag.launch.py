@@ -33,7 +33,10 @@ def generate_launch_description():
             ('in/compressed', '/camera/camera/color/image_raw/compressed'),
             ('out', '/camera/camera/color/image_raw')
         ],
-        parameters=[{'use_sim_time': True}],
+        parameters=[{
+            'use_sim_time': True,
+            'reliability': 'best_effort'
+        }],
         condition=IfCondition(LaunchConfiguration('use_compressed'))
     )
 
@@ -47,7 +50,10 @@ def generate_launch_description():
             ('in/compressedDepth', '/camera/camera/aligned_depth_to_color/image_raw/compressedDepth'),
             ('out', '/camera/camera/depth/image_rect_raw')
         ],
-        parameters=[{'use_sim_time': True}],
+        parameters=[{
+            'use_sim_time': True,
+            'reliability': 'best_effort'
+        }],
         condition=IfCondition(LaunchConfiguration('use_compressed'))
     )
 
