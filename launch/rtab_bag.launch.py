@@ -22,13 +22,13 @@ def generate_launch_description():
         description='Whether the bag was recorded with compressed topics'
     )
 
-    depth_compressed_topic_arg = DeclareLaunchArgument(
-        'depth_compressed_topic',
-        default_value='/camera/camera/aligned_depth_to_color/image_raw/compressedDepth',
-        description='Input compressed depth topic name'
+    use_imu_arg = DeclareLaunchArgument(
+        'use_imu',
+        default_value='false',
+        description='Whether to use IMU (requires imu_filter_madgwick to compute orientation)'
     )
 
-    # 1. RGB 압축 해제 노드
+    # 1. RGB 압축 해제 노드 (표준 image_transport 옵션)
     republish_rgb_node = Node(
         package='image_transport',
         executable='republish',
@@ -42,18 +42,51 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('use_compressed'))
     )
 
-    # 2. Depth 압축 해제 노드 (단일 노드: depth_compressed_topic 인자로 입력 토픽 유연하게 처리)
-    republish_depth_node = Node(
+    # 2. 신규 근본 해결 녹화본용 Depth 압축 해제 노드 (/camera/camera/aligned_depth_to_color/image_raw/compressedDepth)
+    republish_depth_aligned_node = Node(
         package='image_transport',
         executable='republish',
-        name='republish_depth',
+        name='republish_depth_aligned',
         arguments=['compressedDepth', 'raw'],
         remappings=[
-            ('in/compressedDepth', LaunchConfiguration('depth_compressed_topic')),
+            ('in/compressedDepth', '/camera/camera/aligned_depth_to_color/image_raw/compressedDepth'),
             ('out', '/camera/camera/aligned_depth_to_color/image_raw')
         ],
         parameters=[{'use_sim_time': True}],
         condition=IfCondition(LaunchConfiguration('use_compressed'))
+    )
+
+    # 3. 레거시(구형) 녹화본용 Depth 압축 해제 노드 (/camera/camera/depth/image_rect_raw/compressedDepth)
+    republish_depth_legacy_node = Node(
+        package='image_transport',
+        executable='republish',
+        name='republish_depth_legacy',
+        arguments=['compressedDepth', 'raw'],
+        remappings=[
+            ('in/compressedDepth', '/camera/camera/depth/image_rect_raw/compressedDepth'),
+            ('out', '/camera/camera/aligned_depth_to_color/image_raw')
+        ],
+        parameters=[{'use_sim_time': True}],
+        condition=IfCondition(LaunchConfiguration('use_compressed'))
+    )
+
+    # 4. IMU Orientation 계산 노드 (imu_filter_madgwick)
+    imu_filter_node = Node(
+        package='imu_filter_madgwick',
+        executable='imu_filter_madgwick_node',
+        name='imu_filter',
+        output='screen',
+        parameters=[{
+            'use_mag': False,
+            'world_frame': 'enu',
+            'publish_tf': False,
+            'use_sim_time': True,
+        }],
+        remappings=[
+            ('imu/data_raw', '/camera/camera/imu'),
+            ('imu/data', '/camera/camera/imu/filtered')
+        ],
+        condition=IfCondition(LaunchConfiguration('use_imu'))
     )
 
     rtabmap_launch = IncludeLaunchDescription(
@@ -64,6 +97,9 @@ def generate_launch_description():
             'rgb_topic': '/camera/camera/color/image_raw',
             'depth_topic': '/camera/camera/aligned_depth_to_color/image_raw',
             'camera_info_topic': '/camera/camera/color/camera_info',
+            'imu_topic': '/camera/camera/imu/filtered',
+            'subscribe_imu': LaunchConfiguration('use_imu'),
+            'qos_imu': '2',
             'frame_id': 'camera_link',
             'approx_sync': 'true',
             'approx_sync_max_interval': '0.15',
@@ -83,8 +119,10 @@ def generate_launch_description():
     return LaunchDescription([
         database_path_arg,
         use_compressed_arg,
-        depth_compressed_topic_arg,
+        use_imu_arg,
         republish_rgb_node,
-        republish_depth_node,
+        republish_depth_aligned_node,
+        republish_depth_legacy_node,
+        imu_filter_node,
         rtabmap_launch
     ])
