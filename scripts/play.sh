@@ -18,5 +18,5 @@ fi
 
 RATE=${2:-0.5}
 
-echo "Playing rosbag2: $BAG_PATH (--loop --clock -r $RATE)"
-ros2 bag play "$BAG_PATH" --loop --clock -r "$RATE"
+echo "Playing rosbag2: $BAG_PATH (--clock -r $RATE)"
+ros2 bag play "$BAG_PATH" --clock -r "$RATE"

@@ -24,7 +24,7 @@ def generate_launch_description():
 
     use_imu_arg = DeclareLaunchArgument(
         'use_imu',
-        default_value='false',
+        default_value='true',
         description='Whether to use IMU (requires imu_filter_madgwick to compute orientation)'
     )
 
@@ -122,7 +122,7 @@ def generate_launch_description():
         use_imu_arg,
         republish_rgb_node,
         republish_depth_aligned_node,
-        republish_depth_legacy_node,
+        # republish_depth_legacy_node,
         imu_filter_node,
         rtabmap_launch
     ])
