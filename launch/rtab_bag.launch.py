@@ -5,7 +5,6 @@ from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
-
 from launch.conditions import IfCondition
 
 def generate_launch_description():
@@ -23,7 +22,13 @@ def generate_launch_description():
         description='Whether the bag was recorded with compressed topics'
     )
 
-    # 1. RGB 압축 해제 노드 (표준 image_transport 옵션)
+    depth_compressed_topic_arg = DeclareLaunchArgument(
+        'depth_compressed_topic',
+        default_value='/camera/camera/aligned_depth_to_color/image_raw/compressedDepth',
+        description='Input compressed depth topic name'
+    )
+
+    # 1. RGB 압축 해제 노드
     republish_rgb_node = Node(
         package='image_transport',
         executable='republish',
@@ -37,28 +42,14 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('use_compressed'))
     )
 
-    # 2. 신규 근본 해결 녹화본용 Depth 압축 해제 노드 (/camera/camera/aligned_depth_to_color/image_raw/compressedDepth)
-    republish_depth_aligned_node = Node(
+    # 2. Depth 압축 해제 노드 (단일 노드: depth_compressed_topic 인자로 입력 토픽 유연하게 처리)
+    republish_depth_node = Node(
         package='image_transport',
         executable='republish',
-        name='republish_depth_aligned',
+        name='republish_depth',
         arguments=['compressedDepth', 'raw'],
         remappings=[
-            ('in/compressedDepth', '/camera/camera/aligned_depth_to_color/image_raw/compressedDepth'),
-            ('out', '/camera/camera/aligned_depth_to_color/image_raw')
-        ],
-        parameters=[{'use_sim_time': True}],
-        condition=IfCondition(LaunchConfiguration('use_compressed'))
-    )
-
-    # 3. 레거시(구형) 녹화본용 Depth 압축 해제 노드 (/camera/camera/depth/image_rect_raw/compressedDepth)
-    republish_depth_legacy_node = Node(
-        package='image_transport',
-        executable='republish',
-        name='republish_depth_legacy',
-        arguments=['compressedDepth', 'raw'],
-        remappings=[
-            ('in/compressedDepth', '/camera/camera/depth/image_rect_raw/compressedDepth'),
+            ('in/compressedDepth', LaunchConfiguration('depth_compressed_topic')),
             ('out', '/camera/camera/aligned_depth_to_color/image_raw')
         ],
         parameters=[{'use_sim_time': True}],
@@ -92,8 +83,8 @@ def generate_launch_description():
     return LaunchDescription([
         database_path_arg,
         use_compressed_arg,
+        depth_compressed_topic_arg,
         republish_rgb_node,
-        republish_depth_aligned_node,
-        republish_depth_legacy_node,
+        republish_depth_node,
         rtabmap_launch
     ])

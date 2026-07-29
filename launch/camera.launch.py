@@ -22,7 +22,6 @@ def generate_launch_description():
                 'align_depth.enable': True,
                 'enable_infra1': False,
                 'enable_infra2': False,
-                'enable_infra': False,
                 'enable_accel': True,
                 'enable_gyro': True,
                 'unite_imu_method': 1,
