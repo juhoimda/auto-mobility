@@ -6,8 +6,6 @@ source /opt/ros/$ROS_DISTRO/setup.bash
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-WORKSPACE="${WORKSPACE:-$PROJECT_DIR}"
 DATA_DIR="$PROJECT_DIR/ros2_data"
 
 BAG_DIR="$DATA_DIR/bags"

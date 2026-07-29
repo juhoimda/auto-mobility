@@ -5,7 +5,6 @@ from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
-
 from launch.conditions import IfCondition
 
 def generate_launch_description():
@@ -37,7 +36,7 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('use_compressed'))
     )
 
-    # 2. 신규 근본 해결 녹화본용 Depth 압축 해제 노드 (/camera/camera/aligned_depth_to_color/image_raw/compressedDepth)
+    # 2. Aligned Depth 압축 해제 노드 (신규 녹화본: aligned_depth_to_color)
     republish_depth_aligned_node = Node(
         package='image_transport',
         executable='republish',
@@ -51,7 +50,7 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('use_compressed'))
     )
 
-    # 3. 레거시(구형) 녹화본용 Depth 압축 해제 노드 (/camera/camera/depth/image_rect_raw/compressedDepth)
+    # 3. Legacy Depth 압축 해제 노드 (구형 녹화본: depth/image_rect_raw)
     republish_depth_legacy_node = Node(
         package='image_transport',
         executable='republish',
