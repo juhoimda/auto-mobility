@@ -36,3 +36,8 @@ fi
 # 스크립트 실행 권한 자동 보장 (Permission denied 예방)
 chmod +x "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR"/*.py 2>/dev/null || true
 
+# FastDDS 공유메모리(SHM) 프로필 자동 적용
+if [ -f "$PROJECT_DIR/config/fastdds_camera.xml" ]; then
+    export FASTRTPS_DEFAULT_PROFILES_FILE="$PROJECT_DIR/config/fastdds_camera.xml"
+fi
+
