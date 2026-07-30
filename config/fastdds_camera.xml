@@ -5,7 +5,7 @@
         <transport_descriptor>
             <transport_id>shm_transport</transport_id>
             <type>SHM</type>
-            <max_message_size>52428800</max_message_size> <!-- 50MB 버퍼 -->
+            <segment_size>52428800</segment_size> <!-- 50MB 버퍼 -->
         </transport_descriptor>
 
         <!-- UDPv4 Transport: 소켓 수신/송신 버퍼 10MB 확장 -->

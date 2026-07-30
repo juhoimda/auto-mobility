@@ -28,7 +28,7 @@ def generate_launch_description():
         description='Whether to use IMU (requires imu_filter_madgwick to compute orientation)'
     )
 
-    # 1. RGB 압축 해제 노드 (표준 image_transport 옵션)
+    # 1. RGB 압축 해제 노드 (표준 image_transport 옵션 + BEST_EFFORT QoS 지원)
     republish_rgb_node = Node(
         package='image_transport',
         executable='republish',
@@ -38,7 +38,10 @@ def generate_launch_description():
             ('in/compressed', '/camera/camera/color/image_raw/compressed'),
             ('out', '/camera/camera/color/image_raw')
         ],
-        parameters=[{'use_sim_time': True}],
+        parameters=[{
+            'use_sim_time': True,
+            'qos_overrides./camera/camera/color/image_raw/compressed.subscription.reliability': 'best_effort'
+        }],
         condition=IfCondition(LaunchConfiguration('use_compressed'))
     )
 
@@ -52,7 +55,10 @@ def generate_launch_description():
             ('in/compressedDepth', '/camera/camera/aligned_depth_to_color/image_raw/compressedDepth'),
             ('out', '/camera/camera/aligned_depth_to_color/image_raw')
         ],
-        parameters=[{'use_sim_time': True}],
+        parameters=[{
+            'use_sim_time': True,
+            'qos_overrides./camera/camera/aligned_depth_to_color/image_raw/compressedDepth.subscription.reliability': 'best_effort'
+        }],
         condition=IfCondition(LaunchConfiguration('use_compressed'))
     )
 
