@@ -3,7 +3,9 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
+from launch.conditions import IfCondition
 
 def generate_launch_description():
     rtabmap_launch_dir = get_package_share_directory('rtabmap_launch')
@@ -14,6 +16,31 @@ def generate_launch_description():
         description='Path to rtabmap.db'
     )
 
+    use_imu_arg = DeclareLaunchArgument(
+        'use_imu',
+        default_value='true',
+        description='Whether to use IMU (requires imu_filter_madgwick to compute orientation)'
+    )
+
+    # IMU Orientation 계산 노드 (imu_filter_madgwick)
+    imu_filter_node = Node(
+        package='imu_filter_madgwick',
+        executable='imu_filter_madgwick_node',
+        name='imu_filter',
+        output='screen',
+        parameters=[{
+            'use_mag': False,
+            'world_frame': 'enu',
+            'publish_tf': False,
+            'use_sim_time': False,
+        }],
+        remappings=[
+            ('imu/data_raw', '/camera/camera/imu'),
+            ('imu/data', '/camera/camera/imu/filtered')
+        ],
+        condition=IfCondition(LaunchConfiguration('use_imu'))
+    )
+
     rtabmap_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(rtabmap_launch_dir, 'launch', 'rtabmap.launch.py')
@@ -22,16 +49,27 @@ def generate_launch_description():
             'rgb_topic': '/camera/camera/color/image_raw',
             'depth_topic': '/camera/camera/aligned_depth_to_color/image_raw',
             'camera_info_topic': '/camera/camera/color/camera_info',
+            'imu_topic': '/camera/camera/imu/filtered',
+            'subscribe_imu': LaunchConfiguration('use_imu'),
+            'qos_imu': '2',
             'frame_id': 'camera_link',
             'approx_sync': 'true',
+            'approx_sync_max_interval': '0.15',
+            'topic_queue_size': '30',
+            'qos_image': '1',
+            'qos_depth': '1',
+            'always_process_most_recent_frame': 'false',
             'visual_odometry': 'true',
             'rviz': 'true',
             'rtabmap_viz': 'false',
-            'database_path': LaunchConfiguration('database_path')
+            'database_path': LaunchConfiguration('database_path'),
+            'rtabmap_args': '--Vis/MinInliers 10'
         }.items()
     )
 
     return LaunchDescription([
         database_path_arg,
+        use_imu_arg,
+        imu_filter_node,
         rtabmap_launch
     ])
