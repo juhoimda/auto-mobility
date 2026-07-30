@@ -104,6 +104,21 @@ python3 scripts/process_mesh_open3d.py ./ros2_data/pointclouds/my_room_01_cloud.
 
 ---
 
+## ⚡ 동작 5. 하드웨어 최적 DDS & 카메라 설정 자동 분석 (원클릭 벤치마크)
+
+현재 하드웨어(CPU/RAM/네트워크)에서 가장 프레임 손실이 적고 지연이 적은 DDS, QoS, 해상도, FPS 조합을 자동 분석하고 상세 보고서를 생성합니다.
+
+```bash
+# 💡 전체 파라미터 조합 정밀 분석 (약 1~2분 소요)
+./scripts/benchmark.sh
+
+# 💡 핵심 조합만 빠르게 분석
+./scripts/benchmark.sh --quick
+```
+* **결과 저장**: `./ros2_data/logs/benchmark_report_<날짜>.md`에 성능 순위 및 최적 조합 보고서 자동 작성.
+
+---
+
 ## 🛠️ 자주 쓰는 대처 명령어
 
 * **카메라 Raw 이미지 발행 Hz 측정**:
