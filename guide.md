@@ -79,18 +79,27 @@ ros2 launch auto_mobility camera.launch.py
 
 ---
 
-## 🧊 동작 3. Digital Twin용 3D Mesh 모델(.obj) 생성하기
+## 🧊 동작 3. Digital Twin용 3D Mesh 모델(.obj) 생성 및 3D 시각화
 
-SLAM 결과 파일(`.db`)을 추출하여 Isaac Sim / 3D 그래픽용 모델(.obj)로 변환할 때 사용합니다.
+SLAM 결과 파일(`.db`)을 추출하여 Isaac Sim / 3D 그래픽용 모델(.obj)로 변환하고 시각화할 때 사용합니다.
 
 ```bash
+# 💡 [방식 A: 원클릭 자동 실행 + 3D 뷰어 창 띄우기 (추천)]
+./scripts/generate_mesh.sh my_room_01_db --view
+
+# 💡 [방식 B: RTAB-Map 텍스처(색상) 맵핑 Mesh 직접 추출]
+./scripts/generate_mesh.sh my_room_01_db --method rtabmap
+
+# 💡 [방식 C: 단계별 수동 진행]
 # 1. DB에서 3D Point Cloud 추출 (.ply)
 ./scripts/export_pointcloud.sh my_room_01_db.db my_room_01_cloud.ply
 
-# 2. Open3D 정제 및 3D Mesh 파일(.obj) 생성
-python3 scripts/process_mesh_open3d.py ./ros2_data/pointclouds/my_room_01_cloud.ply ./ros2_data/meshes/my_room_01_mesh.obj
+# 2. Open3D 정제 및 3D Mesh 파일(.obj) 생성 & 뷰어 확인
+python3 scripts/process_mesh_open3d.py ./ros2_data/pointclouds/my_room_01_cloud.ply ./ros2_data/meshes/my_room_01_mesh.obj --view
 ```
 * **최종 저장 결과물**: `./ros2_data/meshes/my_room_01_mesh.obj`
+* **자동 품질 검증**: `generate_mesh.sh` 실행 시 내부에서 Point 수, 공간 스케일, 노이즈 비율을 자동 검증하여 부적합 데이터일 경우 Mesh 생성을 사전 차단합니다 (강제 진행 시 `--force` 붙임).
+* **3D 시각화 뷰어**: `--view` 옵션을 붙이면 Open3D 대화형 3D 시각화 창이 떠서 마우스 드래그로 회전/확대하여 Mesh 결과를 즉시 확인할 수 있습니다.
 
 ---
 

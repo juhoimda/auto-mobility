@@ -5,11 +5,12 @@ import argparse
 
 try:
     import open3d as o3d
+    import numpy as np
 except ImportError:
-    print("Error: Open3D is not installed. Install via `pip install open3d`")
+    print("Error: Open3D is not installed. Install via `pip install open3d numpy`")
     sys.exit(1)
 
-def generate_mesh(input_ply, output_mesh, depth=8, voxel_size=0.01):
+def generate_mesh(input_ply, output_mesh, depth=8, voxel_size=0.01, view_result=False, clean_density=True):
     print(f"Loading point cloud: {input_ply}")
     pcd = o3d.io.read_point_cloud(input_ply)
     
@@ -29,9 +30,34 @@ def generate_mesh(input_ply, output_mesh, depth=8, voxel_size=0.01):
     print(f"Reconstructing surface using Poisson Surface Reconstruction (depth={depth})...")
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=depth)
     
+    if clean_density:
+        print("Cleaning low-density Poisson reconstruction artifacts...")
+        densities_arr = np.asarray(densities)
+        density_threshold = np.quantile(densities_arr, 0.05)
+        vertices_to_remove = densities_arr < density_threshold
+        mesh.remove_vertices_by_mask(vertices_to_remove)
+    
+    # Crop to bounding box of point cloud to prevent floating shell artifacts
+    bbox = pcd.get_axis_aligned_bounding_box()
+    mesh = mesh.crop(bbox)
+    mesh.compute_vertex_normals()
+    
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(os.path.abspath(output_mesh)), exist_ok=True)
+    
     print(f"Saving generated mesh to: {output_mesh}")
     o3d.io.write_triangle_mesh(output_mesh, mesh)
     print("Mesh generation complete!")
+
+    if view_result:
+        print("Opening interactive 3D Mesh Viewer (Close window to exit)...")
+        o3d.visualization.draw_geometries(
+            [mesh], 
+            window_name=f"3D Mesh Viewer - {os.path.basename(output_mesh)}",
+            width=1280,
+            height=720,
+            mesh_show_back_face=True
+        )
 
 def main():
     parser = argparse.ArgumentParser(description="Generate 3D Mesh using Open3D from Point Cloud")
@@ -39,6 +65,8 @@ def main():
     parser.add_argument("output", help="Output mesh file (.obj or .ply)")
     parser.add_argument("--depth", type=int, default=8, help="Poisson reconstruction depth (default: 8)")
     parser.add_argument("--voxel", type=float, default=0.01, help="Voxel size for downsampling (default: 0.01)")
+    parser.add_argument("--view", action="store_true", help="Visualize generated mesh in interactive 3D window")
+    parser.add_argument("--no-clean", action="store_true", help="Disable density cleaning filter")
     
     args = parser.parse_args()
     
@@ -46,7 +74,15 @@ def main():
         print(f"Error: Input file does not exist: {args.input}")
         sys.exit(1)
         
-    generate_mesh(args.input, args.output, args.depth, args.voxel)
+    generate_mesh(
+        args.input, 
+        args.output, 
+        depth=args.depth, 
+        voxel_size=args.voxel, 
+        view_result=args.view, 
+        clean_density=not args.no_clean
+    )
 
 if __name__ == "__main__":
     main()
+
