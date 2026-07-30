@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastrtps_profiles">
+    <transport_descriptors>
+        <!-- Shared Memory (SHM) Transport: 동일 PC 내 고속 통신 및 CPU 점유율 최소화 -->
+        <transport_descriptor>
+            <transport_id>shm_transport</transport_id>
+            <type>SHM</type>
+            <segment_size>52428800</segment_size> <!-- 50MB 버퍼 -->
+        </transport_descriptor>
+
+        <!-- UDPv4 Transport: 소켓 수신/송신 버퍼 10MB 확장 -->
+        <transport_descriptor>
+            <transport_id>udpv4_transport</transport_id>
+            <type>UDPv4</type>
+            <sendBufferSize>10485760</sendBufferSize>
+            <receiveBufferSize>10485760</receiveBufferSize>
+            <non_blocking_send>true</non_blocking_send>
+        </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="auto_mobility_camera_profile" is_default_profile="true">
+        <rtps>
+            <userTransports>
+                <transport_id>shm_transport</transport_id>
+                <transport_id>udpv4_transport</transport_id>
+            </userTransports>
+        </rtps>
+    </participant>
+</profiles>
