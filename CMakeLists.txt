@@ -22,6 +22,7 @@ install(
     scripts/check.sh
     scripts/export_pointcloud.sh
     scripts/process_mesh_open3d.py
+    scripts/republish_compressed.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
