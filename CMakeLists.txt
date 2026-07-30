@@ -21,7 +21,9 @@ install(
     scripts/run_bag.sh
     scripts/check.sh
     scripts/export_pointcloud.sh
+    scripts/generate_mesh.sh
     scripts/process_mesh_open3d.py
+    scripts/validate_dataset.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
