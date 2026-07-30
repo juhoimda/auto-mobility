@@ -27,11 +27,11 @@ def generate_launch_description():
                 'enable_gyro': True,
                 'unite_imu_method': 1,
                 'rgb_camera.auto_exposure_priority': False,
-                'rgb_qos': 'SENSOR_DATA',
+                'color_qos': 'SENSOR_DATA',
+                'color_info_qos': 'SENSOR_DATA',
                 'depth_qos': 'SENSOR_DATA',
-                'pointcloud.qos': 'SENSOR_DATA',
-                'qos_overrides./camera/camera/color/image_raw.publisher.reliability': 'best_effort',
-                'qos_overrides./camera/camera/aligned_depth_to_color/image_raw.publisher.reliability': 'best_effort',
+                'depth_info_qos': 'SENSOR_DATA',
+                'pointcloud.pointcloud_qos': 'SENSOR_DATA',
             }]
         )
     ])
