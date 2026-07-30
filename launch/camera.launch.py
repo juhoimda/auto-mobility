@@ -30,6 +30,8 @@ def generate_launch_description():
                 'rgb_qos': 'SENSOR_DATA',
                 'depth_qos': 'SENSOR_DATA',
                 'pointcloud.qos': 'SENSOR_DATA',
+                'qos_overrides./camera/camera/color/image_raw.publisher.reliability': 'best_effort',
+                'qos_overrides./camera/camera/aligned_depth_to_color/image_raw.publisher.reliability': 'best_effort',
             }]
         )
     ])
