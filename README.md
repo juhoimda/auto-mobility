@@ -11,31 +11,39 @@
 ```mermaid
 graph TD
     subgraph 1. Sensor Processing
-        A[RealSense D435i Camera] -->|Hardware Alignment| B[RGB Image: 640x480 @ 15fps]
+        A[RealSense D435i Camera]
+        A -->|Hardware Alignment| B[RGB Image: 640x480 @ 15fps]
         A -->|align_depth.enable:=True| C[Aligned Depth Image: 640x480 @ 15fps]
-        A -->|unite_imu_method:=1| D[IMU Data: Accel + Gyro ~185Hz]
+        A -->|unite_imu_method:=1| D[IMU Data: Accel + Gyro]
+        A --> E[Camera Info]
     end
 
-    subgraph 2. Compression & Recording Pipeline
-        B -->|JPEG Compress| E["/camera/camera/color/image_raw/compressed"]
-        C -->|PNG Lossless Compress| F["/camera/camera/aligned_depth_to_color/image_raw/compressedDepth"]
-        D --> G["/camera/camera/imu"]
-        E & F & G --> H["ROS 2 Bag Recording (MCAP Format / RAM Buffer)"]
+    subgraph 2. ROS 2 Communication
+        B --> F["/camera/camera/color/image_raw"]
+        C --> G["/camera/camera/aligned_depth_to_color/image_raw"]
+        D --> H["/camera/camera/imu"]
+        E --> I["/camera/camera/color/camera_info"]
     end
 
-    subgraph 3. Real-time Decompression & Fallback
-        H -->|ros2 bag play| I[DDS Data Stream]
-        I --> J[republish_rgb Node]
-        I --> K[republish_depth_aligned Node / Legacy Fallback]
-        J -->|Raw RGB| L["/camera/camera/color/image_raw"]
-        K -->|Raw Aligned Depth| M["/camera/camera/aligned_depth_to_color/image_raw"]
+    subgraph 3. Parallel Pipeline
+        F --> J[RTAB-Map / rgbd_odometry]
+        G --> J
+        H --> J
+        I --> J
+
+        F --> K["ROS 2 Bag Recorder (MCAP)"]
+        G --> K
+        H --> K
+        I --> K
     end
 
-    subgraph 4. 3D Visual SLAM & Reconstruction
-        L & M & D --> N[rtabmap / rgbd_odometry Node]
-        N --> O[3D Point Cloud / Grid Map Visualization in RViz2]
-        N --> P["RTAB-Map Spatial Database (.db)"]
-        P -->|Open3D Pipeline| Q["Digital Twin 3D Mesh (.obj)"]
+    subgraph 4. Mapping & Reconstruction
+        J --> L[Camera Pose Estimation]
+        J --> M[3D Point Cloud / Occupancy Grid]
+        J --> N["RTAB-Map Spatial Database (.db)"]
+
+        N --> O[Open3D Processing]
+        O --> P["Digital Twin 3D Mesh (.obj)"]
     end
 ```
 
