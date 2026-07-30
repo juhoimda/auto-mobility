@@ -28,7 +28,7 @@ def generate_launch_description():
         description='Whether to use IMU (requires imu_filter_madgwick to compute orientation)'
     )
 
-    # 1. RGB 압축 해제 노드 (표준 image_transport 옵션 + BEST_EFFORT QoS 지원)
+    # 1. RGB 압축 해제 노드 (Best Effort QoS: 2)
     republish_rgb_node = Node(
         package='image_transport',
         executable='republish',
@@ -40,12 +40,12 @@ def generate_launch_description():
         ],
         parameters=[{
             'use_sim_time': True,
-            'qos_overrides./camera/camera/color/image_raw/compressed.subscription.reliability': 'best_effort'
+            'qos': 2
         }],
         condition=IfCondition(LaunchConfiguration('use_compressed'))
     )
 
-    # 2. 신규 근본 해결 녹화본용 Depth 압축 해제 노드 (/camera/camera/aligned_depth_to_color/image_raw/compressedDepth)
+    # 2. Depth 압축 해제 노드 (Best Effort QoS: 2)
     republish_depth_aligned_node = Node(
         package='image_transport',
         executable='republish',
@@ -57,7 +57,7 @@ def generate_launch_description():
         ],
         parameters=[{
             'use_sim_time': True,
-            'qos_overrides./camera/camera/aligned_depth_to_color/image_raw/compressedDepth.subscription.reliability': 'best_effort'
+            'qos': 2
         }],
         condition=IfCondition(LaunchConfiguration('use_compressed'))
     )
@@ -72,7 +72,10 @@ def generate_launch_description():
             ('in/compressedDepth', '/camera/camera/depth/image_rect_raw/compressedDepth'),
             ('out', '/camera/camera/aligned_depth_to_color/image_raw')
         ],
-        parameters=[{'use_sim_time': True}],
+        parameters=[{
+            'use_sim_time': True,
+            'qos': 2
+        }],
         condition=IfCondition(LaunchConfiguration('use_compressed'))
     )
 
@@ -110,8 +113,8 @@ def generate_launch_description():
             'approx_sync': 'true',
             'approx_sync_max_interval': '0.15',
             'topic_queue_size': '30',
-            'qos_image': '1',
-            'qos_depth': '1',
+            'qos_image': '2',
+            'qos_depth': '2',
             'always_process_most_recent_frame': 'false',
             'visual_odometry': 'true',
             'use_sim_time': 'true',
