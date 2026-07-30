@@ -4,6 +4,8 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage, Image
 from cv_bridge import CvBridge
+import numpy as np
+import cv2
 
 class CompressedRepublisher(Node):
     def __init__(self):
@@ -35,23 +37,38 @@ class CompressedRepublisher(Node):
             '/camera/camera/aligned_depth_to_color/image_raw',
             10
         )
-        self.get_logger().info('CompressedRepublisher Node Started (Best Effort QoS)')
+        self.get_logger().info('CompressedRepublisher Node Started (Best Effort QoS & NumPy Decoding)')
 
     def rgb_callback(self, msg: CompressedImage):
         try:
-            cv_img = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
-            img_msg = self.bridge.cv2_to_imgmsg(cv_img, encoding='bgr8')
-            img_msg.header = msg.header
-            self.pub_rgb.publish(img_msg)
+            raw_bytes = bytes(msg.data)
+            np_arr = np.frombuffer(raw_bytes, dtype=np.uint8)
+            cv_img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if cv_img is not None:
+                img_msg = self.bridge.cv2_to_imgmsg(cv_img, encoding='bgr8')
+                img_msg.header = msg.header
+                self.pub_rgb.publish(img_msg)
         except Exception as e:
             self.get_logger().error(f'RGB decode error: {e}')
 
     def depth_callback(self, msg: CompressedImage):
         try:
-            cv_img = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='passthrough')
-            img_msg = self.bridge.cv2_to_imgmsg(cv_img, encoding='16UC1')
-            img_msg.header = msg.header
-            self.pub_depth.publish(img_msg)
+            raw_bytes = bytes(msg.data)
+            np_arr = np.frombuffer(raw_bytes, dtype=np.uint8)
+            
+            # ROS compressedDepth PNG 헤더 위치 파악 (b'\x89PNG')
+            png_idx = raw_bytes.find(b'\x89PNG')
+            if png_idx != -1:
+                cv_img = cv2.imdecode(np_arr[png_idx:], cv2.IMREAD_UNCHANGED)
+            else:
+                cv_img = cv2.imdecode(np_arr[12:], cv2.IMREAD_UNCHANGED)
+
+            if cv_img is not None:
+                img_msg = self.bridge.cv2_to_imgmsg(cv_img, encoding='16UC1')
+                img_msg.header = msg.header
+                self.pub_depth.publish(img_msg)
+            else:
+                self.get_logger().error('Depth imdecode returned None')
         except Exception as e:
             self.get_logger().error(f'Depth decode error: {e}')
 
