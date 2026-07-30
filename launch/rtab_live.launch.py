@@ -51,6 +51,7 @@ def generate_launch_description():
             'camera_info_topic': '/camera/camera/color/camera_info',
             'imu_topic': '/camera/camera/imu/filtered',
             'subscribe_imu': LaunchConfiguration('use_imu'),
+            'always_process_most_recent_frame': 'false', # false: 프레임을 최대한 순서대로 처리하며, 밀렸더라도 바로 버리지 않습니다, true는 버리면서 최대한 시간따라 감
             'qos_image': '2',
             'qos_depth': '2',
             'qos_camera_info': '2',
