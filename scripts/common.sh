@@ -32,3 +32,7 @@ if [ -f "$PROJECT_DIR/install/setup.bash" ]; then
 elif [ -f "$HOME/ros2_ws/install/setup.bash" ]; then
     source "$HOME/ros2_ws/install/setup.bash"
 fi
+
+# 스크립트 실행 권한 자동 보장 (Permission denied 예방)
+chmod +x "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR"/*.py 2>/dev/null || true
+
