@@ -59,7 +59,6 @@ def generate_launch_description():
             'approx_sync': 'true',
             'approx_sync_max_interval': '0.15',
             'topic_queue_size': '30',
-            'always_process_most_recent_frame': 'false',
             'visual_odometry': 'true',
             'rviz': 'true',
             'rtabmap_viz': 'false',

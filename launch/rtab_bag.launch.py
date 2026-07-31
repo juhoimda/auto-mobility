@@ -37,7 +37,7 @@ def generate_launch_description():
     # 1. RGB & Depth 압축 해제 노드 (Best Effort QoS 지원 및 C++ plugin 오류 해결)
     republish_compressed_node = Node(
         package='auto_mobility',
-        executable='republish_compressed.py',
+        executable='republish.py',
         name='republish_compressed',
         output='screen',
         parameters=[{

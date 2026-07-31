@@ -1,11 +1,11 @@
 #!/bin/bash
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$SCRIPT_DIR/common.sh"
+source "$SCRIPT_DIR/../common.sh"
 
 if [ -z "$1" ]; then
-    echo "사용법: $0 BAG_NAME"
-    echo "예시: $0 capture_20260727"
+    echo "사용법: $0 BAG_NAME [RATE]"
+    echo "예시: $0 capture_20260727 0.5"
     exit 1
 fi
 

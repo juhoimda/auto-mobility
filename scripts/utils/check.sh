@@ -1,7 +1,7 @@
 #!/bin/bash
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$SCRIPT_DIR/common.sh"
+source "$SCRIPT_DIR/../common.sh"
 
 check_topic_with_fps() {
     local topic="$1"
@@ -53,5 +53,3 @@ if [ -d "$RAM_BAG_DIR" ] && [ -w "$RAM_BAG_DIR" ]; then
 else
     echo "  [!] RAM Disk ($RAM_BAG_DIR) 접근 불가"
 fi
-
-

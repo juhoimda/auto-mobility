@@ -1,7 +1,7 @@
 #!/bin/bash
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$SCRIPT_DIR/common.sh"
+source "$SCRIPT_DIR/../common.sh"
 
 NAME=""
 FORCE_RAW=false
@@ -134,6 +134,3 @@ check_fps "${RECORD_TOPICS[1]}" 15
 echo ""
 echo "▶️ 녹화를 시작합니다. 종료하려면 Ctrl+C를 누르세요..."
 ros2 bag record -s "$STORAGE_FORMAT" -o "$TEMP_OUTPUT" "${RECORD_TOPICS[@]}"
-
-
-

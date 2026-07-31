@@ -1,7 +1,7 @@
 #!/bin/bash
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$SCRIPT_DIR/common.sh"
+source "$SCRIPT_DIR/../common.sh"
 
 DB_NAME=${1:-live_$(date +%Y%m%d_%H%M%S)}
 DB_PATH="$DB_DIR/$DB_NAME.db"

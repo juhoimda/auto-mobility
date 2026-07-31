@@ -93,7 +93,7 @@ def main():
     args = parser.parse_args()
     
     if not args.db and not args.ply:
-        print("Usage: python3 validate_dataset.py --db DB_PATH or --ply PLY_PATH")
+        print("Usage: python3 validate.py --db DB_PATH or --ply PLY_PATH")
         sys.exit(1)
         
     success = True
