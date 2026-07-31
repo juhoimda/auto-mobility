@@ -25,6 +25,7 @@ install(
     scripts/process_mesh_open3d.py
     scripts/republish_compressed.py
     scripts/validate_dataset.py
+    scripts/validate_dataset.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
