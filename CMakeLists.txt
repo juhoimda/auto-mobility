@@ -32,6 +32,7 @@ install(
     src/auto_mobility/processing/mesh_open3d.py
     src/auto_mobility/processing/validate.py
     src/auto_mobility/processing/benchmark_hw.py
+    src/auto_mobility/processing/inspect_system.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
