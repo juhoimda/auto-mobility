@@ -172,11 +172,23 @@ def print_summary():
             enc = info["encoding"]
             qos = info["qos"]
 
+            is_compressed_topic = "compressed" in top or "compressedDepth" in top
+            is_raw_image_topic = ("color/image_raw" in top or "aligned_depth_to_color/image_raw" in top) and not is_compressed_topic
+
             if fps > 0:
-                if fps >= 15:
-                    status_str = f"{GREEN}✅ {fps:.1f} Hz (정상){RESET}"
+                if is_compressed_topic:
+                    if fps >= 15:
+                        status_str = f"{GREEN}✅ {fps:.1f} Hz (정상 - 압축 전송 기준){RESET}"
+                    else:
+                        status_str = f"{RED}⚠️ {fps:.1f} Hz (저하됨! 권장 15+ Hz){RESET}"
+                elif is_raw_image_topic:
+                    status_str = f"{CYAN}ℹ️ {fps:.1f} Hz (Raw 스트림 - VM/대역폭 제한 시 낮을 수 있음){RESET}"
                 else:
-                    status_str = f"{RED}⚠️ {fps:.1f} Hz (저하됨! 권장 15+ Hz){RESET}"
+                    if fps >= 15:
+                        status_str = f"{GREEN}✅ {fps:.1f} Hz (정상){RESET}"
+                    else:
+                        status_str = f"{YELLOW}⚠️ {fps:.1f} Hz (저하됨){RESET}"
+
                 print(f"  • {BOLD}{top}{RESET}")
                 print(f"    - 실시간 FPS : {status_str}")
                 print(f"    - 해상도/포맷 : {res} (Encoding: {enc})")
@@ -186,16 +198,6 @@ def print_summary():
     else:
         print(f"  {YELLOW}⚠️ rclpy 환경을 불러올 수 없어 기본 토픽 점검으로 대체합니다.{RESET}")
 
-    # 4. Diagnostic & Solutions Guide for Low Hz
-    print(f"\n{BOLD}[4. 💡 Hz가 갑자기 낮아졌을 때 주요 원인 및 조치 방법]{RESET}")
-    print(f"  1) {BOLD}가상머신 (VM) USB Pass-through 병목{RESET}:")
-    print(f"     - VM 환경에서는 1280x720@30fps (약 80MB/s+) Raw 이미지 처리 시 USB 대역폭 및 CPU 스케줄링 병목으로 프레임이 3~5Hz로 급감할 수 있습니다.")
-    print(f"  2) {BOLD}USB 2.1 연결 인식 문제{RESET}:")
-    print(f"     - USB 3.0 포트/케이블 접촉 불량 시 카메라가 USB 2.1 모드로 격하되어 FPS가 크게 저하됩니다. (포트 재연결 필요)")
-    print(f"  3) {BOLD}Auto-exposure Priority (자동 노출 우선순위){RESET}:")
-    print(f"     - 어두운 환경에서 카메라 노출 시간이 길어져 FPS가 자동 감소합니다 (`rgb_camera.auto_exposure_priority:=false` 필수).")
-    print(f"  4) {BOLD}QoS & SHM 버퍼 미적용{RESET}:")
-    print(f"     - RELIABLE QoS 사용 시 패킷 재전송 병목이 생깁니다 (`color_qos:=SENSOR_DATA` 사용).")
     print(f"{BOLD}{CYAN}========================================================================{RESET}\n")
 
 if __name__ == "__main__":
