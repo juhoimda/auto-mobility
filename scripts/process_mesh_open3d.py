@@ -40,6 +40,19 @@ def generate_mesh(input_ply, output_mesh, depth=8, voxel_size=0.01, view_result=
     # Crop to bounding box of point cloud to prevent floating shell artifacts
     bbox = pcd.get_axis_aligned_bounding_box()
     mesh = mesh.crop(bbox)
+
+    # Transfer RGB colors from point cloud to mesh vertices if available
+    if pcd.has_colors() and len(pcd.points) > 0:
+        print("Transferring RGB colors from point cloud to 3D mesh...")
+        pcd_tree = o3d.geometry.KDTreeFlann(pcd)
+        mesh_vertices = np.asarray(mesh.vertices)
+        pcd_colors = np.asarray(pcd.colors)
+        colors = []
+        for v in mesh_vertices:
+            [_, idx, _] = pcd_tree.search_knn_vector_3d(v, 1)
+            colors.append(pcd_colors[idx[0]])
+        mesh.vertex_colors = o3d.utility.Vector3dVector(np.array(colors))
+
     mesh.compute_vertex_normals()
     
     # Ensure output directory exists

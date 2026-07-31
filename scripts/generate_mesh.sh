@@ -3,30 +3,12 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
-if [ -z "$1" ]; then
-    echo "=========================================================="
-    echo " 사용법: $0 DB_NAME [OUTPUT_MESH_NAME] [--view] [--method open3d|rtabmap]"
-    echo " 예시  : $0 my_room_db.db my_room_mesh.obj --view"
-    echo "=========================================================="
-    exit 1
-fi
-
-DB_INPUT="$1"
-# .db 확장자 처리
-if [[ "$DB_INPUT" != *.db ]]; then
-    DB_FILE="$DB_DIR/$DB_INPUT.db"
-    BASE_NAME="$DB_INPUT"
-else
-    DB_FILE="$DB_DIR/$DB_INPUT"
-    BASE_NAME="${DB_INPUT%.db}"
-fi
-
-OUTPUT_MESH_NAME="${2:-${BASE_NAME}_mesh.obj}"
+POSITIONAL_ARGS=()
 VIEW_FLAG=""
+FORCE_FLAG=""
 METHOD="open3d"
 
 # 파라미터 파싱
-FORCE_FLAG=""
 for arg in "$@"; do
     case $arg in
         --view)
@@ -44,8 +26,36 @@ for arg in "$@"; do
         open3d)
             METHOD="open3d"
             ;;
+        -*)
+            echo "⚠️ 알 수 없는 옵션: $arg"
+            ;;
+        *)
+            POSITIONAL_ARGS+=("$arg")
+            ;;
     esac
 done
+
+if [ ${#POSITIONAL_ARGS[@]} -lt 1 ]; then
+    echo "=========================================================="
+    echo " 사용법: $0 DB_NAME [OUTPUT_MESH_NAME] [--view] [--force] [--method open3d|rtabmap]"
+    echo " 예시  : $0 my_room_db.db my_room_mesh.obj --view"
+    echo "=========================================================="
+    exit 1
+fi
+
+DB_INPUT="${POSITIONAL_ARGS[0]}"
+OUTPUT_MESH_ARG="${POSITIONAL_ARGS[1]}"
+
+# .db 확장자 처리
+if [[ "$DB_INPUT" != *.db ]]; then
+    DB_FILE="$DB_DIR/$DB_INPUT.db"
+    BASE_NAME="$DB_INPUT"
+else
+    DB_FILE="$DB_DIR/$DB_INPUT"
+    BASE_NAME="${DB_INPUT%.db}"
+fi
+
+OUTPUT_MESH_NAME="${OUTPUT_MESH_ARG:-${BASE_NAME}_mesh.obj}"
 
 PLY_PATH="$POINTCLOUD_DIR/${BASE_NAME}_cloud.ply"
 MESH_PATH="$MESH_DIR/$OUTPUT_MESH_NAME"
