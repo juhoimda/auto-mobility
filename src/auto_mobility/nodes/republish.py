@@ -59,7 +59,8 @@ class CompressedRepublisher(Node):
             np_arr = np.frombuffer(raw_bytes, dtype=np.uint8)
             cv_img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             if cv_img is not None:
-                img_msg = self.bridge.cv2_to_imgmsg(cv_img, encoding='bgr8')
+                rgb_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+                img_msg = self.bridge.cv2_to_imgmsg(rgb_img, encoding='rgb8')
                 img_msg.header = msg.header
                 self.pub_rgb.publish(img_msg)
         except Exception as e:
