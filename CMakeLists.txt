@@ -8,21 +8,31 @@ endif()
 find_package(ament_cmake REQUIRED)
 
 install(
-  DIRECTORY launch config rviz
+  DIRECTORY launch config rviz docs
   DESTINATION share/${PROJECT_NAME}
+)
+
+install(
+  DIRECTORY src/auto_mobility
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 install(
   PROGRAMS
     scripts/common.sh
-    scripts/record.sh
-    scripts/play.sh
-    scripts/run_live.sh
-    scripts/run_bag.sh
-    scripts/check.sh
-    scripts/export_pointcloud.sh
-    scripts/process_mesh_open3d.py
-    scripts/republish_compressed.py
+    scripts/pipeline/run_bag.sh
+    scripts/pipeline/run_live.sh
+    scripts/pipeline/record.sh
+    scripts/pipeline/play.sh
+    scripts/pipeline/mesh.sh
+    scripts/utils/check.sh
+    scripts/utils/export_ply.sh
+    scripts/utils/benchmark.sh
+    src/auto_mobility/nodes/republish.py
+    src/auto_mobility/processing/mesh_open3d.py
+    src/auto_mobility/processing/validate.py
+    src/auto_mobility/processing/benchmark_hw.py
+    src/auto_mobility/processing/inspect_system.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -28,14 +28,21 @@ def generate_launch_description():
         description='Whether to use IMU (requires imu_filter_madgwick to compute orientation)'
     )
 
+    depth_compressed_topic_arg = DeclareLaunchArgument(
+        'depth_compressed_topic',
+        default_value='/camera/camera/aligned_depth_to_color/image_raw/compressedDepth',
+        description='Name of compressed depth topic in bag'
+    )
+
     # 1. RGB & Depth 압축 해제 노드 (Best Effort QoS 지원 및 C++ plugin 오류 해결)
     republish_compressed_node = Node(
         package='auto_mobility',
-        executable='republish_compressed.py',
+        executable='republish.py',
         name='republish_compressed',
         output='screen',
         parameters=[{
-            'use_sim_time': True
+            'use_sim_time': True,
+            'depth_compressed_topic': LaunchConfiguration('depth_compressed_topic')
         }],
         condition=IfCondition(LaunchConfiguration('use_compressed'))
     )
@@ -70,12 +77,13 @@ def generate_launch_description():
             'imu_topic': '/camera/camera/imu/filtered',
             'subscribe_imu': LaunchConfiguration('use_imu'),
             'qos_imu': '2',
+            'qos_image': '2',
+            'qos_depth': '2',
+            'qos_camera_info': '2',
             'frame_id': 'camera_link',
             'approx_sync': 'true',
             'approx_sync_max_interval': '0.15',
             'topic_queue_size': '30',
-            'qos_image': '2',
-            'qos_depth': '2',
             'always_process_most_recent_frame': 'false',
             'visual_odometry': 'true',
             'use_sim_time': 'true',
@@ -89,6 +97,7 @@ def generate_launch_description():
     return LaunchDescription([
         database_path_arg,
         use_compressed_arg,
+        depth_compressed_topic_arg,
         use_imu_arg,
         republish_compressed_node,
         imu_filter_node,

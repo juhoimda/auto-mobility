@@ -49,7 +49,37 @@ graph TD
 
 ---
 
-## ⚙️ 2. 주요 시스템 사양 및 설정 (Technical Specifications)
+## 📁 2. 프로젝트 디렉터리 구조 (Directory Structure)
+
+```
+auto-mobility/                         # [패키지 루트]
+├── CMakeLists.txt                      # ROS2 CMake 빌드 파일
+├── package.xml                         # ROS2 패키지 매니페스트
+├── README.md                           # 시스템 명세서
+│
+├── src/                                # 🟢 ROS 2 정석 소스 디렉터리
+│   └── auto_mobility/                  # Python 패키지 모듈
+│       ├── nodes/
+│       │   └── republish.py            # 압축 해제 재발행 노드
+│       └── processing/
+│           ├── mesh_open3d.py          # Open3D 3D Mesh 생성 모듈
+│           ├── validate.py             # 데이터 품질 및 규격 검증 모듈
+│           └── benchmark_hw.py         # 하드웨어 성능 벤치마크 모듈
+│
+├── scripts/                            # 🟡 CLI 실행 도구 (Shell Scripts)
+│   ├── common.sh                       # 공통 환경설정
+│   ├── pipeline/                       # 핵심 실행 파이프라인 (run_bag, run_live, record, play, mesh)
+│   └── utils/                          # 유틸리티 도구 (check, export_ply, benchmark)
+│
+├── config/                             # ROS2 / FastDDS / RTAB-Map 설정 파일
+├── launch/                             # ROS2 Launch 파일 (camera, rtab_bag, rtab_live)
+├── rviz/                               # RViz2 디스플레이 구성 파일
+└── docs/                               # 프로젝트 문서 및 사용 가이드 (guide.md)
+```
+
+---
+
+## ⚙️ 3. 주요 시스템 사양 및 설정 (Technical Specifications)
 
 ### 📸 센서 및 카메라 설정 (`camera.launch.py`)
 
@@ -70,8 +100,8 @@ graph TD
 | :--- | :--- | :--- | :--- |
 | **RGB (압축 기본)** | `/camera/camera/color/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` | JPEG 손실 압축 (대역폭 1/10 절감) |
 | **Depth (압축 기본)** | `/camera/camera/aligned_depth_to_color/image_raw/compressedDepth` | `sensor_msgs/msg/CompressedImage` | PNG 기반 비손실 깊이 압축 |
-| **RGB (복원)** | `/camera/camera/color/image_raw` | `sensor_msgs/msg/Image` | `republish` 노드에 의해 실시간 복원 |
-| **Depth (복원)** | `/camera/camera/aligned_depth_to_color/image_raw` | `sensor_msgs/msg/Image` | `republish` 노드에 의해 실시간 복원 |
+| **RGB (복원)** | `/camera/camera/color/image_raw` | `sensor_msgs/msg/Image` | `republish.py` 노드에 의해 실시간 복원 |
+| **Depth (복원)** | `/camera/camera/aligned_depth_to_color/image_raw` | `sensor_msgs/msg/Image` | `republish.py` 노드에 의해 실시간 복원 |
 | **Camera Info** | `/camera/camera/color/camera_info` | `sensor_msgs/msg/CameraInfo` | 렌즈 내부 캘리브레이션 매개변수 |
 | **IMU** | `/camera/camera/imu` | `sensor_msgs/msg/Imu` | 모션 추정 보조 데이터 |
 
@@ -90,7 +120,7 @@ graph TD
 
 ---
 
-## ✨ 3. 파이프라인의 핵심 기능 및 차별점
+## ✨ 4. 파이프라인의 핵심 기능 및 차별점
 
 1. **가상머신(VM) 디스크 I/O 병목 완벽 해결**:
    * Raw 비디오 전송 시 요구되는 초당 100MB 대역폭을 **10MB 이하로 압축 파이프라인 설계**하여 FPS 폭락 현상을 완벽하게 예방.
