@@ -81,7 +81,7 @@ if [ "$METHOD" == "rtabmap" ]; then
     echo "✅ RTAB-Map Mesh 추출 완료: $MESH_PATH"
 else
     echo "1️⃣ DB에서 Point Cloud (.ply) 추출 중..."
-    "$PIPELINE_DIR/../utils/export_ply.sh" "$(basename "$DB_FILE")" "${BASE_NAME}_cloud.ply"
+    "$PIPELINE_DIR/../utils/export_ply.sh" "$(basename "$DB_FILE")" "${BASE_NAME}.ply"
 
     echo ""
     echo "🔍 [자동 품질 검증] Point Cloud & DB 헬스 체크 실행 중..."
