@@ -66,7 +66,7 @@ def inspect_topics_rclpy():
         import rclpy
         from rclpy.node import Node
         from rclpy.qos import qos_profile_sensor_data
-        from sensor_msgs.msg import Image, CameraInfo, Imu
+        from sensor_msgs.msg import Image, CompressedImage, CameraInfo, Imu
     except ImportError:
         return None
 
@@ -75,6 +75,7 @@ def inspect_topics_rclpy():
 
     topic_stats = {
         "/camera/camera/color/image_raw": {"count": 0, "res": "N/A", "encoding": "N/A", "frame_id": "N/A", "qos": "SENSOR_DATA"},
+        "/camera/camera/color/image_raw/compressed": {"count": 0, "res": "N/A", "encoding": "compressed", "frame_id": "N/A", "qos": "SENSOR_DATA"},
         "/camera/camera/aligned_depth_to_color/image_raw": {"count": 0, "res": "N/A", "encoding": "N/A", "frame_id": "N/A", "qos": "SENSOR_DATA"},
         "/camera/camera/color/camera_info": {"count": 0, "res": "N/A", "encoding": "N/A", "frame_id": "N/A", "qos": "SENSOR_DATA"},
         "/camera/camera/imu": {"count": 0, "res": "N/A", "encoding": "N/A", "frame_id": "N/A", "qos": "SENSOR_DATA"},
@@ -86,6 +87,11 @@ def inspect_topics_rclpy():
         t["res"] = f"{msg.width}x{msg.height}"
         t["encoding"] = msg.encoding
         t["frame_id"] = msg.header.frame_id
+
+    def cb_color_comp(msg):
+        t = topic_stats["/camera/camera/color/image_raw/compressed"]
+        t["count"] += 1
+        t["format"] = msg.format
 
     def cb_depth(msg):
         t = topic_stats["/camera/camera/aligned_depth_to_color/image_raw"]
@@ -104,6 +110,7 @@ def inspect_topics_rclpy():
         t["count"] += 1
 
     node.create_subscription(Image, "/camera/camera/color/image_raw", cb_color, qos_profile_sensor_data)
+    node.create_subscription(CompressedImage, "/camera/camera/color/image_raw/compressed", cb_color_comp, qos_profile_sensor_data)
     node.create_subscription(Image, "/camera/camera/aligned_depth_to_color/image_raw", cb_depth, qos_profile_sensor_data)
     node.create_subscription(CameraInfo, "/camera/camera/color/camera_info", cb_info, qos_profile_sensor_data)
     node.create_subscription(Imu, "/camera/camera/imu", cb_imu, qos_profile_sensor_data)
