@@ -36,7 +36,14 @@ echo "Extracting PointCloud from $DB_FILE -> $OUTPUT_PATH"
 rtabmap-export --output_dir "$OUTPUT_DIR" --output "$OUTPUT_BASE" "$DB_FILE"
 
 # rtabmap-export 생성 결과 파일명 맞춤 (_cloud.ply 처리)
-GENERATED_FILE="$OUTPUT_DIR/${OUTPUT_BASE}_cloud.ply"
-if [ -f "$GENERATED_FILE" ] && [ "$GENERATED_FILE" != "$OUTPUT_PATH" ]; then
-    mv "$GENERATED_FILE" "$OUTPUT_PATH"
+GENERATED_FILE1="$OUTPUT_DIR/${OUTPUT_BASE}_cloud.ply"
+GENERATED_FILE2="$OUTPUT_DIR/${OUTPUT_BASE}.ply_cloud.ply"
+GENERATED_FILE3="$OUTPUT_DIR/${OUTPUT_BASE}"
+
+if [ -f "$GENERATED_FILE1" ] && [ "$GENERATED_FILE1" != "$OUTPUT_PATH" ]; then
+    mv "$GENERATED_FILE1" "$OUTPUT_PATH"
+elif [ -f "$GENERATED_FILE2" ] && [ "$GENERATED_FILE2" != "$OUTPUT_PATH" ]; then
+    mv "$GENERATED_FILE2" "$OUTPUT_PATH"
+elif [ -f "$GENERATED_FILE3" ] && [ "$GENERATED_FILE3" != "$OUTPUT_PATH" ]; then
+    mv "$GENERATED_FILE3" "$OUTPUT_PATH"
 fi
