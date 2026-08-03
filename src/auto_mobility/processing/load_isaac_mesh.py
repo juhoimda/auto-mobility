@@ -2,7 +2,7 @@
 """
 Isaac Sim Standalone Mesh Loader Script
 Load 3D Mesh (.obj, .ply, .usd, .usda) generated from Open3D into Isaac Sim stage.
-Applies lighting, ground plane, and physical collision boundaries (Triangle Mesh Collider).
+Applies lighting, ground plane, and physical collision boundaries (Triangle Mesh Collider with Fallback).
 """
 
 import sys
@@ -22,20 +22,27 @@ def main():
     args = parse_args()
 
     mesh_file = os.path.abspath(args.mesh)
+
+    # File Barrier 1: Check existence and non-zero size
     if not os.path.exists(mesh_file):
-        print(f"❌ Error: Mesh file does not exist: {mesh_file}")
+        print(f"❌ Barrier Failure: Mesh file does not exist: {mesh_file}")
+        sys.exit(1)
+
+    file_size_kb = os.path.getsize(mesh_file) / 1024
+    if file_size_kb < 1.0:
+        print(f"❌ Barrier Failure: Mesh file is empty or corrupted ({file_size_kb:.2f} KB)")
         sys.exit(1)
 
     print(f"🚀 Initializing Isaac Sim SimulationApp...")
-    print(f" 📁 Input Mesh: {mesh_file}")
-    print(f" 🖥️ Headless Mode: {args.headless}")
+    print(f" 📁 Input Mesh     : {mesh_file} ({file_size_kb:.1f} KB)")
+    print(f" 🖥️ Headless Mode  : {args.headless}")
 
     # Launch Omniverse Isaac Sim App
     try:
         from isaacsim import SimulationApp
         simulation_app = SimulationApp({"headless": args.headless})
     except ImportError:
-        print("❌ Error: Isaac Sim python environment not detected!")
+        print("❌ Barrier Failure: Isaac Sim python environment not detected!")
         print("💡 Tip: Run this script using Isaac Sim's bundled python runner (e.g., ./python.sh load_isaac_mesh.py)")
         sys.exit(1)
 
@@ -63,7 +70,7 @@ def main():
 
     prim = stage.GetPrimAtPath(prim_path)
     if not prim.IsValid():
-        print(f"❌ Error: Failed to load mesh to prim path {prim_path}")
+        print(f"❌ Barrier Failure: Failed to load mesh to prim path {prim_path}")
         simulation_app.close()
         sys.exit(1)
 
@@ -72,17 +79,26 @@ def main():
         xform = UsdGeom.Xformable(prim)
         xform.AddScaleOp().Set(Gf.Vec3f(args.scale, args.scale, args.scale))
 
-    # 4. Apply Collision Physics if requested
+    # 4. Apply Collision Physics with Fallback
     if not args.no_physics:
-        print("⚡ Applying Collision Physics (PhysxTriangleMeshCollision)...")
-        UsdPhysics.CollisionAPI.Apply(prim)
-        mesh_collision = PhysxSchema.PhysxTriangleMeshCollisionAPI.Apply(prim)
-        mesh_collision.CreateApproximationAttribute().Set("none") # exact triangle mesh collision
+        print("⚡ Applying Collision Physics...")
+        try:
+            UsdPhysics.CollisionAPI.Apply(prim)
+            mesh_collision = PhysxSchema.PhysxTriangleMeshCollisionAPI.Apply(prim)
+            mesh_collision.CreateApproximationAttribute().Set("none") # Exact Triangle Mesh
+            print("✅ PhysxTriangleMeshCollision applied successfully!")
+        except Exception as e:
+            print(f"⚠️ TriangleMeshCollision failed ({e}). Falling back to ConvexHull approximation...")
+            try:
+                mesh_collision.CreateApproximationAttribute().Set("convexHull")
+                print("✅ ConvexHull Physics fallback applied!")
+            except Exception as ex:
+                print(f"⚠️ Physics approximation warning: {ex}")
 
     # 5. Reset and Run Simulation Loop
     world.reset()
     print("==========================================================")
-    print(" ✅ Digital Twin Mesh successfully loaded into Isaac Sim!")
+    print(" 🎉 [Success] Digital Twin Mesh loaded into Isaac Sim!")
     print(" 🕹️ Press Ctrl+C in terminal or close window to exit.")
     print("==========================================================")
 

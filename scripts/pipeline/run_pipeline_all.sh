@@ -1,5 +1,5 @@
 #!/bin/bash
-# End-to-End Real-to-Sim Pipeline Orchestrator
+# End-to-End Real-to-Sim Pipeline Orchestrator with Integrity Barriers
 # Step 1: Real-time Camera Capture + RTAB-Map SLAM -> rtabmap.db & PointCloud
 # Step 2: Open3D Mesh Reconstruction (.obj) -> Isaac Sim Digital Twin Ingestion
 
@@ -43,17 +43,21 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+TARGET_DB_PATH="$DB_DIR/$DB_NAME"
+TARGET_PLY_PATH="$POINTCLOUD_DIR/${DB_NAME%.db}_cloud.ply"
+TARGET_MESH_PATH="$MESH_DIR/$MESH_NAME"
+
 echo "=========================================================="
-echo " 🌐 Real-to-Sim End-to-End Pipeline Execution"
-echo " 📂 Target Database : $DB_NAME"
-echo " 📂 Output Mesh     : $MESH_NAME"
+echo " 🌐 Real-to-Sim End-to-End Pipeline Execution (Strict Barriers)"
+echo " 📂 Target Database : $TARGET_DB_PATH"
+echo " 📂 Output Mesh     : $TARGET_MESH_PATH"
 echo "=========================================================="
 
 # ---------------------------------------------------------
 # STEP 1: Real-Time Sensor Capture & Visual SLAM (RTAB-Map)
 # ---------------------------------------------------------
 if [ "$SKIP_CAPTURE" = true ]; then
-    echo "⏩ [STEP 1] --skip-capture 옵션 지정됨. 실시간 캡처를 건너뜁니다."
+    echo "⏩ [STEP 1] --skip-capture 옵션 지정됨. 실시간 캡처를 건너끁니다."
 else
     echo ""
     echo "=========================================================="
@@ -62,7 +66,14 @@ else
     echo "=========================================================="
     
     "$PIPELINE_DIR/record.sh" "$DB_NAME" || true
-    echo "✅ [STEP 1 완료] RTAB-Map DB 저장 완료 -> $DB_DIR/$DB_NAME"
+fi
+
+# 🛡️ BARRIER 1: DB File Integrity Check
+echo ""
+echo "🛡️ [GATEWAY 1] RTAB-Map DB 파일 무결성 및 구조 검증..."
+if ! python3 "$PROJECT_DIR/src/auto_mobility/processing/validate.py" --db "$TARGET_DB_PATH"; then
+    echo "❌ [파이프라인 차단] DB 무결성 검증 실패로 인해 이후 단계를 진행할 수 없습니다."
+    exit 1
 fi
 
 # ---------------------------------------------------------
@@ -75,28 +86,29 @@ echo "=========================================================="
 
 "$PIPELINE_DIR/mesh.sh" "$DB_NAME" "$MESH_NAME" --force
 
-GENERATED_MESH_PATH="$MESH_DIR/$MESH_NAME"
-if [ ! -f "$GENERATED_MESH_PATH" ]; then
-    echo "❌ 오류: Mesh 생성이 실패하였거나 파일이 없습니다 -> $GENERATED_MESH_PATH"
+# 🛡️ BARRIER 2: Mesh File Integrity Check
+echo ""
+echo "🛡️ [GATEWAY 2] 생성된 3D Mesh 무결성 검증..."
+if ! python3 "$PROJECT_DIR/src/auto_mobility/processing/validate.py" --mesh "$TARGET_MESH_PATH"; then
+    echo "❌ [파이프라인 차단] Mesh 무결성 검증 실패로 인해 Isaac Sim 로드가 중단됩니다."
     exit 1
 fi
-echo "✅ [STEP 2-1 완료] 3D Mesh 생성 완료 -> $GENERATED_MESH_PATH"
 
 # ---------------------------------------------------------
 # STEP 2-2: NVIDIA Isaac Sim Digital Twin Ingestion & Verification
 # ---------------------------------------------------------
 if [ "$SKIP_ISAAC" = true ]; then
-    echo "⏩ [STEP 2-2] --skip-isaac 옵션 지정됨. Isaac Sim 로더를 건너뜁니다."
+    echo "⏩ [STEP 2-2] --skip-isaac 옵션 지정됨. Isaac Sim 로더를 건너끁니다."
 else
     echo ""
     echo "=========================================================="
     echo " 🚀 [STEP 2-2] Isaac Sim 디지털 트윈 로드 및 물리 충돌 검증"
     echo "=========================================================="
 
-    "$PIPELINE_DIR/isaac.sh" "$GENERATED_MESH_PATH"
+    "$PIPELINE_DIR/isaac.sh" "$TARGET_MESH_PATH"
 fi
 
 echo ""
 echo "=========================================================="
-echo " 🎉 Real-to-Sim 전체 파이프라인 완료!"
+echo " 🎉 Real-to-Sim 전체 파이프라인 완료 및 무결성 검증 성공!"
 echo "=========================================================="
