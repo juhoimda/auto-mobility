@@ -9,58 +9,57 @@
 전체 시스템은 **센서 수집 ➔ 압축 통신 ➔ 실시간 복원 ➔ 3D SLAM & 3D Mesh 변환**의 4단계 파이프라인으로 구성되어 있습니다.
 
 ```mermaid
-graph TD
-    subgraph "1. Sensor Processing"
-        A["RealSense D435i Camera"]
-        A -->|"Hardware Alignment"| B["RGB Image<br/>640×480 @ 15 fps"]
-        A -->|"align_depth.enable:=True"| C["Aligned Depth Image<br/>640×480 @ 15 fps"]
-        A -->|"unite_imu_method:=1"| D["IMU Data (Accel + Gyro)"]
+graph LR
+
+    subgraph S["1. Sensor Processing"]
+        A["RealSense D435i"]
+        A --> B["RGB"]
+        A --> C["Aligned Depth"]
+        A --> D["IMU"]
         A --> E["Camera Info"]
     end
 
-    subgraph "2. Camera Driver Node (realsense2_camera)"
-        B --> F["/camera/camera/color/image_raw"]
-        B --> F2["/camera/camera/color/image_raw/compressed"]
+    subgraph C1["2. Camera Driver Node (realsense2_camera)"]
+        B --> F["RGB image_raw"]
+        C --> G["Depth image_raw"]
 
-        C --> G["/camera/camera/aligned_depth_to_color/image_raw"]
-        C --> G2["/camera/camera/aligned_depth_to_color/image_raw/compressedDepth"]
+        D --> H["IMU"]
+        E --> I["Camera Info"]
 
-        D --> H["/camera/camera/imu"]
-        E --> I["/camera/camera/color/camera_info"]
+        B --> F2["RGB compressed"]
+        C --> G2["Depth compressed"]
     end
 
-    subgraph "3. Online Mapping"
-        F --> J["RTAB-Map (rgbd_odometry)"]
+    subgraph P1["Option 1 : Online Mapping"]
+        F --> J["RTAB-Map"]
         G --> J
         H --> J
         I --> J
     end
 
-    subgraph "4. ROS 2 Bag Recording (MCAP)"
-        F2 --> K["ROS 2 Bag Recorder"]
+    subgraph P2["Option 2 : Offline Mapping"]
+        F2 --> K["ROS2 Bag (MCAP)"]
         G2 --> K
         H --> K
         I --> K
-    end
 
-    subgraph "5. Offline Replay"
-        K --> L["ROS 2 Bag Playback"]
+        K --> L["Playback"]
         L --> M["Image Decompression"]
-        M --> J2["RTAB-Map (rgbd_odometry)"]
+        M --> N["RTAB-Map"]
     end
 
-    subgraph "6. Mapping & Reconstruction"
-        J --> N["Camera Pose Estimation"]
-        J2 --> N
+    subgraph R["Mapping & Reconstruction"]
+        J --> X["Camera Pose"]
+        N --> X
 
-        J --> O["RTAB-Map Database (.db)"]
-        J2 --> O
+        J --> Y["RTAB-Map Database (.db)"]
+        N --> Y
 
-        J --> P["Dense Point Cloud (.ply)"]
-        J2 --> P
+        J --> Z["Dense Point Cloud (.ply)"]
+        N --> Z
 
-        P --> Q["Open3D Processing"]
-        Q --> R["Digital Twin Mesh (.obj)"]
+        Z --> O["Open3D"]
+        O --> P["Digital Twin Mesh (.obj)"]
     end
 ```
 
