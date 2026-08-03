@@ -70,16 +70,24 @@ def generate_launch_description():
             'imu_topic': '/camera/camera/imu/filtered',
             'subscribe_imu': LaunchConfiguration('use_imu'),
             'always_process_most_recent_frame': 'false', # false: 프레임을 최대한 순서대로 처리
+            
+            # QoS profile = [0: system default, 1: Reliable, 2: Best Effort]
             'qos_image': '2',
             'qos_depth': '2',
             'qos_camera_info': '2',
+            'qos_imu': '2',
+
             'frame_id': 'camera_link',
+
+            # Synchronization
             'approx_sync': 'true',
             'approx_sync_max_interval': '0.15',
             'topic_queue_size': '30',
+
             'visual_odometry': 'true',
             'rviz': 'true',
             'rtabmap_viz': 'false',
+            
             'database_path': LaunchConfiguration('database_path'),
             'rtabmap_args': '--Vis/MinInliers 10'
         }.items()
