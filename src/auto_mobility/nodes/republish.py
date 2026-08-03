@@ -63,6 +63,8 @@ class CompressedRepublisher(Node):
                 img_msg = self.bridge.cv2_to_imgmsg(rgb_img, encoding='rgb8')
                 img_msg.header = msg.header
                 self.pub_rgb.publish(img_msg)
+            else:
+                self.get_logger().warn('RGB imdecode returned None, skipping frame')
         except Exception as e:
             self.get_logger().error(f'RGB decode error: {e}')
 
