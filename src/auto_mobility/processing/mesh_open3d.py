@@ -62,36 +62,6 @@ def generate_mesh(input_ply, output_mesh, depth=8, voxel_size=0.01, view_result=
     o3d.io.write_triangle_mesh(output_mesh, mesh)
     print("Mesh generation complete!")
 
-    # Isaac Sim 바로 호환용 .usda Scene 파일 자동 생성
-    usd_output_path = os.path.splitext(output_mesh)[0] + ".usd"
-    obj_filename = os.path.basename(output_mesh)
-    
-    usda_content = f"""#usda 1.0
-(
-    defaultPrim = "World"
-    metersPerUnit = 1.0
-    upAxis = "Z"
-)
-
-def Xform "World"
-{{
-    def "DigitalTwinMesh" (
-        references = @./{obj_filename}@
-        apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI"]
-    )
-    {{
-        uniform token physics:approximation = "triangleMesh"
-        bool physics:collisionEnabled = 1
-    }}
-}}
-"""
-    try:
-        with open(usd_output_path, "w") as f:
-            f.write(usda_content)
-        print(f"✨ Isaac Sim Direct-Ready USD Generated: {usd_output_path}")
-    except Exception as e:
-        print(f"⚠️ USD Scene 파일 생성 실패: {e}")
-
     if view_result:
         print("Opening interactive 3D Mesh Viewer (Close window to exit)...")
         o3d.visualization.draw_geometries(
@@ -128,3 +98,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

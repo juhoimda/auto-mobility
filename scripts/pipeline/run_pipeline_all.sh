@@ -117,17 +117,12 @@ else
     "$PIPELINE_DIR/isaac.sh" "$TARGET_MESH_PATH"
 fi
 
-TARGET_USD_PATH="${TARGET_MESH_PATH%.obj}.usd"
-
-# 📂 VMware 공유 폴더(/mnt/hgfs/ubuntu_shared)로 자동 복사
+# 📂 VMware 공유 폴더(/mnt/hgfs/ubuntu_shared)로 Mesh 자동 복사
 SHARED_TARGET="/mnt/hgfs/ubuntu_shared"
 COPIED_TO_SHARED=false
 
 if [ -d "$SHARED_TARGET" ] || mkdir -p "$SHARED_TARGET" 2>/dev/null; then
     cp "$TARGET_MESH_PATH" "$SHARED_TARGET/" 2>/dev/null || true
-    if [ -f "$TARGET_USD_PATH" ]; then
-        cp "$TARGET_USD_PATH" "$SHARED_TARGET/" 2>/dev/null || true
-    fi
     COPIED_TO_SHARED=true
 fi
 
@@ -135,13 +130,13 @@ echo ""
 echo "=========================================================="
 echo " 🎉 Real-to-Sim 파이프라인 완료!"
 echo " 📁 생성된 Mesh (.obj): $TARGET_MESH_PATH"
-echo " 🚀 Isaac Sim Scene (.usd): $TARGET_USD_PATH"
+
 if [ "$COPIED_TO_SHARED" = true ]; then
     echo " 📂 공유 폴더 복사 완료 : $SHARED_TARGET/"
 fi
+
 echo "=========================================================="
 echo "💡 [Windows Isaac Sim 사용 방법]"
-echo "   Windows 공유 폴더 (ubuntu_shared) 안에 있는"
-echo "   '${MESH_NAME%.obj}.usd' 파일을 윈도우 Isaac Sim GUI 화면으로"
-echo "   드래그 앤 드롭(Drag & Drop)하면 즉시 디지털 트윈 시뮬레이션이 실행됩니다."
+echo "   Windows 공유 폴더 (ubuntu_shared) 안의"
+echo "   '${MESH_NAME}' 파일을 Isaac Sim에서 Import하면 됩니다."
 echo "=========================================================="
