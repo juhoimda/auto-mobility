@@ -32,8 +32,9 @@ DDS 설정, USB 모드, 실시간 압축/Raw 토픽 수신 상태 및 용량을 
 # [단독 실행] RealSense D435i 카메라 노드 실행
 ros2 launch auto_mobility camera.launch.py
 
-# [라이브 SLAM] 실시간 카메라 스트림 맵핑 및 DB 저장 (기본값: live_날짜시각.db)
-./scripts/pipeline/run_live.sh [DB_NAME]
+# [라이브 SLAM] 실시간 카메라 스트림 맵핑 및 DB 저장 (기본값: live_날짜시각.db, USE_COMPRESSED: false)
+./scripts/pipeline/run_live.sh [DB_NAME] [USE_COMPRESSED]
+
 ```
 
 ---
