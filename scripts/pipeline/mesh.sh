@@ -102,20 +102,15 @@ else
     python3 "$PROJECT_DIR/src/auto_mobility/processing/mesh_open3d.py" "$PLY_PATH" "$MESH_PATH" $VIEW_FLAG
 fi
 
-USD_PATH="${MESH_PATH%.obj}.usd"
 SHARED_TARGET="/mnt/hgfs/ubuntu_shared"
 
 if [ -d "$SHARED_TARGET" ] || mkdir -p "$SHARED_TARGET" 2>/dev/null; then
     cp "$MESH_PATH" "$SHARED_TARGET/" 2>/dev/null || true
-    if [ -f "$USD_PATH" ]; then
-        cp "$USD_PATH" "$SHARED_TARGET/" 2>/dev/null || true
-    fi
 fi
 
 echo "=========================================================="
 echo " 🎉 3D Mesh 생성이 완료되었습니다!"
 echo " 📍 결과물 위치 : $MESH_PATH"
-echo " 🚀 Isaac Sim Scene: $USD_PATH"
 if [ -d "$SHARED_TARGET" ]; then
     echo " 📂 공유 폴더 복사: $SHARED_TARGET/"
 fi
