@@ -14,6 +14,7 @@ POINTCLOUD_DIR="$DATA_DIR/pointclouds"
 MESH_DIR="$DATA_DIR/meshes"
 ISAAC_DIR="$DATA_DIR/isaac_sim"
 LOG_DIR="$DATA_DIR/logs"
+SHARED_DIR="/mnt/hgfs/ubuntu_shared"
 
 RAM_BAG_DIR="/dev/shm/ros2_bags"
 STORAGE_FORMAT="mcap"
