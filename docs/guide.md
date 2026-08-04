@@ -56,13 +56,16 @@ ros2 launch auto_mobility camera.launch.py
 
 ---
 
-## 🧊 4. 3D Mesh 복원 (Mesh Generation)
+## 🧊 4. 3D Mesh 복원 및 검증 (Mesh Generation & Validation)
 
-SLAM 결과인 `.db` 파일에서 Point Cloud를 추출하고 Open3D 3D Mesh(`*.obj`)를 복원합니다.
+SLAM 결과인 `.db` 파일에서 Point Cloud를 추출하고 무결성 검증을 거쳐 Open3D 3D Mesh(`*.obj`)를 복원합니다.
 
 ```bash
-# [자동 생성 & 시각화] Open3D Poisson Reconstruction 및 3D 뷰어 실행
+# [기본] DB -> PLY 추출 -> 무결성 자동 검증 -> Open3D Poisson Reconstruction & 시각화
 ./scripts/pipeline/mesh.sh [DB_NAME] [OUTPUT_MESH_NAME] --view
+
+# [옵션] 검증 경고 무시하고 강제 생성
+./scripts/pipeline/mesh.sh [DB_NAME] [OUTPUT_MESH_NAME] --force
 
 # [옵션] RTAB-Map 텍스처 맵핑 방식 사용 시
 ./scripts/pipeline/mesh.sh [DB_NAME] [OUTPUT_MESH_NAME] --method rtabmap
@@ -73,16 +76,56 @@ SLAM 결과인 `.db` 파일에서 Point Cloud를 추출하고 Open3D 3D Mesh(`*.
 # 1) DB -> PointCloud (.ply) 추출
 ./scripts/utils/export_ply.sh my_room.db my_cloud.ply
 
-# 2) PointCloud 품질 및 무결성 자동 검증
+# 2) PointCloud 및 Mesh 품질/무결성 자동 검증
 python3 src/auto_mobility/processing/validate.py --db ./ros2_data/databases/my_room.db --ply ./ros2_data/pointclouds/my_cloud.ply
+python3 src/auto_mobility/processing/validate.py --mesh ./ros2_data/meshes/my_room_mesh.obj
 
 # 3) Open3D 3D Mesh 복원
 python3 src/auto_mobility/processing/mesh_open3d.py ./ros2_data/pointclouds/my_cloud.ply ./ros2_data/meshes/my_mesh.obj --view
+
+# 4) 생성된 3D Mesh (.obj / .ply) 뷰어 단독 실행
+./scripts/utils/view_mesh.sh my_room_mesh.obj
+# 또는
+python3 src/auto_mobility/processing/view_mesh.py ./ros2_data/meshes/my_room_mesh.obj --wireframe
 ```
 
 ---
 
-## ⚡ 5. 하드웨어 자동 벤치마크 (Hardware Benchmark)
+## 🤖 5. NVIDIA Isaac Sim 디지털 트윈 로드 (Isaac Sim Ingestion)
+
+생성된 3D Mesh(`*.obj`)를 Isaac Sim 시뮬레이션 환경에 로드하고 물리 충돌 mesh(Triangle Mesh Collider)를 적용하여 검증합니다.
+
+```bash
+# [기본] Linux/Isaac Sim 통합 환경 실행
+./scripts/pipeline/isaac.sh [MESH_NAME_OR_PATH]
+
+# [VMware (Linux) ↔ Host Windows 이원화 환경 시]
+# Host Windows (PowerShell/CMD)에서 실행:
+.\scripts\pipeline\isaac_win.bat [MESH_NAME]
+```
+
+> 💡 **참고**: VMware 가상머신에서 실행 시 `isaac.sh`가 환경을 자동 감지하여 Host Windows에서 즉시 복사해 실행할 수 있는 `isaac_win.bat` 명령어를 뷰어로 안내합니다.
+
+---
+
+## 🔄 6. End-to-End Real-to-Sim 원스톱 파이프라인 (Full Pipeline)
+
+센서 데이터 수집부터 3D Mesh 복원, 무결성 검증 차단막(Integrity Barriers), Isaac Sim 디지털 트윈 Ingestion까지 전 과정을 한번에 실행합니다.
+
+```bash
+# [전체 파이프라인] 실시간 캡처 -> DB 검증 -> Open3D Mesh 복원 -> Mesh 검증 -> Isaac Sim 로드
+./scripts/pipeline/run_pipeline_all.sh
+
+# [기존 DB 사용] 캡처 단계 skip
+./scripts/pipeline/run_pipeline_all.sh --db=my_room.db --skip-capture
+
+# [Isaac Sim 생략] Mesh 생성까지만 실행
+./scripts/pipeline/run_pipeline_all.sh --db=my_room.db --skip-isaac
+```
+
+---
+
+## ⚡ 7. 하드웨어 자동 벤치마크 (Hardware Benchmark)
 
 현재 하드웨어 환경에서 최적의 DDS/QoS/해상도 조합을 측정하고 보고서를 생성합니다.
 
