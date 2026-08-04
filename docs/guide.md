@@ -93,18 +93,16 @@ python3 src/auto_mobility/processing/view_mesh.py ./ros2_data/meshes/my_room_mes
 
 ## 🤖 5. NVIDIA Isaac Sim 디지털 트윈 로드 (Isaac Sim Ingestion)
 
-생성된 3D Mesh(`*.obj`)를 Isaac Sim 시뮬레이션 환경에 로드하고 물리 충돌 mesh(Triangle Mesh Collider)를 적용하여 검증합니다.
+생성된 3D Mesh(`*.obj`) 및 Isaac Sim 전용 Scene (`*.usd`)을 시뮬레이션 환경에 로드합니다.
 
 ```bash
-# [기본] Linux/Isaac Sim 통합 환경 실행
+# [Linux/Isaac Sim 직접 실행]
 ./scripts/pipeline/isaac.sh [MESH_NAME_OR_PATH]
-
-# [VMware (Linux) ↔ Host Windows 이원화 환경 시]
-# Host Windows (PowerShell/CMD)에서 실행:
-.\scripts\pipeline\isaac_win.bat [MESH_NAME]
 ```
 
-> 💡 **참고**: VMware 가상머신에서 실행 시 `isaac.sh`가 환경을 자동 감지하여 Host Windows에서 즉시 복사해 실행할 수 있는 `isaac_win.bat` 명령어를 뷰어로 안내합니다.
+> 💡 **참고 (VMware ↔ Windows 이원화 환경)**:  
+> VMware에서 파이프라인 구동 시 `.obj`와 함께 **`.usd` 파일이 자동 생성**됩니다.  
+> 윈도우의 Isaac Sim GUI 화면으로 해당 `.usd` 파일(또는 공유폴더 파일)을 **드래그 앤 드롭(Drag & Drop)** 하면 즉시 물리 속성이 포함되어 구동되며, 윈도우 스크립트는 불필요합니다.
 
 ---
 

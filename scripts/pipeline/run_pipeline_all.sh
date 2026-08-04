@@ -117,7 +117,15 @@ else
     "$PIPELINE_DIR/isaac.sh" "$TARGET_MESH_PATH"
 fi
 
+TARGET_USD_PATH="${TARGET_MESH_PATH%.obj}.usd"
+
 echo ""
 echo "=========================================================="
-echo " 🎉 Real-to-Sim 전체 파이프라인 완료 및 무결성 검증 성공!"
+echo " 🎉 Real-to-Sim 파이프라인 완료!"
+echo " 📁 생성된 Mesh (.obj): $TARGET_MESH_PATH"
+echo " 🚀 Isaac Sim Scene (.usd): $TARGET_USD_PATH"
+echo "=========================================================="
+echo "💡 [Windows Isaac Sim 사용 방법]"
+echo "   공유 폴더에 있는 '$MESH_NAME' 및 '${MESH_NAME%.obj}.usd' 파일을"
+echo "   Windows의 Isaac Sim GUI 화면으로 드래그앤드롭(Drag & Drop)하면 즉시 구동됩니다."
 echo "=========================================================="

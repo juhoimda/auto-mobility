@@ -68,13 +68,14 @@ if [ -n "$ISAAC_PYTHON" ]; then
     "$ISAAC_PYTHON" "$LOADER_SCRIPT" "$MESH_FILE" "$@"
 else
     if [ "$IS_VMWARE" = true ]; then
+        USD_FILE="${MESH_FILE%.obj}.usd"
         echo "=========================================================="
-        echo " ⚠️ [VMware 가상머신 환경 감지]"
-        echo " 게스트 Linux 내부에 Isaac Sim이 설치되어 있지 않거나 GPU 지원이 제한됩니다."
-        echo " 📁 Mesh 파일 준비 완료: $MESH_FILE"
+        echo " 💡 [VMware 가상머신 환경 안내]"
+        echo " 📁 Mesh (.obj) 및 Isaac Sim Ready Scene (.usd) 파일 생성 완료!"
+        echo " 🚀 USD 파일: $USD_FILE"
         echo ""
-        echo " 👉 Host Windows (PowerShell/CMD)에서 아래 명령어로 Isaac Sim을 실행하세요:"
-        echo "    .\\scripts\\pipeline\\isaac_win.bat $(basename "$MESH_FILE")"
+        echo " 👉 Windows의 Isaac Sim GUI 화면으로 '$USD_FILE' 파일(또는 공유폴더 경로)을"
+        echo "    드래그 앤 드롭(Drag & Drop)하면 즉시 디지털 트윈 시뮬레이션이 실행됩니다."
         echo "=========================================================="
         exit 0
     fi
