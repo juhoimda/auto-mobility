@@ -54,18 +54,42 @@ echo " 📂 Output Mesh     : $TARGET_MESH_PATH"
 echo "=========================================================="
 
 # ---------------------------------------------------------
-# STEP 1: Real-Time Sensor Capture & Visual SLAM (RTAB-Map)
+# STEP 1: Real-Time Camera Stream & Visual SLAM (No Bag Recording)
 # ---------------------------------------------------------
 if [ "$SKIP_CAPTURE" = true ]; then
     echo "⏩ [STEP 1] --skip-capture 옵션 지정됨. 실시간 캡처를 건너끁니다."
 else
     echo ""
     echo "=========================================================="
-    echo " 🎥 [STEP 1] RealSense & RTAB-Map SLAM 실시간 스캔 시작"
+    echo " 🎥 [STEP 1] RealSense 카메라 실행 & RTAB-Map SLAM 실시간 데이터 수집"
     echo " 💡 촬영을 마치려면 터미널에서 Ctrl+C 를 누르세요."
     echo "=========================================================="
     
-    "$PIPELINE_DIR/record.sh" "$DB_NAME" || true
+    # 1. 백그라운드에서 RealSense 카메라 노드 구동
+    echo "📸 RealSense D435i 카메라 노드 구동 중..."
+    ros2 launch auto_mobility camera.launch.py > /dev/null 2>&1 &
+    CAM_PID=$!
+    
+    # 카메라 및 센서 토픽 준비 대기
+    sleep 3
+    
+    # 프로세스 종료 시 카메라 노드도 함께 종료되도록 Cleanup 설정
+    cleanup_step1() {
+        if [ -n "$CAM_PID" ] && kill -0 "$CAM_PID" 2>/dev/null; then
+            echo ""
+            echo "🛑 RealSense 카메라 노드 종료 중 (PID: $CAM_PID)..."
+            kill -INT "$CAM_PID" 2>/dev/null || true
+            wait "$CAM_PID" 2>/dev/null || true
+        fi
+    }
+    trap cleanup_step1 EXIT INT TERM
+
+    # 2. RTAB-Map Visual SLAM 실시간 수집 시작 (포그라운드 실행)
+    ros2 launch auto_mobility rtab_live.launch.py database_path:="$TARGET_DB_PATH" || true
+    
+    # SLAM 종료 후 카메라 정리
+    cleanup_step1
+    trap - EXIT INT TERM
 fi
 
 # 🛡️ BARRIER 1: DB File Integrity Check
