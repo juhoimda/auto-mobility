@@ -57,10 +57,27 @@ for search_path in "${ISAAC_SEARCH_PATHS[@]}"; do
     fi
 done
 
+# VMware 가상머신 환경 감지
+IS_VMWARE=false
+if grep -qi "vmware" /proc/version 2>/dev/null || systemd-detect-virt 2>/dev/null | grep -qi "vmware"; then
+    IS_VMWARE=true
+fi
+
 if [ -n "$ISAAC_PYTHON" ]; then
     echo "🔍 Isaac Sim Bundled Python Found: $ISAAC_PYTHON"
     "$ISAAC_PYTHON" "$LOADER_SCRIPT" "$MESH_FILE" "$@"
 else
+    if [ "$IS_VMWARE" = true ]; then
+        echo "=========================================================="
+        echo " ⚠️ [VMware 가상머신 환경 감지]"
+        echo " 게스트 Linux 내부에 Isaac Sim이 설치되어 있지 않거나 GPU 지원이 제한됩니다."
+        echo " 📁 Mesh 파일 준비 완료: $MESH_FILE"
+        echo ""
+        echo " 👉 Host Windows (PowerShell/CMD)에서 아래 명령어로 Isaac Sim을 실행하세요:"
+        echo "    .\\scripts\\pipeline\\isaac_win.bat $(basename "$MESH_FILE")"
+        echo "=========================================================="
+        exit 0
+    fi
     echo "⚠️ Isaac Sim 패키지 경로를 자동으로 찾지 못했습니다. 시스템 기본 python3로 시도합니다."
     python3 "$LOADER_SCRIPT" "$MESH_FILE" "$@"
 fi

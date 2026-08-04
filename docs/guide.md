@@ -96,15 +96,15 @@ python3 src/auto_mobility/processing/view_mesh.py ./ros2_data/meshes/my_room_mes
 생성된 3D Mesh(`*.obj`)를 Isaac Sim 시뮬레이션 환경에 로드하고 물리 충돌 mesh(Triangle Mesh Collider)를 적용하여 검증합니다.
 
 ```bash
-# [기본] Isaac Sim 시각화 뷰어와 함께 Mesh 로드 및 물리 검증
+# [기본] Linux/Isaac Sim 통합 환경 실행
 ./scripts/pipeline/isaac.sh [MESH_NAME_OR_PATH]
 
-# [옵션] scale 지정 및 헤드리스(GUI 없음) 실행
-./scripts/pipeline/isaac.sh my_room_mesh.obj --scale 1.0 --headless
-
-# [옵션] 파이프라인 수동 스크립트 실행
-python3 src/auto_mobility/processing/load_isaac_mesh.py ./ros2_data/meshes/my_room_mesh.obj --scale 1.0
+# [VMware (Linux) ↔ Host Windows 이원화 환경 시]
+# Host Windows (PowerShell/CMD)에서 실행:
+.\scripts\pipeline\isaac_win.bat [MESH_NAME]
 ```
+
+> 💡 **참고**: VMware 가상머신에서 실행 시 `isaac.sh`가 환경을 자동 감지하여 Host Windows에서 즉시 복사해 실행할 수 있는 `isaac_win.bat` 명령어를 뷰어로 안내합니다.
 
 ---
 
