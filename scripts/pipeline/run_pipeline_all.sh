@@ -117,8 +117,6 @@ else
     "$PIPELINE_DIR/isaac.sh" "$TARGET_MESH_PATH"
 fi
 
-TARGET_USD_PATH="${TARGET_MESH_PATH%.obj}.usd"
-
 # 📂 VMware 공유 폴더(/mnt/hgfs/ubuntu_shared)로 자동 복사
 SHARED_TARGET="/mnt/hgfs/ubuntu_shared"
 COPIED_TO_SHARED=false
