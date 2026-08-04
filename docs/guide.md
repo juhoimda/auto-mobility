@@ -82,6 +82,11 @@ python3 src/auto_mobility/processing/validate.py --mesh ./ros2_data/meshes/my_ro
 
 # 3) Open3D 3D Mesh 복원
 python3 src/auto_mobility/processing/mesh_open3d.py ./ros2_data/pointclouds/my_cloud.ply ./ros2_data/meshes/my_mesh.obj --view
+
+# 4) 생성된 3D Mesh (.obj / .ply) 뷰어 단독 실행
+./scripts/utils/view_mesh.sh my_room_mesh.obj
+# 또는
+python3 src/auto_mobility/processing/view_mesh.py ./ros2_data/meshes/my_room_mesh.obj --wireframe
 ```
 
 ---
