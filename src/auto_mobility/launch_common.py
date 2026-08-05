@@ -13,9 +13,9 @@ RTABMAP_ARGS = (
     '--Vis/InlierDistance 1.0 '
     # [2] 잘못된 guess(IMU yaw 드리프트) 의존 제거 (IMU 구독/사용은 유지)
     '--Odom/PoseGuessMode 0 '
-    # [3] 추적 끊김 자동 복구
+    # [3] 추적 끊김 자동 복구 (Rtabmap/ResetCountdown 0: 지도 전체 리셋 금지, 세션 유지)
     '--Odom/ResetCountdown 2 '
-    '--Rtabmap/ResetCountdown 1 '
+    '--Rtabmap/ResetCountdown 0 '
     '--RGBD/CreateIntermediateNodes true '
     '--RGBD/ProximityBySpace true '
     '--RGBD/OptimizeFromGraphEnd true '

@@ -123,7 +123,9 @@ auto-mobility/                         # [패키지 루트]
 
 ---
 
-### 🗺️ 3D Visual SLAM 파라미터 최적화 (`rtab_bag.launch.py`)
+### 🗺️ 3D Visual SLAM 파라미터 최적화 (`src/auto_mobility/launch_common.py`)
+
+> **단일 소스 관리**: `rtab_live` / `rtab_bag` launch는 `RTABMAP_ARGS`를 공유합니다. 튜닝은 `launch_common.py` 한 곳에서만 수행하면 양쪽에 동일하게 적용됩니다.
 
 * **시간 동기화 허용 오차 (`approx_sync_max_interval`)**: `0.15` (150ms)
   * 프레임 간 타임스탬프 미세 오차 수용 및 동기화 무한 대기 방지.
@@ -131,8 +133,14 @@ auto-mobility/                         # [패키지 루트]
   * 대용량 파이프라인 처리 중 프레임 유실(Drop) 방지.
 * **프레임 버림 방지 (`always_process_most_recent_frame`)**: `false`
   * 모든 프레임을 순차적으로 처리하여 연속적인 특징점 추적 유지.
-* **오도메트리 복구 파라미터 (`Vis/MinInliers`)**: `10`
-  * 최소 필요 특징점 수 기준을 완화하여 위치 추적 끊김 예방.
+* **특징점 검출 강화** (`Vis/MaxFeatures 1500`, `Vis/CornerMinQuality 0.01`, `Vis/CornerGridSize 20`, `Vis/MinDepth 0.3`, `Vis/MaxDepth 8.0`, `Vis/MinInliers 10`)
+  * 흰 벽/복도 등 텍스처 부재 환경에서 특징점 검출 실패(`fromWords=0`)로 인한 오도메트리 끊김 방지.
+* **매칭 추정 분리** (`Odom/PoseGuessMode 0`)
+  * IMU 구독/사용은 유지하되, 매칭 초기 추정을 드리프트된 IMU yaw에 의존하지 않도록 분리.
+* **추적 끊김 자동 복구** (`Odom/ResetCountdown 2`, `Rtabmap/ResetCountdown 0`, `RGBD/CreateIntermediateNodes`, `RGBD/ProximityBySpace`, `RGBD/OptimizeFromGraphEnd`)
+  * 추적 손실 시 빠른 재시도. `Rtabmap/ResetCountdown 0`은 지도 전체 리셋을 비활성화하여 벽 구간 통과 시 세션을 유지합니다.
+* **키프레임 전략** (`Mem/STMSize 20`, `RGBD/LinearUpdate 0.2`, `RGBD/AngularUpdate 0.2`)
+  * 드리프트 축적 완화 및 정지 상태에서의 불필요한 키프레임 생성 방지.
 
 ---
 
