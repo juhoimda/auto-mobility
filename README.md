@@ -133,13 +133,17 @@ auto-mobility/                         # [패키지 루트]
   * 대용량 파이프라인 처리 중 프레임 유실(Drop) 방지.
 * **프레임 버림 방지 (`always_process_most_recent_frame`)**: `false`
   * 모든 프레임을 순차적으로 처리하여 연속적인 특징점 추적 유지.
-* **특징점 검출 강화** (`Vis/MaxFeatures 1500`, `Vis/CornerMinQuality 0.01`, `Vis/CornerGridSize 20`, `Vis/MinDepth 0.3`, `Vis/MaxDepth 8.0`, `Vis/MinInliers 10`)
+* **특징점 검출 강화** (`Vis/MaxFeatures 1000`, `Vis/CornerMinQuality 0.02`, `Vis/CornerGridSize 30`, `Vis/MinDepth 0.3`, `Vis/MaxDepth 8.0`, `Vis/MinInliers 10`)
   * 흰 벽/복도 등 텍스처 부재 환경에서 특징점 검출 실패(`fromWords=0`)로 인한 오도메트리 끊김 방지.
+* **병렬 검출 및 매칭 부하 축소** (`Vis/CornerNbThreads 8`, `OdomF2M/MaxFrames 5`)
+  * 특징점 검출을 VM vCPU 수(8)로 병렬화하고 F2M 로컬맵 크기를 절반으로 줄여 처리 속도 확보.
 * **매칭 추정 분리** (`Odom/PoseGuessMode 0`)
   * IMU 구독/사용은 유지하되, 매칭 초기 추정을 드리프트된 IMU yaw에 의존하지 않도록 분리.
 * **추적 끊김 자동 복구** (`Odom/ResetCountdown 2`, `Rtabmap/ResetCountdown 0`, `RGBD/CreateIntermediateNodes`, `RGBD/ProximityBySpace`, `RGBD/OptimizeFromGraphEnd`)
   * 추적 손실 시 빠른 재시도. `Rtabmap/ResetCountdown 0`은 지도 전체 리셋을 비활성화하여 벽 구간 통과 시 세션을 유지합니다.
-* **키프레임 전략** (`Mem/STMSize 20`, `RGBD/LinearUpdate 0.2`, `RGBD/AngularUpdate 0.2`)
+* **CPU 분산** (`Rtabmap/DetectionRate 5`, `Mem/STMSize 10`)
+  * 맵핑 루프를 5Hz로 제한해 odometry에 CPU를 양보하고, 루프클로저 후보 수를 줄여 전체 부하를 낮춥니다.
+* **키프레임 전략** (`RGBD/LinearUpdate 0.2`, `RGBD/AngularUpdate 0.2`)
   * 드리프트 축적 완화 및 정지 상태에서의 불필요한 키프레임 생성 방지.
 
 ---
