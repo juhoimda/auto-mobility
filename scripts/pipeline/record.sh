@@ -57,12 +57,26 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# 3. 녹화 토픽 설정
+# 3. 녹화 토픽 설정 (동적 Depth 토픽 감지)
+DETECTED_DEPTH=""
+DETECTED_DEPTH_COMPRESSED=""
+
+if ros2 topic list | grep -qx "/camera/camera/depth/image_rect_raw"; then
+    DETECTED_DEPTH="/camera/camera/depth/image_rect_raw"
+    DETECTED_DEPTH_COMPRESSED="/camera/camera/depth/image_rect_raw/compressedDepth"
+elif ros2 topic list | grep -qx "/camera/camera/aligned_depth_to_color/image_raw"; then
+    DETECTED_DEPTH="/camera/camera/aligned_depth_to_color/image_raw"
+    DETECTED_DEPTH_COMPRESSED="/camera/camera/aligned_depth_to_color/image_raw/compressedDepth"
+else
+    DETECTED_DEPTH="$DEPTH_TOPIC"
+    DETECTED_DEPTH_COMPRESSED="$DEPTH_COMPRESSED_TOPIC"
+fi
+
 RECORD_TOPICS=()
 if [ "$FORCE_RAW" = true ]; then
     RECORD_TOPICS=(
         "$RGB_TOPIC"
-        "$DEPTH_TOPIC"
+        "$DETECTED_DEPTH"
         "$CAMERA_INFO_TOPIC"
         "$IMU_TOPIC"
         /tf_static
@@ -70,7 +84,7 @@ if [ "$FORCE_RAW" = true ]; then
 else
     RECORD_TOPICS=(
         "$RGB_COMPRESSED_TOPIC"
-        "$DEPTH_COMPRESSED_TOPIC"
+        "$DETECTED_DEPTH_COMPRESSED"
         "$CAMERA_INFO_TOPIC"
         "$IMU_TOPIC"
         /tf_static

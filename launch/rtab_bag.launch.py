@@ -31,8 +31,14 @@ def generate_launch_description():
 
     depth_compressed_topic_arg = DeclareLaunchArgument(
         'depth_compressed_topic',
-        default_value='/camera/camera/aligned_depth_to_color/image_raw/compressedDepth',
+        default_value='/camera/camera/depth/image_rect_raw/compressedDepth',
         description='Name of compressed depth topic in bag'
+    )
+
+    depth_topic_arg = DeclareLaunchArgument(
+        'depth_topic',
+        default_value='/camera/camera/depth/image_rect_raw',
+        description='Name of raw depth topic'
     )
 
     # 1. RGB & Depth 압축 해제 노드 (Best Effort QoS 지원 및 C++ plugin 오류 해결)
@@ -73,7 +79,7 @@ def generate_launch_description():
         ),
         launch_arguments={
             'rgb_topic': '/camera/camera/color/image_raw',
-            'depth_topic': '/camera/camera/aligned_depth_to_color/image_raw',
+            'depth_topic': LaunchConfiguration('depth_topic'),
             'camera_info_topic': '/camera/camera/color/camera_info',
             'imu_topic': '/camera/camera/imu/filtered',
             'subscribe_imu': LaunchConfiguration('use_imu'),
@@ -112,6 +118,7 @@ def generate_launch_description():
         database_path_arg,
         use_compressed_arg,
         depth_compressed_topic_arg,
+        depth_topic_arg,
         use_imu_arg,
         republish_compressed_node,
         imu_filter_node,

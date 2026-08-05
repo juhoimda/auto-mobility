@@ -29,6 +29,12 @@ def generate_launch_description():
         description='Whether to use IMU (requires imu_filter_madgwick to compute orientation)'
     )
 
+    depth_topic_arg = DeclareLaunchArgument(
+        'depth_topic',
+        default_value='/camera/camera/depth/image_rect_raw',
+        description='Depth topic name (e.g. /camera/camera/depth/image_rect_raw or /camera/camera/aligned_depth_to_color/image_raw)'
+    )
+
     # 1. RGB & Depth 압축 해제 노드 (Best Effort QoS 지원, Depth 비손실 16UC1 복원)
     republish_compressed_node = Node(
         package='auto_mobility',
@@ -66,7 +72,7 @@ def generate_launch_description():
         ),
         launch_arguments={
             'rgb_topic': '/camera/camera/color/image_raw',
-            'depth_topic': '/camera/camera/aligned_depth_to_color/image_raw',
+            'depth_topic': LaunchConfiguration('depth_topic'),
             'camera_info_topic': '/camera/camera/color/camera_info',
             'imu_topic': '/camera/camera/imu/filtered',
             'subscribe_imu': LaunchConfiguration('use_imu'),
@@ -98,6 +104,7 @@ def generate_launch_description():
         database_path_arg,
         use_compressed_arg,
         use_imu_arg,
+        depth_topic_arg,
         republish_compressed_node,
         imu_filter_node,
         rtabmap_launch
