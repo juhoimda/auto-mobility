@@ -240,10 +240,13 @@ def run_camera_test(rmw, use_shm, res_w, res_h, fps, qos,
         "-p", "align_depth.enable:=true",
         "-p", "enable_accel:=true",
         "-p", "enable_gyro:=true",
-        "-p", "unite_imu_method:=1",
+        "-p", "unite_imu_method:=copy",
         "-p", "rgb_camera.auto_exposure_priority:=false",
         "-p", f"rgb_qos:={qos}",
+        "-p", f"color_qos:={qos}",
         "-p", f"depth_qos:={qos}",
+        "-p", f"depth_info_qos:={qos}",
+        "-p", f"color_info_qos:={qos}",
         "-r", "__ns:=/camera",
         "-r", "__node:=camera",
     ]
@@ -254,7 +257,7 @@ def run_camera_test(rmw, use_shm, res_w, res_h, fps, qos,
     proc = subprocess.Popen(cmd, env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             preexec_fn=os.setsid)
-    time.sleep(3.5)  # 노드 초기화 대기
+    time.sleep(6.0)  # 노드 및 IMU HID 센서 초기화 충분히 대기
 
     # image_raw + aligned_depth 동시 측정
     hz_map = measure_hz_multi(
@@ -264,7 +267,7 @@ def run_camera_test(rmw, use_shm, res_w, res_h, fps, qos,
     cpu = measure_cpu_of("realsense2_camera", samples=4, interval=sample_duration / 4)
 
     kill_pgroup(proc)
-    time.sleep(1.5)
+    time.sleep(4.0)  # USB 드라이버 HID/V4L2 센서 안전 릴리즈 쿨다운
 
     color_hz = hz_map.get(TOPIC_COLOR, 0.0)
     depth_hz = hz_map.get(TOPIC_DEPTH, 0.0)
@@ -480,7 +483,7 @@ def run_slam_test(camera_config: dict, slam_config: dict,
         "-p", "align_depth.enable:=true",
         "-p", "enable_accel:=true",
         "-p", "enable_gyro:=true",
-        "-p", "unite_imu_method:=1",
+        "-p", "unite_imu_method:=copy",
         "-p", "rgb_camera.auto_exposure_priority:=false",
         "-p", f"rgb_qos:={qos}",
         "-p", f"depth_qos:={qos}",
@@ -642,7 +645,7 @@ def run_stage3(stage1_result: dict, stage2_result: dict, quick: bool) -> dict:
         "-p", "align_depth.enable:=true",
         "-p", "enable_accel:=true",
         "-p", "enable_gyro:=true",
-        "-p", "unite_imu_method:=1",
+        "-p", "unite_imu_method:=copy",
         "-p", "rgb_camera.auto_exposure_priority:=false",
         "-p", f"rgb_qos:={qos}",
         "-p", f"depth_qos:={qos}",

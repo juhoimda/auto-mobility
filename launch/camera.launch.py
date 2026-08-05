@@ -25,7 +25,7 @@ def generate_launch_description():
                 'enable_infra2': False,
                 'enable_accel': True,
                 'enable_gyro': True,
-                'unite_imu_method': 1,
+                'unite_imu_method': 'copy',
                 'rgb_camera.auto_exposure_priority': False,
                 'color_qos': 'SENSOR_DATA',
                 'color_info_qos': 'SENSOR_DATA',
