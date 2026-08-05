@@ -6,6 +6,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 from launch.conditions import IfCondition
+from auto_mobility.launch_common import RTABMAP_ARGS
 
 def generate_launch_description():
     rtabmap_launch_dir = get_package_share_directory('rtabmap_launch')
@@ -89,7 +90,7 @@ def generate_launch_description():
             'rtabmap_viz': 'false',
             
             'database_path': LaunchConfiguration('database_path'),
-            'rtabmap_args': '--Vis/MinInliers 10'
+            'rtabmap_args': RTABMAP_ARGS
         }.items()
     )
 
