@@ -58,3 +58,14 @@ ENV/
 *.log
 *.tmp
 *.temp
+
+# Coverage & Test reports
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.pytest_cache/
+
+# Database files
+*.db
+
