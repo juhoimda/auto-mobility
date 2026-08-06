@@ -1,0 +1,100 @@
+Panels:
+  - Class: rviz_common/Displays
+    Help Height: 78
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Status1
+        - /Image (Live RGB Camera)1
+        - /PointCloud2 (RTAB-Map 3D Map)1
+        - /TF1
+      Splitter Ratio: 0.5
+    Tree Height: 557
+  - Class: rviz_common/Selection
+    Name: Selection
+  - Class: rviz_common/Views
+    Name: Views
+    Expanded:
+      - /Current View1
+    Splitter Ratio: 0.5
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Value: true
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 20
+      Reference Frame: camera_link
+      Size: 1
+    - Class: rviz_default_plugins/Image
+      Name: Image (Live RGB Camera)
+      Value: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /camera/camera/color/image_raw
+    - Class: rviz_default_plugins/PointCloud2
+      Name: PointCloud2 (RTAB-Map 3D Map)
+      Value: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /voxel_cloud
+      Style: Points
+      Size (Pixels): 3
+      Color Transformer: RGB8
+      Selectable: true
+    - Class: rviz_default_plugins/PointCloud2
+      Name: PointCloud2 (Map Data Cloud)
+      Value: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /rtabmap/cloud_map
+      Style: Points
+      Size (Pixels): 2
+      Color Transformer: RGB8
+      Selectable: true
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Value: true
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: camera_link
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 3.5
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Name: Current
+      Pitch: 0.4
+      Value: Orbit (rviz)
+      Yaw: 0.8

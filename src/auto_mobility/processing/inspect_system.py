@@ -76,6 +76,7 @@ def inspect_topics_rclpy():
     topic_stats = {
         "/camera/camera/color/image_raw": {"count": 0, "res": "N/A", "encoding": "N/A", "frame_id": "N/A", "qos": "SENSOR_DATA"},
         "/camera/camera/color/image_raw/compressed": {"count": 0, "res": "N/A", "encoding": "jpeg", "frame_id": "N/A", "qos": "SENSOR_DATA"},
+        "/camera/camera/depth/image_rect_raw": {"count": 0, "res": "N/A", "encoding": "N/A", "frame_id": "N/A", "qos": "SENSOR_DATA"},
         "/camera/camera/aligned_depth_to_color/image_raw": {"count": 0, "res": "N/A", "encoding": "N/A", "frame_id": "N/A", "qos": "SENSOR_DATA"},
         "/camera/camera/aligned_depth_to_color/image_raw/compressedDepth": {"count": 0, "res": "N/A", "encoding": "compressedDepth (png)", "frame_id": "N/A", "qos": "SENSOR_DATA"},
         "/camera/camera/color/camera_info": {"count": 0, "res": "N/A", "encoding": "N/A", "frame_id": "N/A", "qos": "SENSOR_DATA"},
@@ -93,6 +94,13 @@ def inspect_topics_rclpy():
         t = topic_stats["/camera/camera/color/image_raw/compressed"]
         t["count"] += 1
         t["format"] = msg.format
+
+    def cb_depth_raw(msg):
+        t = topic_stats["/camera/camera/depth/image_rect_raw"]
+        t["count"] += 1
+        t["res"] = f"{msg.width}x{msg.height}"
+        t["encoding"] = msg.encoding
+        t["frame_id"] = msg.header.frame_id
 
     def cb_depth(msg):
         t = topic_stats["/camera/camera/aligned_depth_to_color/image_raw"]
@@ -117,6 +125,7 @@ def inspect_topics_rclpy():
 
     node.create_subscription(Image, "/camera/camera/color/image_raw", cb_color, qos_profile_sensor_data)
     node.create_subscription(CompressedImage, "/camera/camera/color/image_raw/compressed", cb_color_comp, qos_profile_sensor_data)
+    node.create_subscription(Image, "/camera/camera/depth/image_rect_raw", cb_depth_raw, qos_profile_sensor_data)
     node.create_subscription(Image, "/camera/camera/aligned_depth_to_color/image_raw", cb_depth, qos_profile_sensor_data)
     node.create_subscription(CompressedImage, "/camera/camera/aligned_depth_to_color/image_raw/compressedDepth", cb_depth_comp, qos_profile_sensor_data)
     node.create_subscription(CameraInfo, "/camera/camera/color/camera_info", cb_info, qos_profile_sensor_data)

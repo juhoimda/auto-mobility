@@ -55,3 +55,11 @@ chmod +x "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR"/*/*.sh "$PROJECT_DIR"/src/auto_mobilit
 if [ -f "$PROJECT_DIR/config/fastdds_camera.xml" ]; then
     export FASTRTPS_DEFAULT_PROFILES_FILE="$PROJECT_DIR/config/fastdds_camera.xml"
 fi
+
+# X11 GUI Display & OpenGL 설정 자동 감지 (RViz2 창 미출력 방지)
+if [ -z "$DISPLAY" ]; then
+    export DISPLAY=:0
+fi
+export QT_X11_NO_MITSHM=1
+export LIBGL_ALWAYS_SOFTWARE=0
+
