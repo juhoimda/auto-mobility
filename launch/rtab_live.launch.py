@@ -26,7 +26,7 @@ def generate_launch_description():
     use_imu_arg = DeclareLaunchArgument(
         'use_imu',
         default_value='true',
-        description='Whether to use IMU (requires imu_filter_madgwick to compute orientation)'
+        description='Whether to use IMU (RealSense D435i IMU enabled & filtered via imu_filter_madgwick)'
     )
 
     depth_topic_arg = DeclareLaunchArgument(
@@ -79,10 +79,10 @@ def generate_launch_description():
             'always_process_most_recent_frame': 'false', # false: 프레임을 최대한 순서대로 처리
             
             # QoS profile = [0: system default, 1: Reliable, 2: Best Effort]
-            'qos_image': '2',
-            'qos_depth': '2',
-            'qos_camera_info': '2',
-            'qos_imu': '2',
+            'qos_image': '0',
+            'qos_depth': '0',
+            'qos_camera_info': '0',
+            'qos_imu': '0',
 
             'frame_id': 'camera_link',
 
@@ -93,6 +93,7 @@ def generate_launch_description():
 
             'visual_odometry': 'true',
             'rviz': 'true',
+            'rviz_cfg': os.path.join(get_package_share_directory('auto_mobility'), 'config', 'rtabmap_vmware.rviz'),
             'rtabmap_viz': 'false',
             
             'database_path': LaunchConfiguration('database_path'),
