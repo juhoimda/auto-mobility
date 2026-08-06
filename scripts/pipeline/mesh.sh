@@ -75,7 +75,7 @@ echo "=========================================================="
 
 if [ "$METHOD" == "rtabmap" ]; then
     echo "1️⃣ DB 검증 실행..."
-    python3 "$PROJECT_DIR/src/auto_mobility/processing/validate.py" --db "$DB_FILE" || true
+    python3 "$PROJECT_DIR/src/auto_mobility/utils/validate.py" --db "$DB_FILE" || true
     echo "2️⃣ RTAB-Map 자체 텍스처 Mesh 추출 실행..."
     rtabmap-export --mesh --texture --output "$MESH_PATH" "$DB_FILE"
     echo "✅ RTAB-Map Mesh 추출 완료: $MESH_PATH"
@@ -85,7 +85,7 @@ else
 
     echo ""
     echo "🔍 [자동 품질 검증] Point Cloud & DB 헬스 체크 실행 중..."
-    if ! python3 "$PROJECT_DIR/src/auto_mobility/processing/validate.py" --db "$DB_FILE" --ply "$PLY_PATH"; then
+    if ! python3 "$PROJECT_DIR/src/auto_mobility/utils/validate.py" --db "$DB_FILE" --ply "$PLY_PATH"; then
         echo ""
         if [ "$FORCE_FLAG" == "--force" ]; then
             echo "⚠️  [주의] 데이터 품질 경고가 발생했으나 --force 옵션으로 계속 진행합니다."
@@ -99,5 +99,5 @@ else
 
     echo ""
     echo "2️⃣ Open3D 기반 3D Mesh 복원 및 정제 중..."
-    python3 "$PROJECT_DIR/src/auto_mobility/processing/mesh_open3d.py" "$PLY_PATH" "$MESH_PATH" $VIEW_FLAG
+    python3 "$PROJECT_DIR/src/auto_mobility/mesh/mesh_open3d.py" "$PLY_PATH" "$MESH_PATH" $VIEW_FLAG
 fi

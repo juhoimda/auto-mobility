@@ -4,7 +4,7 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from ament_index_python.packages import get_package_share_directory
-from auto_mobility.launch_common import RTABMAP_ARGS, create_republish_node, create_imu_filter_node
+from auto_mobility.launch.launch_common import RTABMAP_ARGS, create_republish_node, create_imu_filter_node
 
 def generate_launch_description():
     rtabmap_launch_dir = get_package_share_directory('rtabmap_launch')
@@ -64,7 +64,7 @@ def generate_launch_description():
 
             'visual_odometry': 'true',
             'rviz': 'true',
-            'rviz_cfg': os.path.join(get_package_share_directory('auto_mobility'), 'config', 'rtabmap_vmware.rviz'),
+            'rviz_cfg': os.path.join(get_package_share_directory('auto_mobility'), 'config', 'rviz', 'rtabmap_vmware.rviz'),
             'rtabmap_viz': 'false',
             
             'database_path': LaunchConfiguration('database_path'),

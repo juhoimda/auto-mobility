@@ -80,7 +80,7 @@ fi
 # 🛡️ BARRIER 1: DB File Integrity Check
 echo ""
 echo "🛡️ [GATEWAY 1] RTAB-Map DB 파일 무결성 및 구조 검증..."
-if ! python3 "$PROJECT_DIR/src/auto_mobility/processing/validate.py" --db "$TARGET_DB_PATH"; then
+if ! python3 "$PROJECT_DIR/src/auto_mobility/utils/validate.py" --db "$TARGET_DB_PATH"; then
     echo "❌ [파이프라인 차단] DB 무결성 검증 실패로 인해 이후 단계를 진행할 수 없습니다."
     exit 1
 fi
@@ -98,7 +98,7 @@ echo "=========================================================="
 # 🛡️ BARRIER 2: Mesh File Integrity Check
 echo ""
 echo "🛡️ [GATEWAY 2] 생성된 3D Mesh 무결성 검증..."
-if ! python3 "$PROJECT_DIR/src/auto_mobility/processing/validate.py" --mesh "$TARGET_MESH_PATH"; then
+if ! python3 "$PROJECT_DIR/src/auto_mobility/utils/validate.py" --mesh "$TARGET_MESH_PATH"; then
     echo "❌ [파이프라인 차단] Mesh 무결성 검증 실패로 인해 Isaac Sim 로드가 중단됩니다."
     exit 1
 fi

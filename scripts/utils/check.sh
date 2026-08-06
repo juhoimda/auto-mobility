@@ -4,7 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../common.sh"
 
 # 1. DDS, 해상도, QoS, 실시간 FPS 및 USB 상태 종합 점검 실행
-python3 "$PROJECT_DIR/src/auto_mobility/processing/inspect_system.py" "$@"
+python3 "$PROJECT_DIR/src/auto_mobility/utils/inspect_system.py" "$@"
 
 # 2. 추가 스토리지 및 RAM 디스크 점검
 echo "[스토리지 포맷 및 RAM 디스크 점검]"

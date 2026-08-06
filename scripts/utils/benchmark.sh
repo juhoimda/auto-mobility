@@ -23,4 +23,4 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../common.sh"
 
 echo "🚀 통합 SLAM 파이프라인 벤치마크를 시작합니다..."
-python3 "$PROJECT_DIR/src/auto_mobility/processing/benchmark_slam.py" "$@"
+python3 "$PROJECT_DIR/src/auto_mobility/slam/benchmark_slam.py" "$@"
