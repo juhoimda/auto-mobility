@@ -74,25 +74,28 @@ auto-mobility/                         # [패키지 루트]
 ├── README.md                           # 시스템 아키텍처 및 설정 명세서
 │
 ├── src/                                # 🟢 ROS 2 정석 소스 디렉터리
-│   └── auto_mobility/                  # Python 패키지 모듈
-│       ├── launch_common.py            # RTAB-Map 파라미터 단일 소스 설정
-│       ├── nodes/
+│   └── auto_mobility/                  # Python 패키지 모듈 (도메인별 분리)
+│       ├── config.py                   # topics.yaml 파싱 & 설정 로더
+│       ├── launch/                     # Launch 공통 헬퍼 & RTABMAP_ARGS
+│       │   └── launch_common.py
+│       ├── nodes/                      # ROS2 파이썬 노드 모듈
 │       │   └── republish.py            # 압축 해제 재발행 노드
-│       └── processing/
-│           ├── mesh_open3d.py          # Open3D 3D Mesh 생성 모듈
-│           ├── validate.py             # 데이터 품질 및 무결성 검증 모듈
-│           ├── benchmark_hw.py         # 1단계 센서/DDS 벤치마크 모듈
-│           └── benchmark_slam.py       # 통합 SLAM 파이프라인 벤치마크 모듈
+│       ├── mesh/                       # 3D Mesh 생성 및 뷰어 (mesh_open3d, view_mesh)
+│       ├── isaac/                      # Isaac Sim 디지털 트윈 로더 (load_isaac_mesh)
+│       ├── slam/                       # Visual SLAM 평가 및 벤치마크 (benchmark_slam)
+│       └── utils/                      # 데이터 검증 & HW 진단 (validate, inspect_system, benchmark_hw)
 │
 ├── scripts/                            # 🟡 CLI 실행 도구 (Shell Scripts)
 │   ├── common.sh                       # 공통 환경설정 및 PYTHONPATH 정의
-│   ├── pipeline/                       # 핵심 실행 파이프라인 (run_live, run_bag, record, play, mesh)
-│   └── utils/                          # 유틸리티 도구 (check, export_ply, view_mesh)
+│   ├── pipeline/                       # 핵심 실행 파이프라인 (run_live, run_bag, record, play, mesh, isaac)
+│   └── utils/                          # 유틸리티 도구 (check, export_ply, view_mesh, run_tests)
 │
-├── config/                             # FastDDS 및 RViz2 디스플레이 구성 파일
-│   ├── fastdds_camera.xml              # FastDDS Shared Memory (SHM) 프로필
-│   └── rtabmap_vmware.rviz             # VMware 최적화 RViz2 디스플레이 구성
+├── config/                             # 🔵 FastDDS, RViz2 및 센서 토픽 설정 파일
+│   ├── dds/                            # Middleware / FastDDS 공유메모리 프로필 (fastdds_camera.xml)
+│   ├── rviz/                           # RViz2 디스플레이 프로필 (rtabmap_vmware.rviz, digital_twin.rviz)
+│   └── topics.yaml                     # 센서 토픽 & SLAM 프레임 중앙 설정 파일
 ├── launch/                             # ROS2 Launch 파일 (camera, rtab_live, rtab_bag)
+├── tests/                              # 🟣 자동화 단위 & 통합 테스트 수트 (unit, integration)
 └── docs/                               # 개발자 파이프라인 운영 가이드 (guide.md)
 ```
 
@@ -113,7 +116,7 @@ auto-mobility/                         # [패키지 루트]
 
 ---
 
-### 📡 ROS 2 토픽 및 파이프라인 명세 (`scripts/common.sh`)
+### 📡 ROS 2 토픽 및 파이프라인 명세 (`config/topics.yaml`)
 
 | 토픽 분류 | 토픽 이름 | 데이터 타입 | 비고 / 주파수 |
 | :--- | :--- | :--- | :--- |
@@ -126,9 +129,9 @@ auto-mobility/                         # [패키지 루트]
 
 ---
 
-### 🗺️ 3D Visual-Inertial SLAM 파라미터 최적화 (`src/auto_mobility/launch_common.py`)
+### 🗺️ 3D Visual-Inertial SLAM 파라미터 최적화 (`src/auto_mobility/launch/launch_common.py`)
 
-> **단일 소스 관리**: `rtab_live` / `rtab_bag` launch는 `RTABMAP_ARGS`를 공유합니다. 튜닝은 `launch_common.py` 한 곳에서만 관리됩니다.
+> **단일 소스 관리**: `rtab_live` / `rtab_bag` launch는 `RTABMAP_ARGS`를 공유합니다. 튜닝은 `src/auto_mobility/launch/launch_common.py` 한 곳에서만 관리됩니다.
 
 * **IMU 중력 가속도 수평 정렬 (`Optimizer/GravityProvided true`)**:
   * Madgwick 필터의 IMU 자세 추정치를 사용해 3D 포인트 클라우드 맵의 수평을 자동 유지(Pitch/Roll 드리프트 차단).

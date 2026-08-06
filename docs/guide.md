@@ -106,10 +106,10 @@ SLAM 데이터베이스(`.db`)에서 Point Cloud를 추출하고 Open3D 기반 S
 ./scripts/utils/export_ply.sh my_office.db my_cloud.ply
 
 # 2) 데이터 품질 및 점 밀도 무결성 검증
-python3 src/auto_mobility/processing/validate.py --db ./ros2_data/databases/my_office.db --ply ./ros2_data/pointclouds/my_cloud.ply
+python3 src/auto_mobility/utils/validate.py --db ./ros2_data/databases/my_office.db --ply ./ros2_data/pointclouds/my_cloud.ply
 
 # 3) Open3D Mesh 복원 스크립트 실행
-python3 src/auto_mobility/processing/mesh_open3d.py ./ros2_data/pointclouds/my_cloud.ply ./ros2_data/meshes/my_mesh.obj --view
+python3 src/auto_mobility/mesh/mesh_open3d.py ./ros2_data/pointclouds/my_cloud.ply ./ros2_data/meshes/my_mesh.obj --view
 ```
 
 ---
@@ -123,8 +123,19 @@ python3 src/auto_mobility/processing/mesh_open3d.py ./ros2_data/pointclouds/my_c
 ./scripts/utils/check.sh
 
 # [통합 SLAM 파이프라인 벤치마크] Stage 1(센서/DDS) -> Stage 2(SLAM) -> Stage 3(종합진단)
-python3 src/auto_mobility/processing/benchmark_slam.py --quick
+python3 src/auto_mobility/slam/benchmark_slam.py --quick
 ```
 
 ### 🔍 벤치마크 결과 보고서 확인
 * 실행 완료 후 [`ros2_data/logs/slam_benchmark_YYYYMMDD_HHMMSS.md`](file:///home/kth/auto-mobility/ros2_data/logs) 파일에서 토픽별 실측 Hz 및 CPU 점유율 보고서를 직접 확인할 수 있습니다.
+
+---
+
+## 🧪 6. 자동화 단위 & 통합 테스트 (Unit & Integration Tests)
+
+개발 후 모듈 무결성, 런치 파이프라인 생성 및 설정 파싱 결과를 자동 검증하고 코드 커버리지를 측정합니다.
+
+```bash
+# [원스톱 테스트 및 커버리지 리포트 실행]
+./scripts/utils/run_tests.sh
+```
