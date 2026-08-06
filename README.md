@@ -4,6 +4,13 @@
 
 ---
 
+## 0. 프로젝트 계획 일정표
+
+<img width="750" height="464" alt="KakaoTalk_Photo_2026-08-06-16-40-10" src="https://github.com/user-attachments/assets/e75bd310-3f85-40ba-ba1c-35e2d385177f" />
+
+
+---
+
 ## 🏗️ 1. 전체 시스템 아키텍처 (System Architecture)
 
 전체 시스템은 **센서 수집 ➔ 압축 통신 ➔ 실시간 복원 ➔ 3D SLAM & 3D Mesh 변환**의 4단계 파이프라인으로 구성되어 있습니다.
