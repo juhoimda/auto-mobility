@@ -3,10 +3,8 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
-from launch.conditions import IfCondition
-from auto_mobility.launch_common import RTABMAP_ARGS
+from auto_mobility.launch_common import RTABMAP_ARGS, create_republish_node, create_imu_filter_node
 
 def generate_launch_description():
     rtabmap_launch_dir = get_package_share_directory('rtabmap_launch')
@@ -41,37 +39,12 @@ def generate_launch_description():
         description='Name of raw depth topic'
     )
 
-    # 1. RGB & Depth 압축 해제 노드 (Best Effort QoS 지원 및 C++ plugin 오류 해결)
-    republish_compressed_node = Node(
-        package='auto_mobility',
-        executable='republish.py',
-        name='republish_compressed',
-        output='screen',
-        parameters=[{
-            'use_sim_time': True,
-            'depth_compressed_topic': LaunchConfiguration('depth_compressed_topic')
-        }],
-        condition=IfCondition(LaunchConfiguration('use_compressed'))
+    # 공통 노드 생성 (Bag 환경: use_sim_time=True)
+    republish_compressed_node = create_republish_node(
+        use_sim_time=True,
+        depth_compressed_topic=LaunchConfiguration('depth_compressed_topic')
     )
-
-    # 4. IMU Orientation 계산 노드 (imu_filter_madgwick)
-    imu_filter_node = Node(
-        package='imu_filter_madgwick',
-        executable='imu_filter_madgwick_node',
-        name='imu_filter',
-        output='screen',
-        parameters=[{
-            'use_mag': False,
-            'world_frame': 'enu',
-            'publish_tf': False,
-            'use_sim_time': True,
-        }],
-        remappings=[
-            ('imu/data_raw', '/camera/camera/imu'),
-            ('imu/data', '/camera/camera/imu/filtered')
-        ],
-        condition=IfCondition(LaunchConfiguration('use_imu'))
-    )
+    imu_filter_node = create_imu_filter_node(use_sim_time=True)
 
     rtabmap_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(

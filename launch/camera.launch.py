@@ -26,16 +26,15 @@ def generate_launch_description():
                 'enable_infra2': False,
                 'enable_accel': True,
                 'enable_gyro': True,
-                'unite_imu_method': 1,
+                'unite_imu_method': 1,  # 1: copy mode (gyro + accel merged into /camera/camera/imu)
                 'enable_metadata': False,
                 'global_time_enabled': False,
                 'initial_reset': False,
                 'rgb_camera.auto_exposure_priority': False,
-                'color_qos': 'DEFAULT',
-                'color_info_qos': 'DEFAULT',
-                'depth_qos': 'DEFAULT',
-                'depth_info_qos': 'DEFAULT',
-                'pointcloud.pointcloud_qos': 'DEFAULT',
+                'color_qos': 'SENSOR_DATA',
+                'color_info_qos': 'SENSOR_DATA',
+                'depth_qos': 'SENSOR_DATA',
+                'depth_info_qos': 'SENSOR_DATA',
             }]
         )
     ])

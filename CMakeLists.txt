@@ -6,15 +6,13 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
+
+ament_python_install_package(auto_mobility PACKAGE_DIR src/auto_mobility)
 
 install(
   DIRECTORY launch config rviz docs
   DESTINATION share/${PROJECT_NAME}
-)
-
-install(
-  DIRECTORY src/auto_mobility
-  DESTINATION lib/${PROJECT_NAME}
 )
 
 install(
@@ -25,9 +23,12 @@ install(
     scripts/pipeline/record.sh
     scripts/pipeline/play.sh
     scripts/pipeline/mesh.sh
+    scripts/pipeline/isaac.sh
+    scripts/pipeline/run_pipeline_all.sh
     scripts/utils/check.sh
     scripts/utils/export_ply.sh
     scripts/utils/benchmark.sh
+    scripts/utils/view_mesh.sh
     src/auto_mobility/nodes/republish.py
     src/auto_mobility/processing/mesh_open3d.py
     src/auto_mobility/processing/validate.py
@@ -37,3 +38,4 @@ install(
 )
 
 ament_package()
+
