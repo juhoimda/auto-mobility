@@ -7,6 +7,9 @@ POSITIONAL_ARGS=()
 VIEW_FLAG=""
 FORCE_FLAG=""
 METHOD="open3d"
+DEPTH_ARG=""
+VOXEL_ARG=""
+RECON_METHOD_ARG=""
 
 # 파라미터 파싱
 for arg in "$@"; do
@@ -19,6 +22,15 @@ for arg in "$@"; do
             ;;
         --method=*)
             METHOD="${arg#*=}"
+            ;;
+        --depth=*)
+            DEPTH_ARG="--depth ${arg#*=}"
+            ;;
+        --voxel=*)
+            VOXEL_ARG="--voxel ${arg#*=}"
+            ;;
+        --recon-method=*)
+            RECON_METHOD_ARG="--method ${arg#*=}"
             ;;
         rtabmap)
             METHOD="rtabmap"
@@ -37,8 +49,8 @@ done
 
 if [ ${#POSITIONAL_ARGS[@]} -lt 1 ]; then
     echo "=========================================================="
-    echo " 사용법: $0 DB_NAME [OUTPUT_MESH_NAME] [--view] [--force] [--method open3d|rtabmap]"
-    echo " 예시  : $0 my_room_db.db my_room_mesh.obj --view"
+    echo " 사용법: $0 DB_NAME [OUTPUT_MESH_NAME] [--view] [--force] [--method open3d|rtabmap] [--depth=8] [--voxel=0.01] [--recon-method=poisson|bpa]"
+    echo " 예시  : $0 my_room_db.db my_room_mesh.obj --view --depth=9"
     echo "=========================================================="
     exit 1
 fi
@@ -98,6 +110,6 @@ else
     fi
 
     echo ""
-    echo "2️⃣ Open3D 기반 3D Mesh 복원 및 정제 중..."
-    python3 "$PROJECT_DIR/src/auto_mobility/mesh/mesh_open3d.py" "$PLY_PATH" "$MESH_PATH" $VIEW_FLAG
+    echo "2️⃣ Open3D 기반 3D Mesh 고속 복원 및 정제 중..."
+    python3 "$PROJECT_DIR/src/auto_mobility/mesh/mesh_open3d.py" "$PLY_PATH" "$MESH_PATH" $VIEW_FLAG $DEPTH_ARG $VOXEL_ARG $RECON_METHOD_ARG
 fi

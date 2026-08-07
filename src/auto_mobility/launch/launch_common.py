@@ -9,17 +9,17 @@ from launch.substitutions import LaunchConfiguration
 RTABMAP_PARAMS = {
     # [1] 특징점 검출 및 3D-2D PnP 포즈 추정 (CPU 40% 절감 + Depth 결측 유실 방지)
     'Vis/EstimationType': '1',  # 1: 3D-2D PnP (개선)
-    'Vis/MinInliers': '10',     # [벤치마크 1위] IR Laser Projector와 결합 시 특징점 인라이어 검증 정밀도 10개 최적 (점수: 51.1)
+    'Vis/MinInliers': '10',     # [벤치마크 1위] IR Laser Projector와 결합 시 특징점 인라이어 검증 정밀도 10개 최적
     'Vis/MaxFeatures': '2000',
     'Vis/CornerMinQuality': '0.01',
     'Vis/CornerGridSize': '20',
     'Vis/MinDepth': '0.3',
-    'Vis/MaxDepth': '8.0',
+    'Vis/MaxDepth': '4.0',      # 노이즈가 심한 멀리 있는 뎁스 포인트 필터링 (4m 제한)
     'Vis/Robust': 'true',
     'Vis/InlierDistance': '1.0',
-    # [2] 병렬 검출(VM vCPU 8) + F2M 매칭 부하 축소
+    # [2] 병렬 검출(VM vCPU 8) + F2M 매칭 부하 축소 & 32GB RAM 대역폭 확장
     'Vis/CornerNbThreads': '8',
-    'OdomF2M/MaxFrames': '10',  # 벤치마크 결과: 5->10 확장 시 Visual Odometry 주기가 2.7Hz -> 6.3Hz로 230% 향상 (32GB RAM 대역폭 활용)
+    'OdomF2M/MaxFrames': '20',  # 32GB RAM 캐시 프레임 확장 (VO 데이터 수율 보존)
     # [3] IMU 추정치 활용 (IMU Orientation 초기 추정 + 중력 벡터 정렬)
     'Odom/PoseGuessMode': '1',
     'Optimizer/GravityProvided': 'true',
@@ -29,18 +29,18 @@ RTABMAP_PARAMS = {
     'RGBD/CreateIntermediateNodes': 'true',
     'RGBD/ProximityBySpace': 'true',
     'RGBD/OptimizeFromGraphEnd': 'true',
-    # [5] CPU 분산: 맵핑 루프 5Hz 제한, 루프클로저 후보 축소
-    'Rtabmap/DetectionRate': '5',
-    'Mem/STMSize': '10',
-    # [6] 키프레임 전략: 부드러운 반응성을 위한 업데이트 역치 조절
-    'RGBD/LinearUpdate': '0.1',
-    'RGBD/AngularUpdate': '0.1',
-    # [7] Point Cloud 품질 & 노이즈 최적화 (VMware 성능 + 고품질 데이터 타협)
+    # [5] CPU 분산: 맵핑 루프 10Hz 고해상도 지원, 루프클로저 메모리 확장
+    'Rtabmap/DetectionRate': '10',      # vCPU 8 활용 촘촘한 10Hz 키프레임 포착
+    'Mem/STMSize': '30',                # Short-term memory 30개 확장
+    # [6] 키프레임 전략: 5cm/2.8도 마다 촘촘한 키프레임 업데이트
+    'RGBD/LinearUpdate': '0.05',
+    'RGBD/AngularUpdate': '0.05',
+    # [7] Point Cloud 품질 & 노이즈 최적화 (1cm Voxel 고해상도 매핑)
     'Grid/3D': 'true',
-    'Grid/VoxelSize': '0.03',
+    'Grid/VoxelSize': '0.01',           # 기존 3cm -> 1cm 정밀 격자 보존
     'Grid/RangeMin': '0.3',
-    'Grid/RangeMax': '5.0',
-    'Grid/NoiseFilteringRadius': '0.1',
+    'Grid/RangeMax': '3.0',
+    'Grid/NoiseFilteringRadius': '0.05',
     'Grid/NoiseFilteringMinNeighbors': '5',
     'Grid/RayTracing': 'true',
 }

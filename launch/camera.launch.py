@@ -18,10 +18,10 @@ def generate_launch_description():
             namespace='camera',
             output='screen',
             parameters=[{
-                'depth_module.depth_profile': '640x480x30',
-                'rgb_camera.color_profile': '640x480x30',
+                'depth_module.depth_profile': '848x480x30',
+                'rgb_camera.color_profile': '848x480x30',
                 'rgb_camera.color_format': 'RGB8',
-                'align_depth.enable': False,
+                'align_depth.enable': True,   # Align RGB & Depth pixels for exact color mapping
                 'enable_infra1': False,
                 'enable_infra2': False,
                 'depth_module.emitter_enabled': True,  # IR Laser Projector (무늬 없는 흰 벽면 특징점 강제 생성)
