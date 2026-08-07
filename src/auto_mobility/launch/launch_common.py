@@ -7,11 +7,11 @@ from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 
 RTABMAP_PARAMS = {
-    # [1] 특징점 검출 강화: 흰 벽/빈 벽(텍스처 부재)에서 fromWords=0 및 Odometry Lost 방지
-    'Vis/MinInliers': '8',
-    'Vis/MaxFeatures': '1500',
+    # [1] 특징점 검출 강화: 빠른 회전 및 빈 벽면에서도 Odometry Lost 방지
+    'Vis/MinInliers': '6',
+    'Vis/MaxFeatures': '2000',
     'Vis/CornerMinQuality': '0.01',
-    'Vis/CornerGridSize': '30',
+    'Vis/CornerGridSize': '20',
     'Vis/MinDepth': '0.3',
     'Vis/MaxDepth': '8.0',
     'Vis/Robust': 'true',
@@ -30,9 +30,9 @@ RTABMAP_PARAMS = {
     # [5] CPU 분산: 맵핑 루프 5Hz 제한, 루프클로저 후보 축소
     'Rtabmap/DetectionRate': '5',
     'Mem/STMSize': '10',
-    # [6] 키프레임 전략: 드리프트 축적 및 정지상태 키프레임 낭비 방지
-    'RGBD/LinearUpdate': '0.2',
-    'RGBD/AngularUpdate': '0.2',
+    # [6] 키프레임 전략: 부드러운 반응성을 위한 업데이트 역치 조절
+    'RGBD/LinearUpdate': '0.1',
+    'RGBD/AngularUpdate': '0.1',
     # [7] Point Cloud 품질 & 노이즈 최적화 (VMware 성능 + 고품질 데이터 타협)
     'Grid/3D': 'true',
     'Grid/VoxelSize': '0.03',
