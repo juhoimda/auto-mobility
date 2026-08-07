@@ -24,10 +24,11 @@ def generate_launch_description():
                 'align_depth.enable': True,   # Align RGB & Depth pixels for exact color mapping
                 'enable_infra1': False,
                 'enable_infra2': False,
-                'depth_module.emitter_enabled': True,  # IR Laser Projector (무늬 없는 흰 벽면 특징점 강제 생성)
+                'depth_module.emitter_enabled': 1,  # IR Laser Projector (1: enabled)
                 'enable_accel': True,
                 'enable_gyro': True,
-                'unite_imu_method': 1,  # 1: copy mode (gyro + accel merged into /camera/camera/imu)
+                'enable_sync': True,
+                'unite_imu_method': 2,  # 2: linear interpolation mode for precise IMU time sync
                 'enable_metadata': False,
                 'global_time_enabled': False,
                 'initial_reset': False,

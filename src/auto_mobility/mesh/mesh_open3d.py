@@ -35,7 +35,8 @@ def generate_mesh(input_ply, output_mesh, depth=9, voxel_size=0.003, method="bpa
         search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=max(voxel_size * 5.0, 0.03), max_nn=30),
         fast_normal_computation=True
     )
-    pcd.orient_normals_to_align_with_direction(orientation_reference=np.array([0.0, 0.0, 1.0]))
+    # Z축 단일 강제 정렬 대신 Tangent Plane 기반 3D 일관성 정렬 적용 (벽/천장 mesh 뒤집힘 방지)
+    pcd.orient_normals_consistent_tangent_plane(k=15)
     
     if method.lower() == "bpa":
         print("Reconstructing surface using Ball Pivoting Algorithm (BPA)...")
@@ -69,16 +70,24 @@ def generate_mesh(input_ply, output_mesh, depth=9, voxel_size=0.003, method="bpa
     mesh.remove_duplicated_vertices()
     mesh.remove_non_manifold_edges()
 
-    # Transfer RGB colors from point cloud to mesh vertices using vectorized multi-threaded cKDTree
+    # Transfer RGB colors from point cloud to mesh vertices using k=3 IDW (Inverse Distance Weighting)
     if pcd.has_colors() and len(pcd.points) > 0 and len(mesh.vertices) > 0:
-        print("Transferring RGB colors from point cloud using vectorized multi-threaded cKDTree...")
+        print("Transferring RGB colors from point cloud using k=3 Inverse Distance Weighting...")
         pcd_points = np.asarray(pcd.points)
         pcd_colors = np.asarray(pcd.colors)
         mesh_vertices = np.asarray(mesh.vertices)
         
         tree = cKDTree(pcd_points)
-        _, indices = tree.query(mesh_vertices, k=1, workers=-1)
-        mesh.vertex_colors = o3d.utility.Vector3dVector(pcd_colors[indices])
+        k_neighbors = min(3, len(pcd_points))
+        dists, indices = tree.query(mesh_vertices, k=k_neighbors, workers=-1)
+        
+        if k_neighbors == 1:
+            mesh.vertex_colors = o3d.utility.Vector3dVector(pcd_colors[indices])
+        else:
+            weights = 1.0 / (dists + 1e-8)
+            weights /= np.sum(weights, axis=1, keepdims=True)
+            interpolated_colors = np.sum(pcd_colors[indices] * weights[:, :, np.newaxis], axis=1)
+            mesh.vertex_colors = o3d.utility.Vector3dVector(interpolated_colors)
 
     mesh.compute_vertex_normals()
     

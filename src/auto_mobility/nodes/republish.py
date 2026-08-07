@@ -36,7 +36,7 @@ class CompressedRepublisher(Node):
         self.pub_rgb = self.create_publisher(
             Image,
             rgb_raw,
-            10
+            qos_profile_sensor_data
         )
 
         # Depth 압축 해제 구독/발행
@@ -49,7 +49,7 @@ class CompressedRepublisher(Node):
         self.pub_depth = self.create_publisher(
             Image,
             depth_raw,
-            10
+            qos_profile_sensor_data
         )
         self.get_logger().info('CompressedRepublisher Node Started (Best Effort QoS & Dynamic Topic Support)')
 

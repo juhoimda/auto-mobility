@@ -59,7 +59,7 @@ def generate_launch_description():
 
             # Synchronization
             'approx_sync': 'true',
-            'approx_sync_max_interval': '0.2',
+            'approx_sync_max_interval': '0.08',
             'topic_queue_size': '50',
             'wait_for_transform': '0.5',
 

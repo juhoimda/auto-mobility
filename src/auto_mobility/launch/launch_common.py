@@ -30,12 +30,12 @@ RTABMAP_PARAMS = {
     'RGBD/ProximityBySpace': 'true',
     'RGBD/OptimizeFromGraphEnd': 'true',
     'RGBD/NeighborLinkRefining': 'true', # 인접 키프레임 간 그래프 정밀 정렬 (동적 이동 안정성)
-    # [5] CPU 분산: 맵핑 루프 10Hz 고해상도 지원, 루프클로저 메모리 확장
-    'Rtabmap/DetectionRate': '10',      # vCPU 8 활용 촘촘한 10Hz 키프레임 포착
+    # [5] CPU 분산: 맵핑 루프 5Hz 안정화, 루프클로저 메모리 확장
+    'Rtabmap/DetectionRate': '5',       # vCPU 8 활용 및 그래프 최적화 지연 방지 5Hz 맵핑
     'Mem/STMSize': '100',               # Short-term memory 100개 확장 (32GB RAM 넉넉히 활용)
-    # [6] 키프레임 전략: 5cm/2.8도 마다 촘촘한 키프레임 업데이트
-    'RGBD/LinearUpdate': '0.05',
-    'RGBD/AngularUpdate': '0.05',
+    # [6] 키프레임 전략: 10cm/5.7도 마다 키프레임 업데이트 (그래프 폭주 및 lag 방지)
+    'RGBD/LinearUpdate': '0.10',
+    'RGBD/AngularUpdate': '0.10',
     # [7] Point Cloud 품질 & 노이즈 최적화 (1cm Voxel 고해상도 매핑)
     'Grid/3D': 'true',
     'Grid/VoxelSize': '0.01',           # 기존 3cm -> 1cm 정밀 격자 보존
@@ -75,6 +75,7 @@ def create_imu_filter_node(use_sim_time: bool):
         output='screen',
         parameters=[{
             'use_mag': False,
+            'gain': 0.03,
             'world_frame': 'enu',
             'publish_tf': False,
             'use_sim_time': use_sim_time,

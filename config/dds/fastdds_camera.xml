@@ -5,7 +5,7 @@
         <transport_descriptor>
             <transport_id>shm_transport</transport_id>
             <type>SHM</type>
-            <segment_size>209715200</segment_size> <!-- 200MB 버퍼 (풀파이프라인 다중 구독자 트래픽 대응) -->
+            <segment_size>536870912</segment_size> <!-- 512MB 버퍼 (풀파이프라인 다중 구독자 트래픽 오버플로우 방지) -->
         </transport_descriptor>
 
         <!-- UDPv4 Transport: 소켓 수신/송신 버퍼 10MB 확장 -->
