@@ -43,7 +43,7 @@ PROJECT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."
 CONFIG_DIR  = os.path.join(PROJECT_DIR, "config")
 LOG_DIR     = os.path.join(PROJECT_DIR, "ros2_data", "logs")
 
-FASTDDS_XML = os.path.join(CONFIG_DIR, "fastdds_camera.xml")
+FASTDDS_XML = os.path.join(CONFIG_DIR, "dds", "fastdds_camera.xml")
 
 # ──────────────────────────── 토픽 상수 ──────────────────────────────
 TOPIC_COLOR      = "/camera/camera/color/image_raw"

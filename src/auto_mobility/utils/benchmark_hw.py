@@ -109,7 +109,7 @@ def run_single_test(rmw, use_shm, res_w, res_h, fps, qos, is_compressed, sample_
     shm_status = "Default"
     if rmw == "rmw_fastrtps_cpp":
         if use_shm:
-            fastdds_xml = os.path.join(CONFIG_DIR, "fastdds_camera.xml")
+            fastdds_xml = os.path.join(CONFIG_DIR, "dds", "fastdds_camera.xml")
             if os.path.exists(fastdds_xml):
                 env["FASTRTPS_DEFAULT_PROFILES_FILE"] = fastdds_xml
                 shm_status = "SHM 활성화"

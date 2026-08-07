@@ -17,9 +17,9 @@ RTABMAP_PARAMS = {
     'Vis/MaxDepth': '4.0',      # 노이즈가 심한 멀리 있는 뎁스 포인트 필터링 (4m 제한)
     'Vis/Robust': 'true',
     'Vis/InlierDistance': '1.0',
-    # [2] 병렬 검출(VM vCPU 8) + F2M 매칭 부하 축소 & 32GB RAM 대역폭 확장
+    # [2] 병렬 검출(VM vCPU 8) + F2M 매칭 부하 축소 & 32GB RAM 대역폭 극대화
     'Vis/CornerNbThreads': '8',
-    'OdomF2M/MaxFrames': '20',  # 32GB RAM 캐시 프레임 확장 (VO 데이터 수율 보존)
+    'OdomF2M/MaxFrames': '60',  # 32GB RAM 대용량 캐시 확장 (VO 데이터 수율 극대화)
     # [3] IMU 추정치 활용 (IMU Orientation 초기 추정 + 중력 벡터 정렬)
     'Odom/PoseGuessMode': '1',
     'Optimizer/GravityProvided': 'true',
@@ -29,9 +29,10 @@ RTABMAP_PARAMS = {
     'RGBD/CreateIntermediateNodes': 'true',
     'RGBD/ProximityBySpace': 'true',
     'RGBD/OptimizeFromGraphEnd': 'true',
+    'RGBD/NeighborLinkRefining': 'true', # 인접 키프레임 간 그래프 정밀 정렬 (동적 이동 안정성)
     # [5] CPU 분산: 맵핑 루프 10Hz 고해상도 지원, 루프클로저 메모리 확장
     'Rtabmap/DetectionRate': '10',      # vCPU 8 활용 촘촘한 10Hz 키프레임 포착
-    'Mem/STMSize': '30',                # Short-term memory 30개 확장
+    'Mem/STMSize': '100',               # Short-term memory 100개 확장 (32GB RAM 넉넉히 활용)
     # [6] 키프레임 전략: 5cm/2.8도 마다 촘촘한 키프레임 업데이트
     'RGBD/LinearUpdate': '0.05',
     'RGBD/AngularUpdate': '0.05',

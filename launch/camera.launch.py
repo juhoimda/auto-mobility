@@ -36,6 +36,12 @@ def generate_launch_description():
                 'color_info_qos': 'SENSOR_DATA',
                 'depth_qos': 'SENSOR_DATA',
                 'depth_info_qos': 'SENSOR_DATA',
+                'filters': 'spatial,temporal,hole_filling',
+                'spatial_filter.spatial_alpha': 0.5,
+                'spatial_filter.spatial_delta': 20,
+                'temporal_filter.temporal_alpha': 0.4,
+                'temporal_filter.temporal_delta': 20,
+                'hole_filling_filter.holes_fill': 1,
             }]
         )
     ])
