@@ -21,8 +21,8 @@ STORAGE_FORMAT="mcap"
 
 RGB_TOPIC="/camera/camera/color/image_raw"
 RGB_COMPRESSED_TOPIC="/camera/camera/color/image_raw/compressed"
-DEPTH_TOPIC="/camera/camera/aligned_depth_to_color/image_raw"
-DEPTH_COMPRESSED_TOPIC="/camera/camera/aligned_depth_to_color/image_raw/compressedDepth"
+DEPTH_TOPIC="${DEPTH_TOPIC:-/camera/camera/depth/image_rect_raw}"
+DEPTH_COMPRESSED_TOPIC="${DEPTH_COMPRESSED_TOPIC:-/camera/camera/depth/image_rect_raw/compressedDepth}"
 CAMERA_INFO_TOPIC="/camera/camera/color/camera_info"
 IMU_TOPIC="/camera/camera/imu"
 
@@ -49,9 +49,17 @@ fi
 export PYTHONPATH="$PROJECT_DIR/src:$PROJECT_DIR:$PYTHONPATH"
 
 # 스크립트 및 노드 실행 권한 자동 보장
-chmod +x "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR"/*/*.sh "$PROJECT_DIR"/src/auto_mobility/nodes/*.py "$PROJECT_DIR"/src/auto_mobility/processing/*.py 2>/dev/null || true
+chmod +x "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR"/*/*.sh "$PROJECT_DIR"/src/auto_mobility/*/*.py 2>/dev/null || true
 
 # FastDDS 공유메모리(SHM) 프로필 자동 적용
-if [ -f "$PROJECT_DIR/config/fastdds_camera.xml" ]; then
-    export FASTRTPS_DEFAULT_PROFILES_FILE="$PROJECT_DIR/config/fastdds_camera.xml"
+if [ -f "$PROJECT_DIR/config/dds/fastdds_camera.xml" ]; then
+    export FASTRTPS_DEFAULT_PROFILES_FILE="$PROJECT_DIR/config/dds/fastdds_camera.xml"
 fi
+
+# X11 GUI Display & OpenGL 설정 자동 감지 (RViz2 창 미출력 방지)
+if [ -z "$DISPLAY" ]; then
+    export DISPLAY=:0
+fi
+export QT_X11_NO_MITSHM=1
+export LIBGL_ALWAYS_SOFTWARE=0
+

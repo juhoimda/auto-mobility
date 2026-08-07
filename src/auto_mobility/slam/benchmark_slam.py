@@ -1,0 +1,941 @@
+#!/usr/bin/env python3
+"""
+[통합 벤치마크] 카메라 최적화 → SLAM 파라미터 최적화 → 파이프라인 종합 진단
+RealSense D435i + RTAB-Map (rtabmap_ros) 기반 Live SLAM 전용.
+
+실행 단계:
+  Stage 1 - 카메라 / DDS / QoS 설정 최적 조합 측정 (기존 benchmark_hw.py 확장)
+  Stage 2 - SLAM 파라미터 조합 측정 (DetectionRate, CornerNbThreads, OdomF2M 등)
+  Stage 3 - 전체 파이프라인 종합 진단 (camera→SLAM 지연, /odom Hz, 토픽 누락 여부)
+
+사용법:
+  python3 benchmark_slam.py                # 전 단계 풀 측정
+  python3 benchmark_slam.py --stage 1      # Stage 1만
+  python3 benchmark_slam.py --stage 2      # Stage 2만 (Stage 1 결과 JSON 필요)
+  python3 benchmark_slam.py --stage 3      # Stage 3만
+  python3 benchmark_slam.py --quick        # 핵심 조합만 빠르게 측정
+"""
+
+import os
+import sys
+import time
+import subprocess
+import json
+import argparse
+import signal
+import re
+import threading
+from datetime import datetime
+from pathlib import Path
+
+# ──────────────────────────── 터미널 컬러 ────────────────────────────
+GREEN  = "\033[92m"
+YELLOW = "\033[93m"
+RED    = "\033[91m"
+CYAN   = "\033[96m"
+BLUE   = "\033[94m"
+MAGENTA= "\033[95m"
+BOLD   = "\033[1m"
+RESET  = "\033[0m"
+
+# ──────────────────────────── 경로 설정 ──────────────────────────────
+PROJECT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+CONFIG_DIR  = os.path.join(PROJECT_DIR, "config")
+LOG_DIR     = os.path.join(PROJECT_DIR, "ros2_data", "logs")
+
+FASTDDS_XML = os.path.join(CONFIG_DIR, "fastdds_camera.xml")
+
+# ──────────────────────────── 토픽 상수 ──────────────────────────────
+TOPIC_COLOR      = "/camera/camera/color/image_raw"
+TOPIC_DEPTH      = "/camera/camera/aligned_depth_to_color/image_raw"
+TOPIC_CAMERA_INFO= "/camera/camera/color/camera_info"
+TOPIC_IMU        = "/camera/camera/imu"
+TOPIC_ODOM       = "/rtabmap/odom"
+TOPIC_MAP        = "/rtabmap/mapData"
+
+# ═══════════════════════════════════════════════════════════════════════
+#  공통 유틸
+# ═══════════════════════════════════════════════════════════════════════
+
+def banner(title: str, color: str = BOLD):
+    line = "═" * 60
+    print(f"\n{color}{line}{RESET}")
+    print(f"{color}  {title}{RESET}")
+    print(f"{color}{line}{RESET}")
+
+def step(msg: str):
+    print(f"{CYAN}▶ {msg}{RESET}")
+
+def ok(msg: str):
+    print(f"   {GREEN}✓ {msg}{RESET}")
+
+def warn(msg: str):
+    print(f"   {YELLOW}⚠ {msg}{RESET}")
+
+def err(msg: str):
+    print(f"   {RED}✗ {msg}{RESET}")
+
+def kill_pgroup(proc):
+    """프로세스 그룹 전체를 안전하게 종료한다."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            pass
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  시스템 환경 검사
+# ═══════════════════════════════════════════════════════════════════════
+
+def check_system():
+    info = {
+        "rmws"    : ["rmw_fastrtps_cpp"],
+        "rmem_max": "Unknown",
+        "usb_type": "USB 3.x (권장)",
+        "nproc"   : os.cpu_count() or 4,
+        "fastdds_xml_exists": os.path.exists(FASTDDS_XML),
+    }
+
+    # CycloneDDS 존재 여부
+    if os.path.exists("/opt/ros/humble/lib/librmw_cyclonedds_cpp.so"):
+        info["rmws"].append("rmw_cyclonedds_cpp")
+
+    # 커널 소켓 버퍼
+    try:
+        r = subprocess.run(["sysctl", "net.core.rmem_max"],
+                           stdout=subprocess.PIPE, text=True)
+        if "=" in r.stdout:
+            val = int(r.stdout.split("=")[1].strip())
+            info["rmem_max"] = f"{val / (1024*1024):.1f} MB"
+    except Exception:
+        pass
+
+    # USB 포트 속도
+    try:
+        r = subprocess.run(["rs-enumerate-devices", "-s"],
+                           stdout=subprocess.PIPE, text=True)
+        if "2.1" in r.stdout or "2.0" in r.stdout:
+            info["usb_type"] = "USB 2.x (⚠ 720p 30fps 대역폭 주의)"
+    except Exception:
+        pass
+
+    return info
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  토픽 Hz 측정 공통 함수
+# ═══════════════════════════════════════════════════════════════════════
+
+def measure_hz(topic: str, duration: float = 6.0, env=None) -> float:
+    """
+    `ros2 topic hz <topic>` 를 duration 초 동안 실행해 average rate 를 반환한다.
+    측정 불가 시 0.0 반환.
+    """
+    cmd = f"ros2 topic hz {topic}"
+    hz_val = 0.0
+    try:
+        proc = subprocess.Popen(
+            cmd, shell=True,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, preexec_fn=os.setsid, env=env
+        )
+        time.sleep(duration)
+        os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+        out, _ = proc.communicate(timeout=4)
+        for line in out.splitlines():
+            if "average rate:" in line:
+                hz_val = float(line.split("average rate:")[1].strip().split()[0])
+                break
+    except Exception:
+        pass
+    return hz_val
+
+
+def measure_hz_multi(topics: list, duration: float = 6.0, env=None) -> dict:
+    """여러 토픽을 병렬로 Hz 측정한다."""
+    results = {}
+    threads = []
+
+    def _worker(t):
+        results[t] = measure_hz(t, duration=duration, env=env)
+
+    for t in topics:
+        th = threading.Thread(target=_worker, args=(t,), daemon=True)
+        th.start()
+        threads.append(th)
+    for th in threads:
+        th.join()
+    return results
+
+
+def measure_cpu_of(process_name: str, samples: int = 6, interval: float = 0.8) -> float:
+    """지정 프로세스 이름의 CPU 점유율 평균을 반환 (ps aux 기반)."""
+    vals = []
+    for _ in range(samples):
+        time.sleep(interval)
+        try:
+            r = subprocess.run(
+                f"ps aux | grep {process_name} | grep -v grep | awk '{{print $3}}'",
+                shell=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+            )
+            raw = r.stdout.strip().split("\n")
+            for v in raw:
+                try:
+                    vals.append(float(v))
+                except ValueError:
+                    pass
+        except Exception:
+            pass
+    return round(sum(vals) / len(vals), 1) if vals else 0.0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Stage 1: 카메라 / DDS / QoS 최적 조합
+# ═══════════════════════════════════════════════════════════════════════
+
+CAMERA_CONFIGS_FULL = [
+    # (width, height, fps)
+    (640,  480, 15),
+    (640,  480, 30),
+    (1280, 720, 15),
+    (1280, 720, 30),
+]
+
+CAMERA_CONFIGS_QUICK = [
+    (640,  480, 30),
+    (1280, 720, 15),
+    (1280, 720, 30),
+]
+
+QOS_LIST_FULL  = ["SENSOR_DATA", "DEFAULT"]
+QOS_LIST_QUICK = ["SENSOR_DATA"]
+
+
+def run_camera_test(rmw, use_shm, res_w, res_h, fps, qos,
+                    sample_duration=6.0) -> dict:
+    """카메라 노드 하나를 단독 실행해 image_raw Hz + CPU 를 측정한다."""
+    env = os.environ.copy()
+    env["RMW_IMPLEMENTATION"] = rmw
+
+    shm_label = "Default"
+    if rmw == "rmw_fastrtps_cpp":
+        if use_shm and os.path.exists(FASTDDS_XML):
+            env["FASTRTPS_DEFAULT_PROFILES_FILE"] = FASTDDS_XML
+            shm_label = "SHM"
+        else:
+            env.pop("FASTRTPS_DEFAULT_PROFILES_FILE", None)
+            shm_label = "UDP"
+
+    prof = f"{res_w}x{res_h}x{fps}"
+    cmd = [
+        "ros2", "run", "realsense2_camera", "realsense2_camera_node",
+        "--ros-args",
+        "-p", f"depth_module.depth_profile:={prof}",
+        "-p", f"rgb_camera.color_profile:={prof}",
+        "-p", "rgb_camera.color_format:=RGB8",
+        "-p", "align_depth.enable:=true",
+        "-p", "enable_accel:=true",
+        "-p", "enable_gyro:=true",
+        "-p", "unite_imu_method:=copy",
+        "-p", "rgb_camera.auto_exposure_priority:=false",
+        "-p", f"rgb_qos:={qos}",
+        "-p", f"color_qos:={qos}",
+        "-p", f"depth_qos:={qos}",
+        "-p", f"depth_info_qos:={qos}",
+        "-p", f"color_info_qos:={qos}",
+        "-r", "__ns:=/camera",
+        "-r", "__node:=camera",
+    ]
+
+    label = f"{rmw}({shm_label}) | {res_w}x{res_h}@{fps}fps | QoS={qos}"
+    step(f"[Stage 1] {label}")
+
+    proc = subprocess.Popen(cmd, env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            preexec_fn=os.setsid)
+    time.sleep(6.0)  # 노드 및 IMU HID 센서 초기화 충분히 대기
+
+    # image_raw + aligned_depth 동시 측정
+    hz_map = measure_hz_multi(
+        [TOPIC_COLOR, TOPIC_DEPTH],
+        duration=sample_duration, env=env
+    )
+    cpu = measure_cpu_of("realsense2_camera", samples=4, interval=sample_duration / 4)
+
+    kill_pgroup(proc)
+    time.sleep(4.0)  # USB 드라이버 HID/V4L2 센서 안전 릴리즈 쿨다운
+
+    color_hz = hz_map.get(TOPIC_COLOR, 0.0)
+    depth_hz = hz_map.get(TOPIC_DEPTH, 0.0)
+    drop_pct = max(0.0, (fps - color_hz) / fps * 100) if fps > 0 else 100.0
+
+    # 점수: FPS 달성(60) + 품질(30) + QoS(10)
+    fps_score     = min(1.0, color_hz / fps) * 60.0
+    quality_score = (res_w * res_h / (1280 * 720)) * 15.0 + (fps / 30.0) * 15.0
+    qos_score     = 10.0 if qos == "SENSOR_DATA" else 5.0
+    total_score   = round(fps_score + quality_score + qos_score, 1)
+
+    status = GREEN if drop_pct < 10 else (YELLOW if drop_pct < 25 else RED)
+    print(f"   └─ {status}color: {color_hz:.1f}Hz  depth: {depth_hz:.1f}Hz  "
+          f"drop: {drop_pct:.1f}%  CPU: {cpu}%  score: {total_score}{RESET}")
+
+    return {
+        "rmw": rmw, "shm": shm_label,
+        "resolution": f"{res_w}x{res_h}", "target_fps": fps,
+        "qos": qos,
+        "color_hz": round(color_hz, 2), "depth_hz": round(depth_hz, 2),
+        "drop_pct": round(drop_pct, 1), "cpu_pct": cpu,
+        "score": total_score,
+    }
+
+
+def run_stage1(sys_info, quick: bool) -> dict:
+    banner("Stage 1 — 카메라 / DDS / QoS 최적 조합 탐색")
+
+    res_list  = CAMERA_CONFIGS_QUICK  if quick else CAMERA_CONFIGS_FULL
+    qos_list  = QOS_LIST_QUICK        if quick else QOS_LIST_FULL
+
+    configs = []
+    for rmw in sys_info["rmws"]:
+        shm_modes = [True] if quick else ([True, False] if rmw == "rmw_fastrtps_cpp" else [False])
+        for shm in shm_modes:
+            for (w, h, fps) in res_list:
+                for qos in qos_list:
+                    configs.append((rmw, shm, w, h, fps, qos))
+
+    print(f"총 {len(configs)}개 조합 측정 시작\n")
+    results = []
+    for i, (rmw, shm, w, h, fps, qos) in enumerate(configs, 1):
+        print(f"[{i}/{len(configs)}]", end=" ")
+        r = run_camera_test(rmw, shm, w, h, fps, qos)
+        results.append(r)
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    best = results[0]
+    ok(f"Stage 1 완료. 최적: {best['rmw']}({best['shm']}) "
+       f"{best['resolution']}@{best['target_fps']}fps "
+       f"QoS={best['qos']}  score={best['score']}")
+
+    return {"best": best, "all": results}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Stage 2: SLAM(RTAB-Map) 파라미터 조합 측정
+# ═══════════════════════════════════════════════════════════════════════
+
+def _build_rtabmap_args(params: dict) -> str:
+    """dict → '--Key Value ...' 형태의 rtabmap_args 문자열로 변환."""
+    parts = []
+    for k, v in params.items():
+        parts.append(f"--{k} {v}")
+    return " ".join(parts)
+
+
+# SLAM 파라미터 후보 집합
+# 각 키는 (label, {param: value}) 형태이며 단계적으로 조합해 테스트한다.
+
+SLAM_PARAM_MATRIX_FULL = {
+    "detection_rate": [
+        ("DR=2",  {"Rtabmap/DetectionRate": 2}),
+        ("DR=5",  {"Rtabmap/DetectionRate": 5}),
+        ("DR=10", {"Rtabmap/DetectionRate": 10}),
+    ],
+    "vis_features": [
+        ("VF=500",  {"Vis/MaxFeatures": 500,  "Vis/MinInliers": 8}),
+        ("VF=1000", {"Vis/MaxFeatures": 1000, "Vis/MinInliers": 10}),
+        ("VF=1500", {"Vis/MaxFeatures": 1500, "Vis/MinInliers": 12}),
+    ],
+    "threads": [
+        ("TH=2",  {"Vis/CornerNbThreads": 2}),
+        ("TH=4",  {"Vis/CornerNbThreads": 4}),
+        ("TH=8",  {"Vis/CornerNbThreads": 8}),
+    ],
+    "f2m_frames": [
+        ("F2M=3",  {"OdomF2M/MaxFrames": 3}),
+        ("F2M=5",  {"OdomF2M/MaxFrames": 5}),
+        ("F2M=10", {"OdomF2M/MaxFrames": 10}),
+    ],
+    "keyframe": [
+        ("KF_lo",  {"RGBD/LinearUpdate": 0.1, "RGBD/AngularUpdate": 0.1}),
+        ("KF_mid", {"RGBD/LinearUpdate": 0.2, "RGBD/AngularUpdate": 0.2}),
+        ("KF_hi",  {"RGBD/LinearUpdate": 0.4, "RGBD/AngularUpdate": 0.4}),
+    ],
+}
+
+SLAM_PARAM_MATRIX_QUICK = {
+    "detection_rate": [
+        ("DR=5",  {"Rtabmap/DetectionRate": 5}),
+        ("DR=10", {"Rtabmap/DetectionRate": 10}),
+    ],
+    "vis_features": [
+        ("VF=500",  {"Vis/MaxFeatures": 500,  "Vis/MinInliers": 8}),
+        ("VF=1000", {"Vis/MaxFeatures": 1000, "Vis/MinInliers": 10}),
+    ],
+    "threads": [
+        ("TH=4",  {"Vis/CornerNbThreads": 4}),
+    ],
+    "f2m_frames": [
+        ("F2M=5",  {"OdomF2M/MaxFrames": 5}),
+    ],
+    "keyframe": [
+        ("KF_mid", {"RGBD/LinearUpdate": 0.2, "RGBD/AngularUpdate": 0.2}),
+    ],
+}
+
+# SLAM 기준 파라미터 (공통 / 변경하지 않는 부분)
+SLAM_BASE_PARAMS = {
+    "Vis/CornerMinQuality"  : 0.02,
+    "Vis/CornerGridSize"    : 30,
+    "Vis/MinDepth"          : 0.3,
+    "Vis/MaxDepth"          : 8.0,
+    "Vis/Robust"            : "true",
+    "Vis/InlierDistance"    : 1.0,
+    "Odom/PoseGuessMode"    : 0,
+    "Odom/ResetCountdown"   : 2,
+    "Rtabmap/ResetCountdown": 0,
+    "RGBD/CreateIntermediateNodes": "true",
+    "RGBD/ProximityBySpace" : "true",
+    "RGBD/OptimizeFromGraphEnd": "true",
+    "Mem/STMSize"           : 10,
+    "approx_sync"           : "true",
+    "approx_sync_max_interval": 0.15,
+    "topic_queue_size"      : 30,
+}
+
+
+def build_slam_test_configs(matrix: dict, nproc: int) -> list:
+    """
+    각 축의 값을 독립적으로 변경하는 1-at-a-time 방식으로 configs 생성.
+    (순수 조합 폭발 방지)
+    """
+    # 기본값: 각 축의 첫 번째 옵션
+    default = {}
+    default_labels = {}
+    for axis, options in matrix.items():
+        label, params = options[0]
+        default.update(params)
+        default_labels[axis] = label
+
+    configs = []
+    seen = set()
+
+    def _add(labels_dict, params_dict):
+        key = json.dumps(params_dict, sort_keys=True)
+        if key not in seen:
+            seen.add(key)
+            configs.append({
+                "label": " | ".join(labels_dict.values()),
+                "params": {**SLAM_BASE_PARAMS, **params_dict},
+            })
+
+    # 기본 조합 먼저
+    _add(default_labels, default)
+
+    # 각 축을 개별 변경
+    for axis, options in matrix.items():
+        for label, params in options[1:]:
+            cur_labels  = {**default_labels, axis: label}
+            cur_params  = {**default, **params}
+            _add(cur_labels, cur_params)
+
+    # nproc 수 반영: TH 옵션을 nproc 이하로 제한
+    valid = []
+    for c in configs:
+        th = c["params"].get("Vis/CornerNbThreads", 4)
+        if int(th) <= nproc:
+            valid.append(c)
+        else:
+            warn(f"  CornerNbThreads={th} 가 nproc={nproc} 초과 → 건너뜀")
+    return valid
+
+
+def run_slam_test(camera_config: dict, slam_config: dict,
+                  sample_duration: float = 10.0, env=None) -> dict:
+    """
+    카메라 노드 + RTAB-Map 노드를 동시에 띄우고
+    /rtabmap/odom + /rtabmap/mapData Hz, CPU 를 측정한다.
+    """
+    if env is None:
+        env = os.environ.copy()
+
+    rmw = camera_config["rmw"]
+    env["RMW_IMPLEMENTATION"] = rmw
+    if camera_config["shm"] == "SHM" and os.path.exists(FASTDDS_XML):
+        env["FASTRTPS_DEFAULT_PROFILES_FILE"] = FASTDDS_XML
+    else:
+        env.pop("FASTRTPS_DEFAULT_PROFILES_FILE", None)
+
+    res_w, res_h = camera_config["resolution"].split("x")
+    fps   = camera_config["target_fps"]
+    qos   = camera_config["qos"]
+    prof  = f"{res_w}x{res_h}x{fps}"
+
+    camera_cmd = [
+        "ros2", "run", "realsense2_camera", "realsense2_camera_node",
+        "--ros-args",
+        "-p", f"depth_module.depth_profile:={prof}",
+        "-p", f"rgb_camera.color_profile:={prof}",
+        "-p", "rgb_camera.color_format:=RGB8",
+        "-p", "align_depth.enable:=true",
+        "-p", "enable_accel:=true",
+        "-p", "enable_gyro:=true",
+        "-p", "unite_imu_method:=copy",
+        "-p", "rgb_camera.auto_exposure_priority:=false",
+        "-p", f"rgb_qos:={qos}",
+        "-p", f"depth_qos:={qos}",
+        "-r", "__ns:=/camera",
+        "-r", "__node:=camera",
+    ]
+
+    # rtabmap_args 문자열 구성 (slam_config["params"] 에서 rtabmap 전용 파라미터만 추출)
+    LAUNCH_KEYS = {
+        "approx_sync", "approx_sync_max_interval", "topic_queue_size"
+    }
+    rtabmap_only = {k: v for k, v in slam_config["params"].items()
+                    if k not in LAUNCH_KEYS}
+    rtabmap_args = _build_rtabmap_args(rtabmap_only)
+
+    slam_cmd = [
+        "ros2", "launch", "rtabmap_launch", "rtabmap.launch.py",
+        f"rgb_topic:={TOPIC_COLOR}",
+        f"depth_topic:={TOPIC_DEPTH}",
+        f"camera_info_topic:={TOPIC_CAMERA_INFO}",
+        "qos_image:=2",
+        "qos_depth:=2",
+        "qos_camera_info:=2",
+        "frame_id:=camera_link",
+        f"approx_sync:={slam_config['params'].get('approx_sync', 'true')}",
+        f"approx_sync_max_interval:={slam_config['params'].get('approx_sync_max_interval', 0.15)}",
+        f"topic_queue_size:={slam_config['params'].get('topic_queue_size', 30)}",
+        "visual_odometry:=true",
+        "rviz:=false",
+        "rtabmap_viz:=false",
+        f"rtabmap_args:={rtabmap_args}",
+    ]
+
+    label = slam_config["label"]
+    step(f"[Stage 2] {label}")
+
+    cam_proc  = subprocess.Popen(camera_cmd, env=env,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 preexec_fn=os.setsid)
+    time.sleep(3.5)
+
+    slam_proc = subprocess.Popen(slam_cmd, env=env,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 preexec_fn=os.setsid)
+    time.sleep(5.0)  # RTAB-Map 초기화 대기
+
+    # Hz 병렬 측정
+    hz_map = measure_hz_multi(
+        [TOPIC_COLOR, TOPIC_ODOM, TOPIC_MAP],
+        duration=sample_duration, env=env
+    )
+    cpu_cam  = measure_cpu_of("realsense2_camera", samples=4, interval=sample_duration / 4)
+    cpu_slam = measure_cpu_of("rtabmap",           samples=4, interval=sample_duration / 4)
+
+    kill_pgroup(slam_proc)
+    time.sleep(1.0)
+    kill_pgroup(cam_proc)
+    time.sleep(1.5)
+
+    color_hz = hz_map.get(TOPIC_COLOR, 0.0)
+    odom_hz  = hz_map.get(TOPIC_ODOM,  0.0)
+    map_hz   = hz_map.get(TOPIC_MAP,   0.0)
+
+    # 품질 손실: color_hz 가 target_fps 의 80% 미만이면 카메라 병목
+    camera_ok = color_hz >= fps * 0.8
+    slam_ok   = odom_hz  >= 1.0     # /odom 이 최소 1Hz 이상
+
+    # 점수화: odom Hz 비중(50) + color Hz 달성(30) + map 발행(20)
+    dr = int(slam_config["params"].get("Rtabmap/DetectionRate", 5))
+    odom_score  = min(1.0, odom_hz / max(dr, 1)) * 50.0
+    color_score = min(1.0, color_hz / fps) * 30.0
+    map_score   = 20.0 if map_hz > 0 else 0.0
+    total_score = round(odom_score + color_score + map_score, 1)
+
+    status = GREEN if (camera_ok and slam_ok) else (YELLOW if slam_ok else RED)
+    print(f"   └─ {status}color:{color_hz:.1f}Hz  odom:{odom_hz:.1f}Hz  "
+          f"map:{map_hz:.1f}Hz  CPU cam:{cpu_cam}% slam:{cpu_slam}%  "
+          f"score:{total_score}{RESET}")
+
+    return {
+        "label"     : label,
+        "params"    : {k: str(v) for k, v in slam_config["params"].items()},
+        "color_hz"  : round(color_hz, 2),
+        "odom_hz"   : round(odom_hz,  2),
+        "map_hz"    : round(map_hz,   2),
+        "cpu_cam"   : cpu_cam,
+        "cpu_slam"  : cpu_slam,
+        "camera_ok" : camera_ok,
+        "slam_ok"   : slam_ok,
+        "score"     : total_score,
+    }
+
+
+def run_stage2(stage1_result: dict, sys_info: dict, quick: bool) -> dict:
+    banner("Stage 2 — SLAM 파라미터 최적 조합 탐색")
+
+    best_cam = stage1_result["best"]
+    matrix   = SLAM_PARAM_MATRIX_QUICK if quick else SLAM_PARAM_MATRIX_FULL
+    configs  = build_slam_test_configs(matrix, nproc=sys_info["nproc"])
+
+    print(f"카메라 설정: {best_cam['rmw']}({best_cam['shm']}) "
+          f"{best_cam['resolution']}@{best_cam['target_fps']}fps "
+          f"QoS={best_cam['qos']}")
+    print(f"총 {len(configs)}개 SLAM 파라미터 조합 측정 시작\n")
+
+    results = []
+    for i, sc in enumerate(configs, 1):
+        print(f"[{i}/{len(configs)}]", end=" ")
+        r = run_slam_test(best_cam, sc, sample_duration=10.0)
+        results.append(r)
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    best = results[0]
+    ok(f"Stage 2 완료. 최적 조합: {best['label']}  score={best['score']}")
+
+    return {"best": best, "all": results}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Stage 3: 전체 파이프라인 종합 진단
+# ═══════════════════════════════════════════════════════════════════════
+
+PIPELINE_TOPICS = [
+    (TOPIC_COLOR,       "image_raw (color)",    15),
+    (TOPIC_DEPTH,       "aligned_depth",        15),
+    (TOPIC_CAMERA_INFO, "camera_info",          15),
+    (TOPIC_IMU,         "imu",                 100),
+    (TOPIC_ODOM,        "rtabmap/odom",          2),
+    (TOPIC_MAP,         "rtabmap/mapData",       1),
+]
+
+
+def run_stage3(stage1_result: dict, stage2_result: dict, quick: bool) -> dict:
+    banner("Stage 3 — 전체 파이프라인 종합 진단")
+
+    best_cam  = stage1_result["best"]
+    best_slam = stage2_result["best"]
+
+    env = os.environ.copy()
+    env["RMW_IMPLEMENTATION"] = best_cam["rmw"]
+    if best_cam["shm"] == "SHM" and os.path.exists(FASTDDS_XML):
+        env["FASTRTPS_DEFAULT_PROFILES_FILE"] = FASTDDS_XML
+
+    res_w, res_h = best_cam["resolution"].split("x")
+    fps  = best_cam["target_fps"]
+    qos  = best_cam["qos"]
+    prof = f"{res_w}x{res_h}x{fps}"
+
+    print(f"최적 카메라 설정: {best_cam['rmw']}({best_cam['shm']}) "
+          f"{best_cam['resolution']}@{fps}fps QoS={qos}")
+    print(f"최적 SLAM 파라미터: {best_slam['label']}\n")
+
+    cam_cmd = [
+        "ros2", "run", "realsense2_camera", "realsense2_camera_node",
+        "--ros-args",
+        "-p", f"depth_module.depth_profile:={prof}",
+        "-p", f"rgb_camera.color_profile:={prof}",
+        "-p", "rgb_camera.color_format:=RGB8",
+        "-p", "align_depth.enable:=true",
+        "-p", "enable_accel:=true",
+        "-p", "enable_gyro:=true",
+        "-p", "unite_imu_method:=copy",
+        "-p", "rgb_camera.auto_exposure_priority:=false",
+        "-p", f"rgb_qos:={qos}",
+        "-p", f"depth_qos:={qos}",
+        "-r", "__ns:=/camera",
+        "-r", "__node:=camera",
+    ]
+
+    LAUNCH_KEYS = {"approx_sync", "approx_sync_max_interval", "topic_queue_size"}
+    rtabmap_only = {k: v for k, v in best_slam["params"].items()
+                    if k not in LAUNCH_KEYS}
+    rtabmap_args = _build_rtabmap_args(rtabmap_only)
+
+    slam_cmd = [
+        "ros2", "launch", "rtabmap_launch", "rtabmap.launch.py",
+        f"rgb_topic:={TOPIC_COLOR}",
+        f"depth_topic:={TOPIC_DEPTH}",
+        f"camera_info_topic:={TOPIC_CAMERA_INFO}",
+        "qos_image:=2", "qos_depth:=2", "qos_camera_info:=2",
+        "frame_id:=camera_link",
+        "visual_odometry:=true",
+        "rviz:=false", "rtabmap_viz:=false",
+        f"rtabmap_args:={rtabmap_args}",
+    ]
+
+    step("카메라 노드 기동 중...")
+    cam_proc = subprocess.Popen(cam_cmd, env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                preexec_fn=os.setsid)
+    time.sleep(3.5)
+
+    step("RTAB-Map 노드 기동 중...")
+    slam_proc = subprocess.Popen(slam_cmd, env=env,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 preexec_fn=os.setsid)
+    time.sleep(5.0)
+
+    sample_dur = 8.0 if quick else 15.0
+    step(f"전체 토픽 Hz 측정 중 ({sample_dur}초)...")
+
+    topics = [t for t, _, _ in PIPELINE_TOPICS]
+    hz_map = measure_hz_multi(topics, duration=sample_dur, env=env)
+
+    cpu_cam  = measure_cpu_of("realsense2_camera", samples=5, interval=sample_dur / 5)
+    cpu_slam = measure_cpu_of("rtabmap",           samples=5, interval=sample_dur / 5)
+
+    kill_pgroup(slam_proc)
+    time.sleep(1.0)
+    kill_pgroup(cam_proc)
+    time.sleep(1.5)
+
+    print("\n  ┌─ 토픽별 상태 ──────────────────────────────────────────")
+    diag = []
+    for topic, label, min_hz in PIPELINE_TOPICS:
+        measured = hz_map.get(topic, 0.0)
+        if measured >= min_hz:
+            symbol = f"{GREEN}✓{RESET}"
+            status = "OK"
+        elif measured > 0:
+            symbol = f"{YELLOW}△{RESET}"
+            status = "저하"
+        else:
+            symbol = f"{RED}✗{RESET}"
+            status = "없음"
+        print(f"  │  {symbol} [{label:30s}] {measured:6.1f} Hz  (기준: ≥{min_hz}Hz)  → {status}")
+        diag.append({
+            "topic": topic, "label": label,
+            "min_hz": min_hz, "measured_hz": round(measured, 2),
+            "status": status,
+        })
+    print("  └──────────────────────────────────────────────────────")
+
+    print(f"\n  CPU 점유율  카메라: {cpu_cam}%   SLAM: {cpu_slam}%")
+
+    # 종합 판정
+    all_ok    = all(d["status"] == "OK" for d in diag)
+    slam_live = diag[4]["status"] != "없음"  # TOPIC_ODOM
+    map_live  = diag[5]["status"] != "없음"  # TOPIC_MAP
+
+    if all_ok:
+        print(f"\n  {GREEN}{BOLD}✅ 파이프라인 전체 정상 동작. RViz2 에서 데이터 확인 가능합니다!{RESET}")
+    elif slam_live:
+        print(f"\n  {YELLOW}{BOLD}⚠️  SLAM 동작 중이지만 일부 토픽 성능 저하. 보고서를 확인하세요.{RESET}")
+    else:
+        print(f"\n  {RED}{BOLD}❌ SLAM이 시작되지 않았습니다. Stage 2 파라미터를 재검토하세요.{RESET}")
+
+    return {
+        "diagnostics": diag,
+        "cpu_cam"    : cpu_cam,
+        "cpu_slam"   : cpu_slam,
+        "all_ok"     : all_ok,
+        "slam_live"  : slam_live,
+        "map_live"   : map_live,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  보고서 생성
+# ═══════════════════════════════════════════════════════════════════════
+
+def write_report(sys_info: dict, s1: dict, s2: dict, s3: dict,
+                 timestamp: str) -> str:
+    os.makedirs(LOG_DIR, exist_ok=True)
+    report_path = os.path.join(LOG_DIR, f"slam_benchmark_{timestamp}.md")
+
+    best_cam  = s1["best"]
+    best_slam = s2["best"]
+
+    # ─── 최적 파라미터 → launch_common.py 반영 제안 ─────────────────
+    slam_params = best_slam["params"]
+    rtabmap_args_lines = []
+    for k, v in slam_params.items():
+        if k not in {"approx_sync", "approx_sync_max_interval", "topic_queue_size"}:
+            rtabmap_args_lines.append(f"    '--{k} {v} '")
+    suggested_rtabmap_args = "RTABMAP_ARGS = (\n" + "\n".join(rtabmap_args_lines) + "\n)"
+
+    md = f"""# 📊 통합 SLAM 파이프라인 벤치마크 보고서
+
+- **생성 일시**: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+- **대상 장비**: Intel RealSense D435i + RTAB-Map (rtabmap_ros)
+- **OS 네트워크 버퍼**: `{sys_info['rmem_max']}`
+- **USB 연결 상태**: `{sys_info['usb_type']}`
+- **vCPU 수**: {sys_info['nproc']}
+- **FastDDS XML 존재**: `{'✓' if sys_info['fastdds_xml_exists'] else '✗'}`
+
+---
+
+## 🏆 최종 권장 설정
+
+### 카메라 / DDS / QoS
+| 항목 | 값 |
+|:---|:---|
+| DDS 미들웨어 | `{best_cam['rmw']}` (`{best_cam['shm']}`) |
+| 해상도 & FPS | `{best_cam['resolution']} @ {best_cam['target_fps']} fps` |
+| QoS | `{best_cam['qos']}` |
+| 실측 color Hz | **{best_cam['color_hz']} Hz** |
+| 실측 depth Hz | **{best_cam['depth_hz']} Hz** |
+| 프레임 손실률 | {best_cam['drop_pct']}% |
+| 카메라 CPU | {best_cam['cpu_pct']}% |
+
+### SLAM 파라미터
+| 항목 | 값 |
+|:---|:---|
+| 조합 라벨 | `{best_slam['label']}` |
+| /odom Hz | **{best_slam['odom_hz']} Hz** |
+| /mapData Hz | **{best_slam['map_hz']} Hz** |
+| 카메라 CPU | {best_slam['cpu_cam']}% |
+| SLAM CPU | {best_slam['cpu_slam']}% |
+| 종합 점수 | **{best_slam['score']}** |
+
+---
+
+## 💡 `launch_common.py` 반영 제안
+
+아래 내용을 `src/auto_mobility/launch_common.py` 의 `RTABMAP_ARGS` 에 적용하세요:
+
+```python
+{suggested_rtabmap_args}
+```
+
+---
+
+## 🔬 Stage 3 — 전체 파이프라인 진단 결과
+
+"""
+    diag = s3["diagnostics"]
+    md += "| 토픽 | 기준 (≥Hz) | 실측 Hz | 상태 |\n"
+    md += "|:---|:---:|:---:|:---:|\n"
+    for d in diag:
+        icon = "✅" if d["status"] == "OK" else ("⚠️" if d["status"] == "저하" else "❌")
+        md += f"| `{d['topic']}` | {d['min_hz']} | **{d['measured_hz']}** | {icon} {d['status']} |\n"
+
+    overall = "✅ 전체 정상" if s3["all_ok"] else ("⚠️ 일부 저하" if s3["slam_live"] else "❌ SLAM 미동작")
+    md += f"\n**종합 판정**: {overall}  |  카메라 CPU: {s3['cpu_cam']}%  |  SLAM CPU: {s3['cpu_slam']}%\n"
+
+    # ─── Stage 1 전체 결과 테이블 ─────────────────────────────────────
+    md += "\n---\n\n## 📋 Stage 1 — 카메라/DDS 전체 결과 (성능순)\n\n"
+    md += "| 순위 | RMW | SHM | 해상도@FPS | QoS | color Hz | depth Hz | 손실률 | CPU | 점수 |\n"
+    md += "|:---:|:---|:---:|:---|:---:|:---:|:---:|:---:|:---:|:---:|\n"
+    for i, r in enumerate(s1["all"], 1):
+        medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else str(i)))
+        md += (f"| {medal} | `{r['rmw']}` | `{r['shm']}` | "
+               f"`{r['resolution']}@{r['target_fps']}fps` | `{r['qos']}` | "
+               f"**{r['color_hz']}** | {r['depth_hz']} | "
+               f"{r['drop_pct']}% | {r['cpu_pct']}% | **{r['score']}** |\n")
+
+    # ─── Stage 2 전체 결과 테이블 ─────────────────────────────────────
+    md += "\n---\n\n## 📋 Stage 2 — SLAM 파라미터 전체 결과 (성능순)\n\n"
+    md += "| 순위 | 조합 | odom Hz | map Hz | cam CPU | slam CPU | 점수 |\n"
+    md += "|:---:|:---|:---:|:---:|:---:|:---:|:---:|\n"
+    for i, r in enumerate(s2["all"], 1):
+        medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else str(i)))
+        cam_ok  = "✅" if r["camera_ok"] else "⚠️"
+        slam_ok = "✅" if r["slam_ok"]  else "❌"
+        md += (f"| {medal} | `{r['label']}` | "
+               f"**{r['odom_hz']}** {slam_ok} | {r['map_hz']} | "
+               f"{r['cpu_cam']}% {cam_ok} | {r['cpu_slam']}% | **{r['score']}** |\n")
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(md)
+
+    return report_path
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Entry Point
+# ═══════════════════════════════════════════════════════════════════════
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="통합 SLAM 파이프라인 벤치마크 (카메라 → DDS/QoS → SLAM 파라미터 → 종합 진단)"
+    )
+    parser.add_argument("--quick",  action="store_true",
+                        help="핵심 조합만 빠르게 측정 (전체 대비 약 1/3 시간)")
+    parser.add_argument("--stage",  type=int, choices=[1, 2, 3], default=0,
+                        help="특정 단계만 실행 (0=전체, 1=카메라, 2=SLAM, 3=진단)")
+    parser.add_argument("--stage1-json", type=str, default=None,
+                        help="Stage 1 결과 JSON 파일 경로 (--stage 2/3 실행 시 사용)")
+    parser.add_argument("--stage2-json", type=str, default=None,
+                        help="Stage 2 결과 JSON 파일 경로 (--stage 3 실행 시 사용)")
+    args = parser.parse_args()
+
+    os.makedirs(LOG_DIR, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    banner("통합 SLAM 파이프라인 벤치마크", BOLD + BLUE)
+    print(f"  모드: {'빠른 측정' if args.quick else '정밀 측정'}")
+    print(f"  대상 단계: {args.stage if args.stage else '1 → 2 → 3 (전체)'}\n")
+
+    sys_info = check_system()
+    print(f"  RMW 목록: {', '.join(sys_info['rmws'])}")
+    print(f"  네트워크 버퍼: {sys_info['rmem_max']}")
+    print(f"  USB 상태: {sys_info['usb_type']}")
+    print(f"  vCPU: {sys_info['nproc']}")
+    print(f"  FastDDS XML: {'존재' if sys_info['fastdds_xml_exists'] else '없음'}\n")
+
+    # ── Stage 1 ───────────────────────────────────────────────────────
+    s1 = None
+    if args.stage in (0, 1):
+        s1 = run_stage1(sys_info, quick=args.quick)
+        s1_path = os.path.join(LOG_DIR, f"slam_bench_s1_{timestamp}.json")
+        with open(s1_path, "w", encoding="utf-8") as f:
+            json.dump(s1, f, ensure_ascii=False, indent=2)
+        ok(f"Stage 1 결과 저장: {s1_path}")
+    elif args.stage1_json:
+        with open(args.stage1_json, encoding="utf-8") as f:
+            s1 = json.load(f)
+        ok(f"Stage 1 결과 로드: {args.stage1_json}")
+    else:
+        err("--stage 2/3 실행 시 --stage1-json 이 필요합니다.")
+        sys.exit(1)
+
+    if args.stage == 1:
+        print(f"\n{BOLD}Stage 1 완료. --stage 2 로 SLAM 파라미터 측정을 계속하세요.{RESET}")
+        return
+
+    # ── Stage 2 ───────────────────────────────────────────────────────
+    s2 = None
+    if args.stage in (0, 2):
+        s2 = run_stage2(s1, sys_info, quick=args.quick)
+        s2_path = os.path.join(LOG_DIR, f"slam_bench_s2_{timestamp}.json")
+        with open(s2_path, "w", encoding="utf-8") as f:
+            json.dump(s2, f, ensure_ascii=False, indent=2)
+        ok(f"Stage 2 결과 저장: {s2_path}")
+    elif args.stage2_json:
+        with open(args.stage2_json, encoding="utf-8") as f:
+            s2 = json.load(f)
+        ok(f"Stage 2 결과 로드: {args.stage2_json}")
+    else:
+        err("--stage 3 실행 시 --stage2-json 이 필요합니다.")
+        sys.exit(1)
+
+    if args.stage == 2:
+        print(f"\n{BOLD}Stage 2 완료. --stage 3 로 종합 진단을 계속하세요.{RESET}")
+        return
+
+    # ── Stage 3 ───────────────────────────────────────────────────────
+    s3 = run_stage3(s1, s2, quick=args.quick)
+
+    # ── 보고서 ────────────────────────────────────────────────────────
+    report_path = write_report(sys_info, s1, s2, s3, timestamp)
+
+    banner("벤치마크 완료", GREEN + BOLD)
+    print(f"  보고서: {report_path}")
+    best_cam  = s1["best"]
+    best_slam = s2["best"]
+    print(f"\n  {BOLD}[최적 카메라]{RESET} {best_cam['rmw']}({best_cam['shm']}) "
+          f"{best_cam['resolution']}@{best_cam['target_fps']}fps  QoS={best_cam['qos']}")
+    print(f"  {BOLD}[최적 SLAM  ]{RESET} {best_slam['label']}")
+    print(f"\n  ※ 보고서의 'launch_common.py 반영 제안' 섹션을 참고해 파라미터를 업데이트하세요.")
+
+
+if __name__ == "__main__":
+    main()

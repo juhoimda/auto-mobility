@@ -33,7 +33,7 @@ if [ ! -f "$MESH_FILE" ]; then
     exit 1
 fi
 
-LOADER_SCRIPT="$PROJECT_DIR/src/auto_mobility/processing/load_isaac_mesh.py"
+LOADER_SCRIPT="$PROJECT_DIR/src/auto_mobility/isaac/load_isaac_mesh.py"
 
 echo "=========================================================="
 echo " 🚀 Digital Twin Isaac Sim Launcher"

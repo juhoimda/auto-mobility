@@ -14,9 +14,9 @@ class CompressedRepublisher(Node):
         
         # ROS2 주제(Topic) 파라미터 선언 및 취득
         self.declare_parameter('rgb_compressed_topic', '/camera/camera/color/image_raw/compressed')
-        self.declare_parameter('depth_compressed_topic', '/camera/camera/aligned_depth_to_color/image_raw/compressedDepth')
+        self.declare_parameter('depth_compressed_topic', '/camera/camera/depth/image_rect_raw/compressedDepth')
         self.declare_parameter('rgb_raw_topic', '/camera/camera/color/image_raw')
-        self.declare_parameter('depth_raw_topic', '/camera/camera/aligned_depth_to_color/image_raw')
+        self.declare_parameter('depth_raw_topic', '/camera/camera/depth/image_rect_raw')
 
         rgb_comp = self.get_parameter('rgb_compressed_topic').get_parameter_value().string_value
         depth_comp = self.get_parameter('depth_compressed_topic').get_parameter_value().string_value

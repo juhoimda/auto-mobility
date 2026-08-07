@@ -3,11 +3,12 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     """
-    Intel RealSense D435i 최적 런치 파일 (벤치마크 1위 검증: 1280x720@30fps, SENSOR_DATA QoS)
-    - RGB (1280x720@30fps, RGB8)
-    - Depth (1280x720@30fps, Z16)
-    - IMU (/camera/camera/imu 통합 ~185Hz)
-    - FastDDS SHM + SENSOR_DATA QoS 적용 (프레임 손실률 0.0%)
+    Intel RealSense D435i VMware 가상화 최적 런치 파일
+    - RGB (640x480@30fps, MJPEG 하드웨어 압축 -> USB 대역폭 90% 절감)
+    - Depth (640x480@30fps, Z16)
+    - align_depth.enable: False (vCPU 픽셀 정렬 병목 제거)
+    - IMU (/camera/camera/imu 통합 ~185Hz, unite_imu_method='copy')
+    - FastDDS SHM + SENSOR_DATA QoS 적용
     """
     return LaunchDescription([
         Node(
@@ -17,21 +18,23 @@ def generate_launch_description():
             namespace='camera',
             output='screen',
             parameters=[{
-                'depth_module.depth_profile': '1280x720x30',
-                'rgb_camera.color_profile': '1280x720x30',
+                'depth_module.depth_profile': '640x480x30',
+                'rgb_camera.color_profile': '640x480x30',
                 'rgb_camera.color_format': 'RGB8',
-                'align_depth.enable': True,
+                'align_depth.enable': False,
                 'enable_infra1': False,
                 'enable_infra2': False,
                 'enable_accel': True,
                 'enable_gyro': True,
-                'unite_imu_method': 1,
+                'unite_imu_method': 1,  # 1: copy mode (gyro + accel merged into /camera/camera/imu)
+                'enable_metadata': False,
+                'global_time_enabled': False,
+                'initial_reset': False,
                 'rgb_camera.auto_exposure_priority': False,
                 'color_qos': 'SENSOR_DATA',
                 'color_info_qos': 'SENSOR_DATA',
                 'depth_qos': 'SENSOR_DATA',
                 'depth_info_qos': 'SENSOR_DATA',
-                'pointcloud.pointcloud_qos': 'SENSOR_DATA',
             }]
         )
     ])

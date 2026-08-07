@@ -1,132 +1,141 @@
-# 🛠️ Auto-Mobility 파이프라인 가이드 (Operations Guide)
+# 🛠️ Auto-Mobility 파이프라인 개발자 가이드 (Developer Guide)
 
-RealSense D435i 센서 수집부터 3D Digital Twin Mesh 복원까지의 핵심 명령어 모음입니다.
+RealSense D435i 센서 수집, IMU 융합 SLAM, 3D Mesh 복원 및 시스템 검증을 위한 **개발자 실행 가이드**입니다.
 
 ---
 
 ## ⚙️ 0. 환경 구축 및 빌드 (Setup & Build)
 
 ```bash
-# 워크스페이스 빌드 및 환경 로드
+# 1. 워크스페이스 빌드 및 환경 로드
 colcon build --symlink-install
+source /opt/ros/humble/setup.bash
 source install/setup.bash
+
+# 2. Python 패키지 경로 등록 (src 모듈 참조)
+export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
 ```
 
 ---
 
-## 📊 1. 시스템 헬스 체크 & 토픽 진단 (Health Check)
+## 📸 1. 센서 수집 및 IMU 상태 검증 (Hardware Verification)
 
-DDS 설정, USB 모드, 실시간 압축/Raw 토픽 수신 상태 및 용량을 진단합니다.
-
-```bash
-./scripts/utils/check.sh
-```
-
----
-
-## 📸 2. 실시간 카메라 구동 및 SLAM 맵핑 (Live Mapping)
-
-카메라 노드를 구동하거나, 실시간 3D Visual SLAM을 실행하여 `.db` 지도를 저장합니다.
+개발자는 카메라 단독 노드를 실행하고 **RGB-D 프레임 레이트**와 **IMU(가속도/자이로) 200Hz 데이터** 발행 여부를 직접 확인할 수 있습니다.
 
 ```bash
-# [단독 실행] RealSense D435i 카메라 노드 실행
+# [실행] RealSense D435i 카메라 노드 기동 (IMU enabled, unite_imu_method=1)
 ros2 launch auto_mobility camera.launch.py
+```
 
-# [라이브 SLAM] 실시간 카메라 스트림 맵핑 및 DB 저장 (기본값: live_날짜시각.db, USE_COMPRESSED: false)
+### 🔍 개발자 확인 항목 (Topic Hz & Output Verification)
+```bash
+# 센서 토픽 출력 상태 확인
+ros2 topic echo /camera/camera/imu --once
+
+# 토픽 발행 주파수 검증 (새 터미널)
+ros2 topic hz /camera/camera/color/image_raw \
+              /camera/camera/depth/image_rect_raw \
+              /camera/camera/imu
+```
+* **정상 확인 기준**:
+  * `/camera/camera/color/image_raw`: **~30 Hz** (640x480 RGB8)
+  * `/camera/camera/depth/image_rect_raw`: **~30 Hz** (640x480 Z16)
+  * `/camera/camera/imu`: **~200 Hz** (Accel 100Hz + Gyro 200Hz Copy 통합)
+
+---
+
+## 🗺️ 2. 실시간 Visual-Inertial SLAM (Live Mapping)
+
+IMU 필터(`imu_filter_madgwick`)와 RTAB-Map Graph SLAM을 융합하여 3D 지도 데이터베이스(`.db`)를 생성합니다.
+
+```bash
+# [방법 1: 원스톱 스크립트 실행] 카메라 자동 감지 및 Live SLAM 구동
 ./scripts/pipeline/run_live.sh [DB_NAME] [USE_COMPRESSED]
 
+# 예시: my_office.db로 저장
+./scripts/pipeline/run_live.sh my_office false
+```
+
+```bash
+# [방법 2: 노드 개별 실행] 로그 및 디버깅용 (터미널 2개 분리)
+# Terminal 1: 카메라 실행
+ros2 launch auto_mobility camera.launch.py
+
+# Terminal 2: Live SLAM 실행 (Madgwick IMU Filter + RTAB-Map + RViz2)
+ros2 launch auto_mobility rtab_live.launch.py database_path:=./ros2_data/databases/my_office.db
+```
+
+### 🔍 개발자 확인 항목
+* **RViz2 화면**: 3D Point Cloud 지도가 중력 방향(`GravityProvided`)에 맞게 수평 유지되는지 확인
+* **Odometry Hz**: `/rtabmap/odom` 토픽이 **~5 Hz**로 오도메트리 손실 없이 유지되는지 확인
+
+---
+
+## 🎬 3. ROS2 Bag 데이터 녹화 및 오프라인 SLAM (Record & Playback)
+
+센서 데이터를 MCAP 포맷으로 녹화한 후 재생하거나 오프라인 SLAM 맵핑을 수행합니다.
+
+```bash
+# [녹화] 센서 데이터(RGB, Depth, IMU, TF) MCAP 녹화 (종료: Ctrl+C)
+./scripts/pipeline/record.sh capture_test --compressed
+
+# [재생] MCAP 녹화본 재생 (기본 0.5배속)
+./scripts/pipeline/play.sh capture_test 0.5
+
+# [오프라인 SLAM] 녹화본(Bag) 기반 오프라인 RTAB-Map 맵핑
+./scripts/pipeline/run_bag.sh capture_test
 ```
 
 ---
 
-## 🎬 3. 데이터 녹화 및 재생 (Record & Play)
+## 🧊 4. 3D Digital Twin Mesh 복원 및 검증 (Mesh & Inspection)
 
-카메라 센서 토픽(RGB/Depth 압축, IMU, TF)을 MCAP 포맷으로 녹화/재생합니다.
+SLAM 데이터베이스(`.db`)에서 Point Cloud를 추출하고 Open3D 기반 Surface Reconstruction을 통해 `.obj` 3D 모델을 복원합니다.
 
 ```bash
-# [녹화] Bag 데이터 녹화 (종료: Ctrl+C)
-./scripts/pipeline/record.sh [BAG_NAME]
+# [원스톱 실행] DB -> PLY 추출 -> 품질 검증 -> Open3D Poisson Mesh 생성 및 뷰어 표시
+./scripts/pipeline/mesh.sh my_office my_office_mesh --view
 
-# [재생] Bag 데이터 재생 (기본 0.5배속)
-./scripts/pipeline/play.sh [BAG_NAME] [RATE]
+# [단독 뷰어] 생성된 3D Mesh (.obj / .ply) 시각화 뷰어 실행
+./scripts/utils/view_mesh.sh my_office_mesh.obj
+```
 
-# [오프라인 SLAM] 녹화본(Bag) 데이터 기반 맵핑 및 DB 저장
-./scripts/pipeline/run_bag.sh [BAG_NAME]
+### 🛠️ 개발자 개별 모듈 디버깅 명령
+```bash
+# 1) DB -> PointCloud (.ply) 수동 추출
+./scripts/utils/export_ply.sh my_office.db my_cloud.ply
+
+# 2) 데이터 품질 및 점 밀도 무결성 검증
+python3 src/auto_mobility/utils/validate.py --db ./ros2_data/databases/my_office.db --ply ./ros2_data/pointclouds/my_cloud.ply
+
+# 3) Open3D Mesh 복원 스크립트 실행
+python3 src/auto_mobility/mesh/mesh_open3d.py ./ros2_data/pointclouds/my_cloud.ply ./ros2_data/meshes/my_mesh.obj --view
 ```
 
 ---
 
-## 🧊 4. 3D Mesh 복원 및 검증 (Mesh Generation & Validation)
+## 📊 5. 통합 시스템 진단 및 벤치마크 (Diagnostics & Benchmark)
 
-SLAM 결과인 `.db` 파일에서 Point Cloud를 추출하고 무결성 검증을 거쳐 Open3D 3D Mesh(`*.obj`)를 복원합니다.
+현재 가상머신/하드웨어 환경의 DDS 통신, 패킷 손실, IMU 반응속도 및 SLAM 파이프라인 성능을 전수 검사합니다.
 
 ```bash
-# [기본] DB -> PLY 추출 -> 무결성 자동 검증 -> Open3D Poisson Reconstruction & 시각화
-./scripts/pipeline/mesh.sh [DB_NAME] [OUTPUT_MESH_NAME] --view
+# [시스템 종합 헬스 체크] DDS, USB, 시스템 소켓 버퍼 검사
+./scripts/utils/check.sh
 
-# [옵션] 검증 경고 무시하고 강제 생성
-./scripts/pipeline/mesh.sh [DB_NAME] [OUTPUT_MESH_NAME] --force
-
-# [옵션] RTAB-Map 텍스처 맵핑 방식 사용 시
-./scripts/pipeline/mesh.sh [DB_NAME] [OUTPUT_MESH_NAME] --method rtabmap
+# [통합 SLAM 파이프라인 벤치마크] Stage 1(센서/DDS) -> Stage 2(SLAM) -> Stage 3(종합진단)
+python3 src/auto_mobility/slam/benchmark_slam.py --quick
 ```
 
-### 🛠️ 수동 모듈 개별 실행 (디버깅용)
-```bash
-# 1) DB -> PointCloud (.ply) 추출
-./scripts/utils/export_ply.sh my_room.db my_cloud.ply
-
-# 2) PointCloud 및 Mesh 품질/무결성 자동 검증
-python3 src/auto_mobility/processing/validate.py --db ./ros2_data/databases/my_room.db --ply ./ros2_data/pointclouds/my_cloud.ply
-python3 src/auto_mobility/processing/validate.py --mesh ./ros2_data/meshes/my_room_mesh.obj
-
-# 3) Open3D 3D Mesh 복원
-python3 src/auto_mobility/processing/mesh_open3d.py ./ros2_data/pointclouds/my_cloud.ply ./ros2_data/meshes/my_mesh.obj --view
-
-# 4) 생성된 3D Mesh (.obj / .ply) 뷰어 단독 실행
-./scripts/utils/view_mesh.sh my_room_mesh.obj
-# 또는
-python3 src/auto_mobility/processing/view_mesh.py ./ros2_data/meshes/my_room_mesh.obj --wireframe
-```
+### 🔍 벤치마크 결과 보고서 확인
+* 실행 완료 후 [`ros2_data/logs/slam_benchmark_YYYYMMDD_HHMMSS.md`](file:///home/kth/auto-mobility/ros2_data/logs) 파일에서 토픽별 실측 Hz 및 CPU 점유율 보고서를 직접 확인할 수 있습니다.
 
 ---
 
-## 🤖 5. NVIDIA Isaac Sim 디지털 트윈 로드 (Isaac Sim Ingestion)
+## 🧪 6. 자동화 단위 & 통합 테스트 (Unit & Integration Tests)
 
-생성된 3D Mesh(`*.obj`) 및 Isaac Sim 전용 Scene (`*.usd`)을 시뮬레이션 환경에 로드합니다.
-
-```bash
-# [Linux/Isaac Sim 직접 실행]
-./scripts/pipeline/isaac.sh [MESH_NAME_OR_PATH]
-```
-
-> 💡 **참고 (VMware ↔ Windows 이원화 환경)**:  
-> VMware에서 파이프라인 구동 시 `.obj`와 함께 **`.usd` 파일이 자동 생성**됩니다.  
-> 윈도우의 Isaac Sim GUI 화면으로 해당 `.usd` 파일(또는 공유폴더 파일)을 **드래그 앤 드롭(Drag & Drop)** 하면 즉시 물리 속성이 포함되어 구동되며, 윈도우 스크립트는 불필요합니다.
-
----
-
-## 🔄 6. End-to-End Real-to-Sim 원스톱 파이프라인 (Full Pipeline)
-
-센서 데이터 수집부터 3D Mesh 복원, 무결성 검증 차단막(Integrity Barriers), Isaac Sim 디지털 트윈 Ingestion까지 전 과정을 한번에 실행합니다.
+개발 후 모듈 무결성, 런치 파이프라인 생성 및 설정 파싱 결과를 자동 검증하고 코드 커버리지를 측정합니다.
 
 ```bash
-# [전체 파이프라인] 실시간 캡처 -> DB 검증 -> Open3D Mesh 복원 -> Mesh 검증 -> Isaac Sim 로드
-./scripts/pipeline/run_pipeline_all.sh
-
-# [기존 DB 사용] 캡처 단계 skip
-./scripts/pipeline/run_pipeline_all.sh --db=my_room.db --skip-capture
-
-# [Isaac Sim 생략] Mesh 생성까지만 실행
-./scripts/pipeline/run_pipeline_all.sh --db=my_room.db --skip-isaac
-```
-
----
-
-## ⚡ 7. 하드웨어 자동 벤치마크 (Hardware Benchmark)
-
-현재 하드웨어 환경에서 최적의 DDS/QoS/해상도 조합을 측정하고 보고서를 생성합니다.
-
-```bash
-./scripts/utils/benchmark.sh
+# [원스톱 테스트 및 커버리지 리포트 실행]
+./scripts/utils/run_tests.sh
 ```

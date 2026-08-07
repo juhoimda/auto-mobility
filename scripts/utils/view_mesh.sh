@@ -33,4 +33,4 @@ if [ ! -f "$MESH_FILE" ]; then
     exit 1
 fi
 
-python3 "$PROJECT_DIR/src/auto_mobility/processing/view_mesh.py" "$MESH_FILE" "$@"
+python3 "$PROJECT_DIR/src/auto_mobility/mesh/view_mesh.py" "$MESH_FILE" "$@"
