@@ -24,6 +24,7 @@ def generate_launch_description():
                 'align_depth.enable': False,
                 'enable_infra1': False,
                 'enable_infra2': False,
+                'depth_module.emitter_enabled': True,  # IR Laser Projector (무늬 없는 흰 벽면 특징점 강제 생성)
                 'enable_accel': True,
                 'enable_gyro': True,
                 'unite_imu_method': 1,  # 1: copy mode (gyro + accel merged into /camera/camera/imu)
