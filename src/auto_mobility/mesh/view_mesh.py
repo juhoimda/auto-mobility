@@ -50,8 +50,17 @@ def view_mesh(mesh_path, wireframe=False, back_face=True):
     opt.mesh_show_wireframe = wireframe
     opt.background_color = np.array([0.1, 0.1, 0.1])
     
-    vis.run()
-    vis.destroy_window()
+    try:
+        while True:
+            if not vis.poll_events():
+                break
+            vis.update_renderer()
+
+    except KeyboardInterrupt:
+        print("\nViewer closed by Ctrl+C")
+
+    finally:
+        vis.destroy_window()
 
 def main():
     parser = argparse.ArgumentParser(description="View 3D Mesh (.obj, .ply, .stl, etc.) using Open3D")
