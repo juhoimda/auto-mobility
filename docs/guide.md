@@ -1,141 +1,118 @@
-# 🛠️ Auto-Mobility 파이프라인 개발자 가이드 (Developer Guide)
+# 🛠️ Auto-Mobility 개발자 및 사용 가이드
 
-RealSense D435i 센서 수집, IMU 융합 SLAM, 3D Mesh 복원 및 시스템 검증을 위한 **개발자 실행 가이드**입니다.
+Auto-Mobility 파이프라인의 핵심 실행 명령어 모음입니다.
 
 ---
 
-## ⚙️ 0. 환경 구축 및 빌드 (Setup & Build)
+## ⚙️ 0. 환경 구축 및 빌드
 
 ```bash
-# 1. 워크스페이스 빌드 및 환경 로드
+# 워크스페이스 빌드 및 환경 설정
 colcon build --symlink-install
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-
-# 2. Python 패키지 경로 등록 (src 모듈 참조)
 export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
 ```
 
 ---
 
-## 📸 1. 센서 수집 및 IMU 상태 검증 (Hardware Verification)
-
-개발자는 카메라 단독 노드를 실행하고 **RGB-D 프레임 레이트**와 **IMU(가속도/자이로) 200Hz 데이터** 발행 여부를 직접 확인할 수 있습니다.
+## 🔄 1. 전체 파이프라인 원스톱 실행 (Real-to-Sim)
 
 ```bash
-# [실행] RealSense D435i 카메라 노드 기동 (IMU enabled, unite_imu_method=1)
-ros2 launch auto_mobility camera.launch.py
+# [전체 파이프라인] 실시간 수집 -> DB 무결성 검증 -> Mesh 생성 -> Isaac Sim 검증
+./scripts/pipeline/run_pipeline_all.sh [--db=DB_NAME.db] [--skip-capture] [--skip-isaac]
 ```
-
-### 🔍 개발자 확인 항목 (Topic Hz & Output Verification)
-```bash
-# 센서 토픽 출력 상태 확인
-ros2 topic echo /camera/camera/imu --once
-
-# 토픽 발행 주파수 검증 (새 터미널)
-ros2 topic hz /camera/camera/color/image_raw \
-              /camera/camera/depth/image_rect_raw \
-              /camera/camera/imu
-```
-* **정상 확인 기준**:
-  * `/camera/camera/color/image_raw`: **~30 Hz** (640x480 RGB8)
-  * `/camera/camera/depth/image_rect_raw`: **~30 Hz** (640x480 Z16)
-  * `/camera/camera/imu`: **~200 Hz** (Accel 100Hz + Gyro 200Hz Copy 통합)
+* **인자 설명**:
+  * `--db=DB_NAME`: 저장/사용할 SLAM DB파일명 (기본값: `session_날짜시간.db`)
+  * `--skip-capture`: 카메라 실시간 수집을 건너뛰고 기존 DB 사용
+  * `--skip-isaac`: Isaac Sim 검증 단계를 건너뜀
 
 ---
 
-## 🗺️ 2. 실시간 Visual-Inertial SLAM (Live Mapping)
-
-IMU 필터(`imu_filter_madgwick`)와 RTAB-Map Graph SLAM을 융합하여 3D 지도 데이터베이스(`.db`)를 생성합니다.
+## 📸 2. 카메라 수집 및 센서 검증
 
 ```bash
-# [방법 1: 원스톱 스크립트 실행] 카메라 자동 감지 및 Live SLAM 구동
-./scripts/pipeline/run_live.sh [DB_NAME] [USE_COMPRESSED]
-
-# 예시: my_office.db로 저장
-./scripts/pipeline/run_live.sh my_office false
-```
-
-```bash
-# [방법 2: 노드 개별 실행] 로그 및 디버깅용 (터미널 2개 분리)
-# Terminal 1: 카메라 실행
+# 1. RealSense D435i 노드 실행 (RGB-D + IMU 200Hz)
 ros2 launch auto_mobility camera.launch.py
 
-# Terminal 2: Live SLAM 실행 (Madgwick IMU Filter + RTAB-Map + RViz2)
+# 2. 토픽 수신 상태 및 Hz 확인
+ros2 topic echo /camera/camera/imu --once
+ros2 topic hz /camera/camera/color/image_raw /camera/camera/depth/image_rect_raw /camera/camera/imu
+```
+
+---
+
+## 🗺️ 3. 실시간 Visual-Inertial SLAM
+
+```bash
+# [원스톱] Live SLAM 실행 (DB 생성 및 RViz2 시각화)
+./scripts/pipeline/run_live.sh [DB_NAME] [USE_COMPRESSED]
+# 예시: ./scripts/pipeline/run_live.sh my_office false
+
+# [수동] 카메라 노드 실행 후 Live SLAM 수동 구동
+ros2 launch auto_mobility camera.launch.py
 ros2 launch auto_mobility rtab_live.launch.py database_path:=./ros2_data/databases/my_office.db
 ```
-
-### 🔍 개발자 확인 항목
-* **RViz2 화면**: 3D Point Cloud 지도가 중력 방향(`GravityProvided`)에 맞게 수평 유지되는지 확인
-* **Odometry Hz**: `/rtabmap/odom` 토픽이 **~5 Hz**로 오도메트리 손실 없이 유지되는지 확인
-
----
-
-## 🎬 3. ROS2 Bag 데이터 녹화 및 오프라인 SLAM (Record & Playback)
-
-센서 데이터를 MCAP 포맷으로 녹화한 후 재생하거나 오프라인 SLAM 맵핑을 수행합니다.
-
-```bash
-# [녹화] 센서 데이터(RGB, Depth, IMU, TF) MCAP 녹화 (종료: Ctrl+C)
-./scripts/pipeline/record.sh capture_test --compressed
-
-# [재생] MCAP 녹화본 재생 (기본 0.5배속)
-./scripts/pipeline/play.sh capture_test 0.5
-
-# [오프라인 SLAM] 녹화본(Bag) 기반 오프라인 RTAB-Map 맵핑
-./scripts/pipeline/run_bag.sh capture_test
-```
+* **인자 설명**:
+  * `DB_NAME`: 저장할 DB 이름 (확장자 제외, 기본값: `rtabmap`)
+  * `USE_COMPRESSED`: 압축 토픽 사용 여부 (`true` / `false`, 기본값: `false`)
+  * `database_path`: RTAB-Map DB 파일 저장 경로
 
 ---
 
-## 🧊 4. 3D Digital Twin Mesh 복원 및 검증 (Mesh & Inspection)
-
-SLAM 데이터베이스(`.db`)에서 Point Cloud를 추출하고 Open3D 기반 Surface Reconstruction을 통해 `.obj` 3D 모델을 복원합니다.
+## 🎬 4. ROS2 Bag 녹화, 재생 및 오프라인 SLAM
 
 ```bash
-# [원스톱 실행] DB -> PLY 추출 -> 품질 검증 -> Open3D Poisson Mesh 생성 및 뷰어 표시
-./scripts/pipeline/mesh.sh my_office my_office_mesh --view
+# [녹화] 센서 토픽 MCAP 압축 녹화 (Ctrl+C 종료)
+./scripts/pipeline/record.sh [BAG_NAME] [--compressed]
 
-# [단독 뷰어] 생성된 3D Mesh (.obj / .ply) 시각화 뷰어 실행
-./scripts/utils/view_mesh.sh my_office_mesh.obj
+# [재생] 녹화 데이터 재생
+./scripts/pipeline/play.sh [BAG_NAME] [RATE]
+
+# [오프라인 SLAM] 녹화본 기반 맵핑
+./scripts/pipeline/run_bag.sh [BAG_NAME]
 ```
-
-### 🛠️ 개발자 개별 모듈 디버깅 명령
-```bash
-# 1) DB -> PointCloud (.ply) 수동 추출
-./scripts/utils/export_ply.sh my_office.db my_cloud.ply
-
-# 2) 데이터 품질 및 점 밀도 무결성 검증
-python3 src/auto_mobility/utils/validate.py --db ./ros2_data/databases/my_office.db --ply ./ros2_data/pointclouds/my_cloud.ply
-
-# 3) Open3D Mesh 복원 스크립트 실행
-python3 src/auto_mobility/mesh/mesh_open3d.py ./ros2_data/pointclouds/my_cloud.ply ./ros2_data/meshes/my_mesh.obj --view
-```
+* **인자 설명**:
+  * `BAG_NAME`: 녹화/재생할 Bag 디렉터리 이름
+  * `--compressed`: 이미지 데이터 압축 녹화 옵션
+  * `RATE`: 재생 속도 (예: `0.5` = 0.5배속, `1.0` = 정속)
 
 ---
 
-## 📊 5. 통합 시스템 진단 및 벤치마크 (Diagnostics & Benchmark)
-
-현재 가상머신/하드웨어 환경의 DDS 통신, 패킷 손실, IMU 반응속도 및 SLAM 파이프라인 성능을 전수 검사합니다.
+## 🧊 5. 3D Mesh 복원 & Isaac Sim 연동
 
 ```bash
-# [시스템 종합 헬스 체크] DDS, USB, 시스템 소켓 버퍼 검사
+# [Mesh 복원] DB -> PLY 추출 및 Open3D Mesh 생성 (.obj)
+./scripts/pipeline/mesh.sh [DB_NAME] [MESH_NAME] [--view] [--force]
+
+# [Mesh 뷰어] 3D Mesh 모델 단독 시각화
+./scripts/utils/view_mesh.sh [MESH_FILE]
+
+# [Isaac Sim] 생성된 Mesh의 물리 충돌 및 USD 로드 검증
+./scripts/pipeline/isaac.sh [MESH_PATH]
+```
+* **인자 설명**:
+  * `DB_NAME`: 읽어올 DB 이름 (확장자 선택)
+  * `MESH_NAME`: 생성할 Mesh 파일명 (`.obj` / `.ply`)
+  * `--view`: Mesh 생성 후 Open3D 3D 뷰어 자동 실행
+  * `--force`: 기존 추출본이 있어도 PLY 재추출 강제 진행
+  * `MESH_FILE / MESH_PATH`: 시각화/검증할 Mesh 파일 경로
+
+---
+
+## 📊 6. 시스템 진단, 벤치마크 & 테스트
+
+```bash
+# [시스템 진단] DDS, USB, 소켓 버퍼 헬스 체크
 ./scripts/utils/check.sh
 
-# [통합 SLAM 파이프라인 벤치마크] Stage 1(센서/DDS) -> Stage 2(SLAM) -> Stage 3(종합진단)
-python3 src/auto_mobility/slam/benchmark_slam.py --quick
-```
+# [SLAM 벤치마크] 파이프라인 성능 측정 (결과: ros2_data/logs/)
+python3 src/auto_mobility/slam/benchmark_slam.py [--quick]
 
-### 🔍 벤치마크 결과 보고서 확인
-* 실행 완료 후 [`ros2_data/logs/slam_benchmark_YYYYMMDD_HHMMSS.md`](file:///home/kth/auto-mobility/ros2_data/logs) 파일에서 토픽별 실측 Hz 및 CPU 점유율 보고서를 직접 확인할 수 있습니다.
-
----
-
-## 🧪 6. 자동화 단위 & 통합 테스트 (Unit & Integration Tests)
-
-개발 후 모듈 무결성, 런치 파이프라인 생성 및 설정 파싱 결과를 자동 검증하고 코드 커버리지를 측정합니다.
-
-```bash
-# [원스톱 테스트 및 커버리지 리포트 실행]
+# [단위/통합 테스트] Pytest 및 커버리지 측정
 ./scripts/utils/run_tests.sh
 ```
+* **인자 설명**:
+  * `--quick`: 빠른 벤치마크 테스트 수행 (측정 시간 단축)
+
+

@@ -11,9 +11,20 @@
 
 ---
 
+## 🚀 Quick Start & Guide
+
+상세한 실행 명령어 및 단계별 사용법은 **[docs/guide.md](file:///home/kth/auto-mobility/docs/guide.md)**를 참조하세요.
+
+```bash
+# 원스톱 Real-to-Sim 전체 파이프라인 실행
+./scripts/pipeline/run_pipeline_all.sh
+```
+
+---
+
 ## 🏗️ 1. 전체 시스템 아키텍처 (System Architecture)
 
-전체 시스템은 **센서 수집 & IMU 필터링 ➔ DDS 압축 통신 ➔ 실시간 융합 SLAM ➔ 3D Mesh 변환** 파이프라인으로 구성되어 있습니다.
+전체 시스템은 **센서 수집 & IMU 필터링 ➔ DDS 압축 통신 ➔ 실시간 융합 SLAM ➔ 3D Mesh 변환 ➔ Isaac Sim 디지털 트윈 검증** 파이프라인으로 구성되어 있습니다.
 
 ```mermaid
 graph LR
@@ -57,7 +68,7 @@ graph LR
         M --> N["RTAB-Map Graph SLAM"]
     end
 
-    subgraph R["Mapping & 3D Reconstruction"]
+    subgraph R["Mapping & 3D Reconstruction & Sim"]
         J --> X["Visual-Inertial Odometry (/rtabmap/odom)"]
         N --> X
 
@@ -67,6 +78,7 @@ graph LR
         Y --> Z["Dense Point Cloud (.ply)"]
         Z --> O["Open3D Poisson Reconstruction"]
         O --> P["Digital Twin Mesh (.obj)"]
+        P --> Q["NVIDIA Isaac Sim Verification"]
     end
 ```
 
@@ -94,8 +106,8 @@ auto-mobility/                         # [패키지 루트]
 │
 ├── scripts/                            # 🟡 CLI 실행 도구 (Shell Scripts)
 │   ├── common.sh                       # 공통 환경설정 및 PYTHONPATH 정의
-│   ├── pipeline/                       # 핵심 실행 파이프라인 (run_live, run_bag, record, play, mesh, isaac)
-│   └── utils/                          # 유틸리티 도구 (check, export_ply, view_mesh, run_tests)
+│   ├── pipeline/                       # 파이프라인 (run_pipeline_all, run_live, run_bag, record, play, mesh, isaac)
+│   └── utils/                          # 유틸리티 (check, export_ply, view_mesh, run_tests, benchmark)
 │
 ├── config/                             # 🔵 FastDDS, RViz2 및 센서 토픽 설정 파일
 │   ├── dds/                            # Middleware / FastDDS 공유메모리 프로필 (fastdds_camera.xml)
