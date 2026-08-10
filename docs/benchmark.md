@@ -1,91 +1,115 @@
-# 📊 Real-to-Sim Visual SLAM 벤치마크 보고서 (QUICK vs FULL 종합 분석)
+# 📊 2026-08-10 실측 벤치마크 최종 보고서 (D435i + RTAB-Map + Open3D)
 
-본 문서는 VMware 가상화 환경(Ubuntu 22.04 LTS, ROS 2 Humble) 및 RealSense D435i 카메라 기반의 **Real-to-Sim 파이프라인 최적화 벤치마크 결과**를 종합 정리한 기술 문서입니다.
-
----
-
-## 1. 📌 핵심 발견 및 결론 (Executive Summary)
-
-1. **카메라 해상도 대역폭 병목 발견 (640x480 vs 1280x720)**
-   * **720p (`1280x720@15fps`) 사용 시**: 비압축 Raw Depth/RGB 데이터 전송량이 **초당 138 MB/s**에 달하여 VMware 가상 USB 버스가 포화됩니다. 이로 인해 **프레임 유실률이 78~89%**까지 치솟으며 Visual Odometry 추적이 실패(`0.0 Hz`)합니다.
-   * **VGA (`640x480@30fps`) 사용 시**: 대역폭이 **초당 27 MB/s**로 안정화되어 **30fps 완충 수신 및 5.2 ~ 7.3 Hz의 매끄러운 Visual Odometry**를 유지합니다.
-
-2. **포즈 추정 알고리즘 혁신 (`3D-2D PnP` vs `3D-3D SVD`)**
-   * `Vis/EstimationType = 1` (3D-2D PnP RANSAC) 설정 시, 3D-3D SVD 방식 대비 **Visual Odometry 주기가 `3.6 Hz` → `5.2 Hz`로 +44.4% 향상**되고 CPU 연산 부하가 40% 절감되었습니다.
-
-3. **적외선 레이저 도트 투사 (IR Emitter) 적용 효과**
-   * `depth_module.emitter_enabled = True` 적용으로 밋밋한 흰 벽면이나 어두운 복도에서도 인공 특징점 패턴을 형성하여 `Vis/MinInliers = 10` 기준을 안정적으로 충족시켰습니다 (**최고 득점 `51.1점` 달성**).
+본 보고서는 **현재 HW 환경(VMware Ubuntu 22.04, USB 3.2, 8vCPU, 31GB)**에서
+카메라/RTAB-Map/Open3D Mesh 파이프라인의 최적 설정을 **직접 실측**한 결과입니다.
 
 ---
 
-## 2. ⚔️ QUICK vs FULL 벤치마크 종합 비교
+## 1. 🏆 최종 확정 설정 요약
 
-| 벤치마크 항목 | QUICK 벤치마크 (탐색 모드) | FULL 정밀 벤치마크 (전수 탐색) | 최종 선택 및 우승 사양 |
-| :--- | :---: | :---: | :--- |
-| **선택 카메라 사양** | **`640x480@30fps`** | `1280x720@15fps` (고해상도 우선) | **`640x480@30fps` (VGA 고정)** |
-| **Visual Odometry Hz** | **`5.22 Hz`** | `0.0 ~ 1.5 Hz` (대역폭 병목) | **`5.22 ~ 7.30 Hz`** |
-| **카메라 수신 수율** | **`30.0 Hz` (Drop 0%)** | `0.9 ~ 4.1 Hz` (Drop 78%) | **`30.0 Hz`** |
-| **SLAM CPU 점유율** | **`7.3%`** | `12.3%` | **`7.3%`** |
-| **RAM 사용량** | **`180.3 MB`** | `226.5 MB` | **`180.3 MB`** |
-| **Disk 쓰기 속도** | **`1.22 MB/min`** | `1.22 MB/min` | **`1.22 MB/min`** |
-| **종합 평가 득점** | 🥇 **`51.1점` (성공)** | ⚠️ `23.2점` (대역폭 포화) | 🏆 **`51.1점` 달성 사양 고정** |
+### 카메라 (`launch/camera.launch.py`)
+| 항목 | 값 | 근거 |
+|:---|:---|:---|
+| 해상도 | **640x480@30fps** | 848x480 depth 19.4Hz 드랍 vs 640x480 29.1Hz 안정 |
+| `align_depth.enable` | `False` | vCPU 정렬 병목 제거 |
+| `unite_imu_method` | `1` (copy) | CPU 절감 |
+| `enable_sync` | `True` | **sync=False 시 depth 4Hz 폭락 (필수)** |
+| `emitter_enabled` | `1` | IR 패턴으로 무벽면 특징점 확보 |
 
----
+### RTAB-Map (`src/auto_mobility/launch/launch_common.py`)
+| 항목 | 값 | 근거 |
+|:---|:---|:---|
+| `Vis/EstimationType` | `1` (PnP) | SVD 대비 CPU 40% 절감 |
+| `OdomF2M/MaxFrames` | `10` | F2M=60은 SLAM 초기화 실패 + VO 지연 누적 |
+| `Mem/STMSize` | `10` | STM=100 대비 RAM 절감, 성능 동일 |
+| `Vis/MinInliers` | `10` | IN=6 대비 +4~5점 |
+| `Vis/MaxDepth` | `4.0` | 원거리 노이즈 필터 (MD=4/8 동일 성능) |
+| `RGBD/LinearUpdate` | `0.10` | 10cm 키프레임 간격 |
+| `Rtabmap/DetectionRate` | `5` | 5Hz 맵핑 루프 |
 
-## 3. ⏱️ QUICK 벤치마크 세부 실험 결과 (5개 조합)
-
-`QUICK` 모드는 `Vis/EstimationType`, `OdomF2M/MaxFrames`, `Vis/MinInliers`의 핵심 파라미터 변화에 따른 성과를 집중 검증했습니다.
-
-| 순위 | 조합 명칭 (파라미터) | Visual Odom (Hz) | SLAM CPU (%) | RAM (MB) | 종합 점수 | 비고 |
-| :---: | :--- | :---: | :---: | :---: | :---: | :--- |
-| 🥇 **1위** | **`PnP(3D-2D) \| F2M=10 \| KF=0.1 \| IN=10`** | **`5.22 Hz`** | **`7.3%`** | **`118.5 MB`** | **`51.1`** | **최종 우승 (최적 사양 확정)** |
-| 🥈 **2위** | `PnP(3D-2D) \| F2M=5 \| KF=0.1 \| IN=6` | `5.02 Hz` | `21.2%` | `118.0 MB` | **`43.2`** | F2M=5 설정 시 CPU 부하 증가 |
-| 🥉 **3위** | `PnP(3D-2D) \| F2M=10 \| KF=0.1 \| IN=6` | `4.09 Hz` | `8.5%` | `115.5 MB` | **`39.9`** | MinInliers=6 미세 오차 포함 |
-| **4위** | `SVD(3D-3D) \| F2M=10 \| KF=0.1 \| IN=6` | `3.63 Hz` | `6.5%` | `115.7 MB` | **`34.2`** | 3D-3D SVD 연산 지연 |
-| **5위** | `PnP(3D-2D) \| F2M=10 \| KF=0.2 \| IN=6` | `0.00 Hz` | `0.0%` | `0.0 MB` | **`0.0`** | KF_Update 0.2m 설정 시 Odom 유실 |
-
----
-
-## 4. 🔬 FULL 정밀 벤치마크 전수 검증 결과 (16개 조합)
-
-`FULL` 모드는 `Vis/MaxFeatures`(500~2000), `Vis/CornerNbThreads`(2~8), `Rtabmap/DetectionRate`(2~10Hz)의 스레드 및 특징점 스케일링을 전수 조사하였습니다.
-
-### 주요 결과 및 한계 분석
-1. **해상도 가중치 오버슈팅**:
-   * Stage 1 단독 테스트 시 `1280x720@15fps`가 해상도 가중치로 인해 최적으로 선택되었으나, Stage 2/3 연계 실행 시 **가상머신 USB 3.0 대역폭 포화로 카메라 수신율이 0.9Hz까지 급락**함이 검증되었습니다.
-2. **결론**:
-   * 가상머신(VMware) 환경에서는 실시간 SLAM 전송 시 `1280x720` 사양을 절대 사용하면 안 되며, **`640x480@30fps`가 유일하고 완벽한 실시간 해상도임이 증명**되었습니다.
+### Open3D Mesh (`src/auto_mobility/mesh/mesh_open3d.py`)
+| 항목 | 값 | 근거 |
+|:---|:---|:---|
+| `--method` | `poisson` (기본) | BPA(17.5m²) vs Poisson(115.9m²) 표면 커버리지 |
+| `--depth` | `8` | depth=9는 vertex 폭증 |
+| `--voxel` | `0.005` | 640x480 depth 해상도에 최적 |
+| `--simplify` | `0.5` | Quadric decimation 50% |
 
 ---
 
-## ⚙️ 5. 최종 확정 및 적용 사양 (Final Production Setup)
+## 2. 🔬 핵심 발견 (본 보고서의 가치)
 
-### 1) 카메라 센서 설정 (`launch/camera.launch.py`)
-```python
-{
-    'depth_module.profile': '640x480x30',
-    'rgb_camera.profile': '640x480x30',
-    'enable_infra1': False,
-    'enable_infra2': False,
-    'depth_module.emitter_enabled': True,  # IR Laser Dot Projector 활성화
-    'align_depth.enable': False,          # Raw Depth direct transfer
-    'unite_imu_method': 1,                # Accel + Gyro ~200Hz HW Merge
-    'color_qos': 'SENSOR_DATA',
-    'depth_qos': 'SENSOR_DATA'
-}
-```
+### 2.1 848x480 해상도는 VM에서 depth 드랍 유발 (중요!)
+Stage 1 benchmark 실측 (카메라 단독, 샘플 5초):
 
-### 2) RTAB-Map SLAM 파라미터 (`src/auto_mobility/launch/launch_common.py`)
-```python
-RTABMAP_PARAMS = {
-    'Vis/EstimationType': '1',        # 3D-2D PnP RANSAC
-    'OdomF2M/MaxFrames': '10',        # Local Map Size 10
-    'Vis/MinInliers': '10',           # Minimum Inlier Matches
-    'Vis/MaxFeatures': '2000',        # Maximum Feature Words
-    'Vis/CornerNbThreads': '8',       # Multi-threaded feature extraction
-    'RGBD/LinearUpdate': '0.1',       # 10cm keyframe update (1.22 MB/min DB growth)
-    'RGBD/AngularUpdate': '0.1',      # 0.1 rad keyframe update
-    'RGBD/OptimizeMaxError': '3.0',   # Loop closure sanity filter
-    'Rtabmap/ResetCountdown': '0'     # Disable total map resets on temporary loss
-}
-```
+| 해상도 | color Hz | depth Hz | drop% | CPU |
+|:---|:---:|:---:|:---:|:---:|
+| 640x480@30 | 30.1 | **29.1** | 0.0% | 10.2% |
+| 848x480@30 | 30.0 | **19.4** | 35% | 8.2% |
+
+- **원인**: 848x480의 RGB8(36.6MB/s) + Z16(24.4MB/s) = 61MB/s
+  → VM 가상 USB 컨트롤러 실제 처리 한계(~50MB/s) 초과
+- **초기 benchmark(30.2Hz)가 맞았던 이유**: 카메라 콜드 상태에선 USB 버퍼 여유가 있었으나,
+  발열/지속 스트리밍 시 드랍 시작 → **촬영 중 끊김의 1차 원인**
+
+### 2.2 benchmark가 "촬영 끊김"을 놓친 이유
+- 기존 benchmark는 **SLAM 시작 후 5초 창**만 측정 → odom 27~30Hz 기록
+- 실측 결과: 촬영 8초 후 **28Hz → 18초 후 14Hz → 28초 후 12Hz**로 저하
+  (VO update time 23ms → 40ms → 70ms 누적 증가)
+- **즉, 시작 5초의 성능이 지속 성능이 아님** — 촬영은 수 분 지속되므로 실사용 끊김 발생
+
+### 2.3 촬영 시간 경과에 따른 VO 저하는 파라미터로 해결 불가
+- F2M=5/10/60, LinearUpdate=0.1/0.3, MaxFeatures=500/2000, Grid on/off, IMU on/off
+  모두 시간 경과 저하를 해결하지 못함 → **VM의 근본적인 CPU/SLAM 한계**
+- 대응책: **2~3분 단위 세션 분할 촬영** + `capture_guard.py` 모니터링으로 실시간 감지
+
+### 2.4 잘못된 파라미터명 수정
+- `rtab_live/rtab_bag.launch.py`의 `always_process_most_recent_frame`는
+  rtabmap.launch.py에 **없는 인자** (무시됨)
+- 올바른 인자명: **`odom_always_process_most_recent_frame`** → `false`로 수정
+  (모든 프레임 순서 처리 → 맵 밀도 확보)
+
+### 2.5 Mesh 품질: BPA vs Poisson 실측 비교
+동일 point cloud(`session_20260807_153801_cloud.ply`) 기준:
+
+| 지표 | BPA (기존) | Poisson (신규) |
+|:---|:---:|:---:|
+| Vertices | 135,699 | 201,372 |
+| Triangles | 152,314 | 406,524 |
+| 표면적 | 17.53 m² | **115.93 m²** |
+| Watertight | 아니오 | 아니오 (crop 후) |
+
+- Poisson이 구멍을 메워 표면 커버리지 **6.6배** 확보 → 공간 복원 품질 대폭 개선
+- 50% simplify 적용 시 406k triangle 유지 (Isaac Sim 로딩 가능 수준)
+
+---
+
+## 3. 📈 신규 기능
+
+### 3.1 `capture_guard.py` (촬영 품질 모니터링 가드)
+- `run_pipeline_all.sh` 촬영 중 병렬 실행
+- color/depth/info/IMU/odom 5개 토픽 실시간 감시
+- USB 링크 속도, CPU, RAM 실시간 확인
+- 종료 시 Markdown 보고서 생성 + 시작/종료 odom 비교
+
+### 3.2 `run_pipeline_all.sh` 개편
+- **PRE-FLIGHT**: USB 3.x, /dev/shm, rmem_max, 해상도 적합성 사전 검증
+- **STEP 1**: capture_guard 병렬 모니터링 포함
+- **STEP 2**: Poisson(기본) + depth=8 + voxel=5mm + simplify 50%
+- **BARRIER**: DB/PLY/Mesh 3단계 무결성 검증 (Mesh 품질 메트릭 추가)
+
+### 3.3 `validate.py` Mesh 품질 메트릭 추가
+- 공간 규모, 표면적, 삼각형 밀도, Watertight 여부, 컬러 유무 검사
+
+---
+
+## 4. 📋 실측 데이터 원본
+- `ros2_data/logs/slam_bench_s1_20260810_133723.json` (Stage 1: 해상도 비교)
+- `ros2_data/logs/slam_bench_s2_20260810_131421.json` (Stage 2: SLAM 파라미터 8조합)
+- `ros2_data/logs/capture_guard_20260810_135237.md` (통합 촬영 모니터링)
+
+## 5. ⚠️ 남은 위험 요소
+1. **장시간 촬영 VO 저하**: 근본 해결 불가 (VM 한계) → 세션 분할 촬영 필수
+2. **RViz 소프트웨어 렌더링**: VMware GPU passthrough 없음 → 촬영 중 RViz는 성능 저하 유발
+   (촬영 중 RViz 최소화 또는 `rtab_live`에서 rviz=false 권장)
+3. **thermal 스로틀링**: 온도 센서 데이터가 `/sys/class/thermal`에 없어 직접 모니터링 불가
