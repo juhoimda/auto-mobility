@@ -54,15 +54,61 @@ echo " 📂 Output Mesh     : $TARGET_MESH_PATH"
 echo "=========================================================="
 
 # ---------------------------------------------------------
+# [PRE-FLIGHT] 하드웨어 & 환경 사전 검증 (2026-08-10 추가)
+# ---------------------------------------------------------
+pre_flight() {
+    echo ""
+    echo "=========================================================="
+    echo " 🛠️ [PRE-FLIGHT] 하드웨어 환경 사전 검증"
+    echo "=========================================================="
+
+    # 1. USB 링크 속도 확인 (5000 = USB 3.x)
+    USB_OK=false
+    for dev in /sys/bus/usb/devices/*; do
+        if [ -f "$dev/idVendor" ] && [ "$(cat "$dev/idVendor" 2>/dev/null)" = "8086" ]; then
+            SPEED=$(cat "$dev/speed" 2>/dev/null)
+            if [ "$SPEED" -ge 5000 ] 2>/dev/null; then
+                echo "✅ RealSense USB 3.x 정상 (${SPEED} Mbps)"
+                USB_OK=true
+            else
+                echo "⚠️  RealSense USB ${SPEED} Mbps — USB 2.x로 낮게 연결됨 (성능 저하 위험)"
+            fi
+        fi
+    done
+    if [ "$USB_OK" = false ]; then
+        echo "⚠️  RealSense USB 장치를 감지하지 못했습니다."
+    fi
+
+    # 2. /dev/shm 용량 확인
+    SHM_FREE=$(df -m /dev/shm 2>/dev/null | tail -n 1 | awk '{print $4}')
+    echo "✅ RAM 디스크(/dev/shm) 여유: ${SHM_FREE}MB"
+
+    # 3. 네트워크 버퍼 확인
+    RMEM=$(sysctl net.core.rmem_max 2>/dev/null | awk '{print $3}')
+    echo "✅ rmem_max: $((RMEM / 1024 / 1024))MB"
+
+    # 4. 카메라 해상도/해상도 적합성 확인 (config 로드)
+    RES_STR=$(grep -oE "depth_profile.*[0-9]+x[0-9]+" "$PROJECT_DIR/launch/camera.launch.py" | grep -oE "[0-9]+x[0-9]+" | head -1)
+    echo "✅ 카메라 설정 해상도: ${RES_STR} (640x480이 VM 최적)"
+    if [ "$RES_STR" != "640x480" ]; then
+        echo "⚠️  [경고] 현재 해상도가 640x480이 아닙니다! VM USB 대역폭 초과로 depth 드랍 위험."
+    fi
+}
+if [ "$SKIP_CAPTURE" = false ]; then
+    pre_flight
+fi
+
+# ---------------------------------------------------------
 # STEP 1: Real-Time Sensor Processing & Visual SLAM
 # ---------------------------------------------------------
 if [ "$SKIP_CAPTURE" = true ]; then
-    echo "⏩ [STEP 1] --skip-capture 옵션 지정됨. 실시간 캡처를 건너끁니다."
+    echo "⏩ [STEP 1] --skip-capture 옵션 지정됨. 실시간 캡처를 건너끕니다."
 else
     echo ""
     echo "=========================================================="
     echo " 🎥 [STEP 1] RTAB-Map SLAM 실시간 데이터 수집 시작"
     echo " 💡 촬영을 마치려면 터미널에서 Ctrl+C 를 누르세요."
+    echo " 📊 촬영 품질 모니터링(capture_guard)이 병렬 실행됩니다."
     echo "=========================================================="
     
     # 카메라 센서 토픽 발행 여부 사전 체크
@@ -73,8 +119,28 @@ else
         exit 1
     fi
 
+    # 촬영 품질 모니터링 가드를 백그라운드로 기동 (Ctrl+C 로 종료 시 보고서 저장)
+    CAPTURE_GUARD_LOG="$LOG_DIR/capture_guard_${DB_NAME%.db}.log"
+    echo "📊 capture_guard 모니터링 시작 → $CAPTURE_GUARD_LOG"
+    python3 "$PROJECT_DIR/src/auto_mobility/monitor/capture_guard.py" \
+        --interval 5 --headless \
+        --report "$LOG_DIR/capture_guard_${DB_NAME%.db}.md" \
+        > "$CAPTURE_GUARD_LOG" 2>&1 &
+    GUARD_PID=$!
+    trap "kill $GUARD_PID 2>/dev/null || true" EXIT INT TERM
+
     # RTAB-Map Visual SLAM 실시간 데이터 수집 (종료 시 바로 DB 생성)
     ros2 launch auto_mobility rtab_live.launch.py database_path:="$TARGET_DB_PATH" || true
+
+    # 촬영 종료 → 모니터 종료 & 보고서 확인
+    kill $GUARD_PID 2>/dev/null || true
+    wait $GUARD_PID 2>/dev/null || true
+    trap - EXIT INT TERM
+    echo ""
+    echo "📄 촬영 품질 보고서: $LOG_DIR/capture_guard_${DB_NAME%.db}.md"
+    if [ -f "$LOG_DIR/capture_guard_${DB_NAME%.db}.md" ]; then
+        grep -E "시작 Odom|종료 Odom|시간 경과 저하" "$LOG_DIR/capture_guard_${DB_NAME%.db}.md"
+    fi
 fi
 
 # 🛡️ BARRIER 1: DB File Integrity Check
@@ -93,7 +159,8 @@ echo "=========================================================="
 echo " 🛠️ [STEP 2-1] Open3D 기반 3D Mesh 복원 파이프라인 구동"
 echo "=========================================================="
 
-"$PIPELINE_DIR/mesh.sh" "$DB_NAME" "$MESH_NAME" --force
+# Open3D Mesh: Poisson 기본 복원 + quadric decimation 50% (품질/성능 균형)
+"$PIPELINE_DIR/mesh.sh" "$DB_NAME" "$MESH_NAME" --force --recon-method=poisson --depth=8 --voxel=0.005
 
 # 🛡️ BARRIER 2: Mesh File Integrity Check
 echo ""

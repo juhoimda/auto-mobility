@@ -12,7 +12,7 @@ except ImportError:
     print("Error: Open3D, NumPy, or SciPy is not installed. Install via `pip install open3d numpy scipy`")
     sys.exit(1)
 
-def generate_mesh(input_ply, output_mesh, depth=9, voxel_size=0.003, method="bpa", view_result=False, clean_density=True):
+def generate_mesh(input_ply, output_mesh, depth=9, voxel_size=0.005, method="poisson", view_result=False, clean_density=True, simplify_target=0.5):
     t0 = time.time()
     print(f"Loading point cloud: {input_ply}")
     pcd = o3d.io.read_point_cloud(input_ply)
@@ -30,6 +30,8 @@ def generate_mesh(input_ply, output_mesh, depth=9, voxel_size=0.003, method="bpa
     pcd = pcd.select_by_index(ind)
     print(f"Cleaned point count: {len(pcd.points):,}")
     
+    # 640x480 depth 기반 point cloud 는 노이즈/홀이 많다.
+    # 충분한 밀도 확보를 위해 가벼운 hole filling 은 BPA 복원 시 자연 처리.
     print("Estimating normals using fast multi-threaded computation...")
     pcd.estimate_normals(
         search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=max(voxel_size * 5.0, 0.03), max_nn=30),
@@ -47,6 +49,7 @@ def generate_mesh(input_ply, output_mesh, depth=9, voxel_size=0.003, method="bpa
             pcd, o3d.utility.DoubleVector(radii)
         )
     else:
+        # 기본: Poisson (watertight, 구멍 없는 폐곡면) - BPA 대비 품질 우수
         print(f"Reconstructing surface using Poisson Surface Reconstruction (depth={depth}, linear_fit=True, n_threads=-1)...")
         mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
             pcd, depth=depth, scale=1.1, linear_fit=True, n_threads=-1
@@ -62,6 +65,19 @@ def generate_mesh(input_ply, output_mesh, depth=9, voxel_size=0.003, method="bpa
     # Crop to bounding box of point cloud to prevent floating shell artifacts
     bbox = pcd.get_axis_aligned_bounding_box()
     mesh = mesh.crop(bbox)
+    
+    # Simplify: Isaac Sim / viewer 로딩 성능을 위해 target 비율로 경량화 (기본 50%)
+    if simplify_target and 0.0 < simplify_target < 1.0:
+        n_before = len(mesh.triangles)
+        target = max(int(n_before * simplify_target), 1000)
+        print(f"Simplifying mesh: {n_before:,} → {target:,} triangles (target {simplify_target:.0%})...")
+        try:
+            mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=target)
+        except TypeError:
+            # Open3D 구버전 호환 (positional)
+            mesh = mesh.simplify_quadric_decimation(target)
+        except Exception as e:
+            print(f"  ⚠ simplify 실패 (무시): {e}")
 
     # Topology cleanup to eliminate degenerate and floating artifacts
     print("Performing mesh topology cleanup (removing degenerate/duplicated/non-manifold elements)...")
@@ -113,11 +129,13 @@ def main():
     parser = argparse.ArgumentParser(description="Generate high-quality 3D Mesh using Open3D from Point Cloud")
     parser.add_argument("input", help="Input .ply or .pcd point cloud file")
     parser.add_argument("output", help="Output mesh file (.obj or .ply)")
-    parser.add_argument("--depth", type=int, default=9, help="Poisson reconstruction depth (default: 9)")
-    parser.add_argument("--voxel", type=float, default=0.003, help="Voxel size for downsampling (default: 0.003)")
-    parser.add_argument("--method", choices=["poisson", "bpa"], default="bpa", help="Reconstruction method: poisson or bpa (default: bpa)")
+    parser.add_argument("--depth", type=int, default=8, help="Poisson reconstruction depth (default: 8)")
+    parser.add_argument("--voxel", type=float, default=0.005, help="Voxel size for downsampling (default: 0.005)")
+    parser.add_argument("--method", choices=["poisson", "bpa"], default="poisson", help="Reconstruction method: poisson or bpa (default: poisson)")
     parser.add_argument("--view", action="store_true", help="Visualize generated mesh in interactive 3D window")
     parser.add_argument("--no-clean", action="store_true", help="Disable density cleaning filter")
+    parser.add_argument("--no-simplify", action="store_true", help="Disable mesh simplification")
+    parser.add_argument("--simplify", type=float, default=0.5, help="Triangle simplification target ratio (default: 0.5)")
 
     
     args = parser.parse_args()
@@ -133,7 +151,8 @@ def main():
         voxel_size=args.voxel,
         method=args.method,
         view_result=args.view, 
-        clean_density=not args.no_clean
+        clean_density=not args.no_clean,
+        simplify_target=0.0 if args.no_simplify else args.simplify
     )
 
 if __name__ == "__main__":

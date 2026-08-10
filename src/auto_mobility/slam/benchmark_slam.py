@@ -235,12 +235,14 @@ CAMERA_CONFIGS_FULL = [
     # (width, height, fps)
     (640,  480, 15),
     (640,  480, 30),
+    (848,  480, 30),
     (1280, 720, 15),
     (1280, 720, 30),
 ]
 
 CAMERA_CONFIGS_QUICK = [
     (640,  480, 30),
+    (848,  480, 30),
     (1280, 720, 15),
     (1280, 720, 30),
 ]
@@ -343,12 +345,16 @@ def run_stage1(sys_info, quick: bool) -> dict:
     banner("Stage 1 — 카메라 / DDS / QoS 최적 조합 탐색")
 
     if quick:
-        # 빠른 모드: 단일 640x480@30fps 최적 세션 검증 (카메라 USB 반복 리셋 방지)
-        configs = [("rmw_fastrtps_cpp", True, 640, 480, 30, "SENSOR_DATA")]
-    else:
-        # 정밀 모드: 핵심 해상도 2종만 안정적으로 검증
+        # 빠른 모드: 현재 production 해상도(848x480) 포함 핵심 검증 (카메라 USB 반복 리셋 방지)
         configs = [
             ("rmw_fastrtps_cpp", True, 640, 480, 30, "SENSOR_DATA"),
+            ("rmw_fastrtps_cpp", True, 848, 480, 30, "SENSOR_DATA"),
+        ]
+    else:
+        # 정밀 모드: 핵심 해상도 3종 안정적으로 검증
+        configs = [
+            ("rmw_fastrtps_cpp", True, 640, 480, 30, "SENSOR_DATA"),
+            ("rmw_fastrtps_cpp", True, 848, 480, 30, "SENSOR_DATA"),
             ("rmw_fastrtps_cpp", True, 1280, 720, 15, "SENSOR_DATA"),
         ]
 
@@ -408,9 +414,14 @@ SLAM_PARAM_MATRIX_FULL = {
         ("TH=8",  {"Vis/CornerNbThreads": 8}),
     ],
     "f2m_frames": [
-        ("F2M=5",  {"OdomF2M/MaxFrames": 5}),
         ("F2M=10", {"OdomF2M/MaxFrames": 10}),
+        ("F2M=5",  {"OdomF2M/MaxFrames": 5}),
         ("F2M=15", {"OdomF2M/MaxFrames": 15}),
+        ("F2M=60", {"OdomF2M/MaxFrames": 60}),  # 현재 production 값 (과부하 검증)
+    ],
+    "stm_size": [
+        ("STM=10",  {"Mem/STMSize": 10}),
+        ("STM=100", {"Mem/STMSize": 100}),      # 현재 production 값 (과부하 검증)
     ],
     "keyframe": [
         ("KF_0.1", {"RGBD/LinearUpdate": 0.1, "RGBD/AngularUpdate": 0.1}),
@@ -422,6 +433,10 @@ SLAM_PARAM_MATRIX_FULL = {
         ("IN=10", {"Vis/MinInliers": 10}),
         ("IN=12", {"Vis/MinInliers": 12}),
     ],
+    "max_depth": [
+        ("MD=4", {"Vis/MaxDepth": 4.0}),   # 현재 production 값
+        ("MD=8", {"Vis/MaxDepth": 8.0}),   # benchmark 검증값
+    ],
 }
 
 SLAM_PARAM_MATRIX_QUICK = {
@@ -432,6 +447,11 @@ SLAM_PARAM_MATRIX_QUICK = {
     "f2m_frames": [
         ("F2M=10", {"OdomF2M/MaxFrames": 10}),
         ("F2M=5",  {"OdomF2M/MaxFrames": 5}),
+        ("F2M=60", {"OdomF2M/MaxFrames": 60}),  # 현재 production 값
+    ],
+    "stm_size": [
+        ("STM=10",  {"Mem/STMSize": 10}),
+        ("STM=100", {"Mem/STMSize": 100}),      # 현재 production 값
     ],
     "keyframe": [
         ("KF_0.1", {"RGBD/LinearUpdate": 0.1, "RGBD/AngularUpdate": 0.1}),
@@ -440,6 +460,10 @@ SLAM_PARAM_MATRIX_QUICK = {
     "min_inliers": [
         ("IN=6",  {"Vis/MinInliers": 6}),
         ("IN=10", {"Vis/MinInliers": 10}),
+    ],
+    "max_depth": [
+        ("MD=4", {"Vis/MaxDepth": 4.0}),
+        ("MD=8", {"Vis/MaxDepth": 8.0}),
     ],
 }
 

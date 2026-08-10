@@ -47,7 +47,7 @@ def generate_launch_description():
             'camera_info_topic': '/camera/camera/color/camera_info',
             'imu_topic': '/camera/camera/imu/filtered',
             'subscribe_imu': LaunchConfiguration('use_imu'),
-            'always_process_most_recent_frame': 'false', # false: 프레임을 최대한 순서대로 처리
+            'odom_always_process_most_recent_frame': 'false', # false: 프레임을 순서대로 전부 처리 (drop 없이 map 밀도 확보)
             
             # QoS profile = [0: system default, 1: Reliable, 2: Best Effort]
             'qos_image': '2',

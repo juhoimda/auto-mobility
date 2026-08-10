@@ -1,6 +1,11 @@
 # RTAB-Map 파라미터 단일 소스 (rtab_live / rtab_bag launch 공용)
 # 튜닝 시 이 파일만 수정하면 live/bag 양쪽에 동일하게 적용된다.
 # VM 기준: nproc=8 (vCPU 8). Vis/CornerNbThreads는 VM vCPU 수에 맞춘다.
+#
+# [2026-08-10 벤치마크 확정값]
+# - 해상도: 640x480@30 (848x480은 depth 19.4Hz 드랍 → VM USB 대역폭 초과)
+# - 최적 조합: PnP | F2M=10 | STM=10 | KF_0.1 | IN=10 | MD=4 (65.3점)
+# - F2M=60(기존 production) → SLAM 초기화 실패 및 VO 지연 누적
 
 from launch_ros.actions import Node
 from launch.conditions import IfCondition
@@ -8,18 +13,18 @@ from launch.substitutions import LaunchConfiguration
 
 RTABMAP_PARAMS = {
     # [1] 특징점 검출 및 3D-2D PnP 포즈 추정 (CPU 40% 절감 + Depth 결측 유실 방지)
-    'Vis/EstimationType': '1',  # 1: 3D-2D PnP (개선)
-    'Vis/MinInliers': '10',     # [벤치마크 1위] IR Laser Projector와 결합 시 특징점 인라이어 검증 정밀도 10개 최적
+    'Vis/EstimationType': '1',  # 1: 3D-2D PnP (벤치마크 우승 조합)
+    'Vis/MinInliers': '10',     # [벤치마크 1위] IR Laser Projector와 결합 시 인라이어 10개 최적
     'Vis/MaxFeatures': '2000',
-    'Vis/CornerMinQuality': '0.01',
-    'Vis/CornerGridSize': '20',
+    'Vis/CornerMinQuality': '0.02',   # 벤치마크 검증값 (기존 0.01)
+    'Vis/CornerGridSize': '30',       # 벤치마크 검증값 (기존 20)
     'Vis/MinDepth': '0.3',
-    'Vis/MaxDepth': '4.0',      # 노이즈가 심한 멀리 있는 뎁스 포인트 필터링 (4m 제한)
+    'Vis/MaxDepth': '4.0',      # 노이즈가 심한 원거리 뎁스 포인트 필터링 (벤치마크: MD=4/8 동일 성능, 4m로 보수적 유지)
     'Vis/Robust': 'true',
     'Vis/InlierDistance': '1.0',
-    # [2] 병렬 검출(VM vCPU 8) + F2M 매칭 부하 축소 & 32GB RAM 대역폭 극대화
+    # [2] 병렬 검출(VM vCPU 8) + F2M 로컬 맵 최적화
     'Vis/CornerNbThreads': '8',
-    'OdomF2M/MaxFrames': '60',  # 32GB RAM 대용량 캐시 확장 (VO 데이터 수율 극대화)
+    'OdomF2M/MaxFrames': '10',  # [벤치마크 1위] F2M=60 대비 rgbd_odometry CPU 73%→~35% 절감 (촬영 끊김 제거)
     # [3] IMU 추정치 활용 (IMU Orientation 초기 추정 + 중력 벡터 정렬)
     'Odom/PoseGuessMode': '1',
     'Optimizer/GravityProvided': 'true',
@@ -30,15 +35,15 @@ RTABMAP_PARAMS = {
     'RGBD/ProximityBySpace': 'true',
     'RGBD/OptimizeFromGraphEnd': 'true',
     'RGBD/NeighborLinkRefining': 'true', # 인접 키프레임 간 그래프 정밀 정렬 (동적 이동 안정성)
-    # [5] CPU 분산: 맵핑 루프 5Hz 안정화, 루프클로저 메모리 확장
+    # [5] CPU 분산: 맵핑 루프 5Hz 안정화, 루프클로저 메모리 관리
     'Rtabmap/DetectionRate': '5',       # vCPU 8 활용 및 그래프 최적화 지연 방지 5Hz 맵핑
-    'Mem/STMSize': '100',               # Short-term memory 100개 확장 (32GB RAM 넉넉히 활용)
+    'Mem/STMSize': '10',                # [벤치마크 1위] STM=100(현재) 대비 RAM 467MB→~200MB 절감, 성능 동일
     # [6] 키프레임 전략: 10cm/5.7도 마다 키프레임 업데이트 (그래프 폭주 및 lag 방지)
     'RGBD/LinearUpdate': '0.10',
     'RGBD/AngularUpdate': '0.10',
     # [7] Point Cloud 품질 & 노이즈 최적화 (1cm Voxel 고해상도 매핑)
     'Grid/3D': 'true',
-    'Grid/VoxelSize': '0.01',           # 기존 3cm -> 1cm 정밀 격자 보존
+    'Grid/VoxelSize': '0.01',           # 1cm 정밀 격자 보존
     'Grid/RangeMin': '0.3',
     'Grid/RangeMax': '3.0',
     'Grid/NoiseFilteringRadius': '0.05',

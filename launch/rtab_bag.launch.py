@@ -70,8 +70,8 @@ def generate_launch_description():
             'approx_sync_max_interval': '0.15',
             'topic_queue_size': '30',
 
-            # Frame processing
-            'always_process_most_recent_frame': 'false',
+            # Frame processing (모든 프레임 순서 처리 → map 밀도 확보)
+            'odom_always_process_most_recent_frame': 'false',
 
             # RTAB-Map options
             'visual_odometry': 'true',

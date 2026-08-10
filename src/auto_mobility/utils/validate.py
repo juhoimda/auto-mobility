@@ -118,7 +118,47 @@ def validate_mesh(mesh_path):
     if num_vertices == 0 or num_triangles == 0:
         print("❌ [오류] Mesh의 정점(Vertex) 또는 삼각형(Triangle) 수가 0개입니다.")
         return False
-        
+
+    # ===== Mesh 품질 메트릭 (2026-08-10 추가) =====
+    # 1. 공간 규모 확인
+    bbox = mesh.get_axis_aligned_bounding_box()
+    extent = bbox.get_extent()
+    max_dim = max(extent)
+    print(f"📐 Mesh 공간 규격 : {extent[0]:.2f}m x {extent[1]:.2f}m x {extent[2]:.2f}m")
+    if max_dim < 0.3:
+        print("❌ [오류] Mesh 공간 크기가 0.3m 미만으로 너무 작습니다 (데이터 수집 실패 가능성).")
+        return False
+    elif max_dim < 1.0:
+        print("⚠️  [경고] Mesh 공간 크기가 1m 미만으로 작습니다. 더 넓은 공간을 촬영하세요.")
+    else:
+        print("✅ Mesh 공간 규모 정상.")
+
+    # 2. 삼각형 밀도 (표면 품질 지표)
+    if max_dim > 0:
+        area_m2 = 0.0
+        try:
+            area_m2 = mesh.get_surface_area()
+        except Exception:
+            pass
+        density = num_triangles / max(area_m2, 1e-6) if area_m2 > 0 else 0
+        print(f"📊 표면적 : {area_m2:.2f} m²  |  삼각형 밀도 : {density:.0f} tri/m²")
+        if area_m2 < 0.01:
+            print("⚠️  [경고] 표면적이 0.01m² 미만입니다. 빈 껍질(empty shell)일 가능성이 있습니다.")
+
+    # 3. Watertight (폐곡면) 여부 — Poisson 복원 핵심 지표
+    try:
+        watertight = mesh.is_watertight()
+        print(f"🔒 Watertight(폐곡면) : {'✅ 예' if watertight else '⚠️ 아니오 (구멍 존재)'}")
+    except Exception:
+        watertight = None
+        print("🔒 Watertight 검사 불가 (오래된 Open3D 버전).")
+
+    # 4. 컬러 여부
+    if mesh.has_vertex_colors():
+        print("✅ Mesh Vertex Colors: 정상 포함됨")
+    else:
+        print("⚠️  Mesh Vertex Colors: 없음 (단색 Mesh)")
+
     print("✅ 3D Mesh 무결성 및 구조 검사 통과!")
     return True
 
