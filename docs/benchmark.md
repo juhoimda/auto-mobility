@@ -109,7 +109,37 @@ Stage 1 benchmark 실측 (카메라 단독, 샘플 5초):
 - `ros2_data/logs/capture_guard_20260810_135237.md` (통합 촬영 모니터링)
 
 ## 5. ⚠️ 남은 위험 요소
-1. **장시간 촬영 VO 저하**: 근본 해결 불가 (VM 한계) → 세션 분할 촬영 필수
-2. **RViz 소프트웨어 렌더링**: VMware GPU passthrough 없음 → 촬영 중 RViz는 성능 저하 유발
-   (촬영 중 RViz 최소화 또는 `rtab_live`에서 rviz=false 권장)
+1. **장시간 촬영 VO 저하**: 설정 정합 후 VO delay ~70ms 고정·누적 없음 (개선 완료).
+   잔여 odom 저하(25.9→17Hz)는 **호스트측(VMware 스케줄링/thermal) 요인**으로 게스트 내 파라미터로는 완전 제거 불가.
+   → 여전히 2~3분 단위 세션 분할 촬영 권장
+2. **RViz 소프트웨어 렌더링**: VMware GPU passthrough 없음 → `cloud_map_lite`(2Hz) 중계 + 경량 rviz 설정으로 부하 ~60% 절감.
+   여전히 촬영 중 rviz 창은 최소화 권장
 3. **thermal 스로틀링**: 온도 센서 데이터가 `/sys/class/thermal`에 없어 직접 모니터링 불가
+
+---
+
+## 6. 🔬 실환경 근사 재검증 (2026-08-10, rviz on + 카메라 필터 on)
+
+기존 벤치마크(29.9Hz)는 `rviz=false` + 필터 off + 라이브 5초 창으로 측정되어 실제 촬영 조건과 달랐음.
+**production 그대로**(camera.launch.py + rtab_live rviz=true + capture_guard 병행)에서 재검증:
+
+| 지표 | 기존 설정 (검증 실측) | 개선 설정 (신규 실측) |
+| :--- | :--- | :--- |
+| VO update time | 23ms → 40ms → **70ms** (누적) | 10ms → 30~42ms (수렴, plateau) |
+| VO delay | 무제한 누적 (backlog) | **~70ms 고정 (누적 없음)** |
+| odom Hz (2.5분 시점) | **12Hz** | **17~26Hz** |
+| /rtabmap/cloud_map RViz 렌더 | 5Hz 원본 | 2Hz `cloud_map_lite` 중계 |
+| 맵핑 "no odometry" 스킵 | 간헐 발생 (sync 0.08 < delay) | sync 0.15로 흡수 예상 |
+
+### 검증 중 추가 발견 (근본 원인 3종)
+1. **`odom_always_process_most_recent_frame=false`가 live에서 큐 백로그·지연 누적 유발** — true로 복원
+   (rtabmap.launch.py:515 주석: false는 rosbag 오프라인 전용)
+2. **approx_sync_max_interval 0.08 < VO delay(~70ms)** → 간헐적 "no odometry" 맵 구멍 → **0.15로 확대**
+3. **RViz가 `/voxel_cloud`(없는 토픽) 구독 + cloud_map 5Hz 풀 렌더** → 죽은 디스플레이 제거 + 2Hz 중계
+
+### 최종 확정 (cur-setting.md 참조)
+- `Vis/MaxFeatures 1000`, `Mem/STMSize 20`, `odom_always_process_most_recent_frame=true`,
+  `approx_sync_max_interval=0.15`, RViz = `cloud_map_lite` 2Hz + Path + RGB 1개
+
+> ⚠️ 검증 도중 카메라 USB 재시작 사이클로 VMware 패스스루가 이탈(장치 미인식)되어
+> "sync 0.15 적용 후 장시간 측정"은 미완료 — 재연결 후 최종 확인 필요

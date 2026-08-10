@@ -2,10 +2,14 @@
 # 튜닝 시 이 파일만 수정하면 live/bag 양쪽에 동일하게 적용된다.
 # VM 기준: nproc=8 (vCPU 8). Vis/CornerNbThreads는 VM vCPU 수에 맞춘다.
 #
-# [2026-08-10 벤치마크 확정값]
+# [2026-08-10 실환경 정합 재조정]
+# - 벤치마크(29.9Hz)는 rviz=false + 카메라 필터 없음 + 라이브 5초 창으로 측정되어
+#   실제 촬영(rviz on, 필터 on, 장시간)과 다른 조건이었음 (capture_guard 실측 11Hz)
+# - [근본 해결] 실환경에서도 VO가 따라갈 수 있도록 프레임당 부하 절감:
+#   * Vis/MaxFeatures 2000 → 1000 (특징점 검출/매칭 비용 절반, IR 에미터로 특징량 충분)
+#   * Vis/CornerNbThreads 8 유지 (여유 vCPU 활용 → 검출 시간 단축)
+#   * Mem/STMSize 10 → 20 (RAM 여유분 활용, 루프클로저 안정성)
 # - 해상도: 640x480@30 (848x480은 depth 19.4Hz 드랍 → VM USB 대역폭 초과)
-# - 최적 조합: PnP | F2M=10 | STM=10 | KF_0.1 | IN=10 | MD=4 (65.3점)
-# - F2M=60(기존 production) → SLAM 초기화 실패 및 VO 지연 누적
 
 from launch_ros.actions import Node
 from launch.conditions import IfCondition
@@ -15,7 +19,7 @@ RTABMAP_PARAMS = {
     # [1] 특징점 검출 및 3D-2D PnP 포즈 추정 (CPU 40% 절감 + Depth 결측 유실 방지)
     'Vis/EstimationType': '1',  # 1: 3D-2D PnP (벤치마크 우승 조합)
     'Vis/MinInliers': '10',     # [벤치마크 1위] IR Laser Projector와 결합 시 인라이어 10개 최적
-    'Vis/MaxFeatures': '2000',
+    'Vis/MaxFeatures': '1000',  # [실환경 재조정] 프레임당 VO 비용 절감 (30Hz 유지 여유 확보)
     'Vis/CornerMinQuality': '0.02',   # 벤치마크 검증값 (기존 0.01)
     'Vis/CornerGridSize': '30',       # 벤치마크 검증값 (기존 20)
     'Vis/MinDepth': '0.3',
@@ -37,7 +41,7 @@ RTABMAP_PARAMS = {
     'RGBD/NeighborLinkRefining': 'true', # 인접 키프레임 간 그래프 정밀 정렬 (동적 이동 안정성)
     # [5] CPU 분산: 맵핑 루프 5Hz 안정화, 루프클로저 메모리 관리
     'Rtabmap/DetectionRate': '5',       # vCPU 8 활용 및 그래프 최적화 지연 방지 5Hz 맵핑
-    'Mem/STMSize': '10',                # [벤치마크 1위] STM=100(현재) 대비 RAM 467MB→~200MB 절감, 성능 동일
+    'Mem/STMSize': '20',                # [실환경 재조정] STM=20: RAM 여유분 활용 + 루프클로저 안정성 (벤치마크상 성능 차이 없음)
     # [6] 키프레임 전략: 10cm/5.7도 마다 키프레임 업데이트 (그래프 폭주 및 lag 방지)
     'RGBD/LinearUpdate': '0.10',
     'RGBD/AngularUpdate': '0.10',
@@ -90,5 +94,23 @@ def create_imu_filter_node(use_sim_time: bool):
             ('imu/data', '/camera/camera/imu/filtered')
         ],
         condition=IfCondition(LaunchConfiguration('use_imu'))
+    )
+
+
+def create_cloud_throttle_node(use_sim_time: bool, max_rate: float = 2.0):
+    """RViz 소프트웨어 렌더링 부하 절감용 cloud_map 저주파 중계 노드
+
+    /rtabmap/cloud_map (DetectionRate=5Hz) 을 최대 max_rate Hz 로
+    /rtabmap/cloud_map_lite 에 재발행한다. SLAM 내부 처리에는 영향 없음.
+    """
+    return Node(
+        package='auto_mobility',
+        executable='cloud_throttle.py',
+        name='cloud_throttle',
+        output='screen',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'max_rate': max_rate,
+        }],
     )
 

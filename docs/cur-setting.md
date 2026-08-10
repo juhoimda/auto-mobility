@@ -1,6 +1,7 @@
 # ⚙️ Auto-Mobility 품질 & 최적화 설정 명세 (`docs/cur-setting.md`)
 
-> **최종 갱신: 2026-08-10** — 벤치마크 실측 기반 재조정 (아래 모든 값은 실측 검증됨)
+> **최종 갱신: 2026-08-10 (실환경 재검증 반영)** — 기존 벤치마크는 rviz off·필터 off 조건이어서
+> 실제 촬영(rviz on, 필터 on, 장시간)과 불일치 → 2026-08-10 실환경 근사 조건에서 재검증 후 재조정
 
 ---
 
@@ -39,19 +40,20 @@
 | 설정 항목 | 설정값 | 핵심 기능 (품질 & 최적화) |
 | :--- | :--- | :--- |
 | **Madgwick `gain`** | `0.03` | 자이로스코프 노이즈 필터링 및 빠른 회전 시 맵 수평 드리프트 억제 |
-| **`approx_sync_max_interval`**| `0.08` (80 ms) | 센서 타임스탬프 짝짓기 오차를 80ms 이내로 제한 (live 기준) |
+| **`approx_sync_max_interval`**| `0.15` (150 ms) | **★ 실환경 재조정** — VO delay(~70ms, 항상 최신 프레임 처리 특성)를 흡수. 기존 0.08은 간헐적 "no odometry" 스킵(맵 구멍) 유발 |
 | **`Rtabmap/DetectionRate`** | `5` (5 Hz) | 실시간 SLAM 갱신율을 5Hz로 제어하여 vCPU 계산 지연(Lag) 예방 |
 | **`RGBD/LinearUpdate`** | `0.10` (10 cm) | 10cm 간격 키프레임 생성으로 그래프 최적화 부하 절감 및 DB 비대화 방지 |
 | **`RGBD/AngularUpdate`** | `0.10` (5.7 deg) | 5.7도 간격 키프레임 생성으로 회전 구간 매핑 안정성 확보 |
 | **`Vis/EstimationType`** | `1` | 3D-2D PnP 포즈 추정 (벤치마크 1위, SVD 대비 CPU 40% 절감) |
 | **`Vis/MinInliers`** | `10` | 특징점 검증 임계값 (벤치마크 1위: IN=6 대비 +4~5점) |
 | **`Vis/CornerMinQuality`** | `0.02` | 특징점 품질 임계값 (벤치마크 검증값) |
+| **`Vis/MaxFeatures`** | `1000` | **★ 실환경 재조정(2026-08-10 재검증)** — 2000→1000: 프레임당 VO 비용 절반으로 실환경(rviz on)에서도 30fps 유지 여유 확보 |
 | **`Vis/CornerGridSize`** | `30` | 특징점 그리드 크기 (벤치마크 검증값) |
-| **`Vis/CornerNbThreads`** | `8` | vCPU 8 스레드 멀티스레딩 특징점 병렬 추출 |
+| **`Vis/CornerNbThreads`** | `8` | vCPU 8 스레드 멀티스레딩 특징점 병렬 추출 (여유 vCPU 활용) |
 | **`OdomF2M/MaxFrames`** | `10` | **★ 벤치마크 1위** — 기존 60은 SLAM 초기화 실패 및 VO 지연 누적 |
-| **`Mem/STMSize`** | `10` | **★ 벤치마크 1위** — 기존 100 대비 RAM 절감, 성능 동일 |
+| **`Mem/STMSize`** | `20` | **★ 실환경 재조정** — RAM 여유분 활용, 루프클로저 안정성 (성능 차이 없음) |
 | **`Grid/VoxelSize`** | `0.01` (1 cm) | 1cm 정밀 격자 보존 및 3D Point Cloud 잡음 제거 |
-| **`odom_always_process_most_recent_frame`** | `false` | **★ 수정됨** — 기존 `always_process_most_recent_frame`(잘못된 인자명)은 무시됐었음. 모든 프레임 순서 처리로 맵 밀도 확보 |
+| **`odom_always_process_most_recent_frame`** | `true` | **★ 근본 수정(2026-08-10 재검증)** — live 촬영은 최신 프레임 처리로 지연 누적 차단. `false`는 rosbag 오프라인 전용 (RTAB-Map 공식 가이드). 기존 false는 DDS 큐 백로그·위상 지연 누적 + 맵핑 동기화 실패 유발 |
 
 ### 🧪 SLAM 파라미터 벤치마크 결과 (2026-08-10 실측, 8개 조합)
 | 순위 | 조합 | odom Hz | SLAM CPU | 점수 |
@@ -84,5 +86,23 @@
 
 - **감시 토픽**: color(≥15Hz), depth(≥15Hz), camera_info(≥15Hz), IMU(≥100Hz), odom(≥5Hz)
 - **핵심 지표**: 시작/종료 odom Hz 비교로 시간 경과 저하 감지
-- **실측 발견**: 촬영 시간이 길어지면 VO odom이 28→14Hz로 절반 저하 (VM 한계)
-  → **2~3분 단위 세션 분할 촬영 권장**
+- **실측 발견(재검증 후)**: 설정 정합 시 VO delay는 ~70ms로 고정(누적 없음), odom 17~26Hz 유지
+  (기존 설정 대비 12Hz→개선). 잔여 저하는 호스트(VMware/thermal) 요인이 주원인
+
+---
+
+## 🖥️ 6. RViz 촬영 뷰어 최적화 (`config/rviz/rtabmap_vmware.rviz` + `cloud_throttle.py`)
+
+VMware 소프트웨어 렌더링에서 RViz가 vCPU를 경쟁하며 VO를 방해하지 않도록 최적화:
+
+| 항목 | 변경 | 효과 |
+| :--- | :--- | :--- |
+| **`/rtabmap/cloud_map_lite`** | `cloud_throttle.py`가 `/rtabmap/cloud_map`(5Hz)을 **2Hz**로 중계 | PointCloud 소프트웨어 렌더링 부하 ~60% 절감. SLAM 내부 처리 영향 없음 |
+| **죽은 디스플레이 제거** | `/voxel_cloud`(존재하지 않는 토픽) PointCloud2 삭제 | 무의미한 렌더링 제거 |
+| **Path (Trajectory)** 추가 | `/rtabmap/odom` 기반 이동 궤적 표시 (경량) | 촬영 진행 확인용 저비용 시각화 |
+| **TF 표시 축소** | `camera_link`/`odom`/`map` 외 비활성 | TF 오버레이 부하 감소 |
+| **이미지 중복 제거** | RGB 1개만 활성, depth 이미지 미표시 | 텍스처 업로드 부하 절반 |
+
+- 실행: `cloud_throttle.py`는 `rtab_live.launch.py`에서 자동 기동 (CMakeLists에 등록됨)
+- 촬영 중 원본 품질 확인 필요 시 rviz에서 `PointCloud2 (RTAB-Map Map)`의 토픽을
+  `/rtabmap/cloud_map`으로 일시 전환하면 5Hz 원본을 볼 수 있음

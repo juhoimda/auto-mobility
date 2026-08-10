@@ -31,6 +31,7 @@ install(
     scripts/utils/view_mesh.sh
     scripts/utils/run_tests.sh
     src/auto_mobility/nodes/republish.py
+    src/auto_mobility/nodes/cloud_throttle.py
     src/auto_mobility/mesh/mesh_open3d.py
     src/auto_mobility/mesh/view_mesh.py
     src/auto_mobility/isaac/load_isaac_mesh.py
