@@ -1,7 +1,10 @@
-# 📊 2026-08-10 실측 벤치마크 최종 보고서 (D435i + RTAB-Map + Open3D)
+# 📊 2026-08-11 실측 벤치마크 최종 보고서 (D435i + RTAB-Map + Open3D)
 
-본 보고서는 **현재 HW 환경(VMware Ubuntu 22.04, USB 3.2, 8vCPU, 31GB)**에서
+본 보고서는 **현재 HW 환경(VMware Ubuntu 22.04, USB 3.x, 8vCPU, 31GB)**에서
 카메라/RTAB-Map/Open3D Mesh 파이프라인의 최적 설정을 **직접 실측**한 결과입니다.
+
+> **2026-08-11 갱신**: RTAB-Map 0.23.7 파라미터 유효성 검증으로 무효 파라미터를 교정하고,
+> `OdomF2M/MaxSize` 축을 신규 측정하여 최적값(`1000`)을 확정했습니다.
 
 ---
 
@@ -19,13 +22,27 @@
 ### RTAB-Map (`src/auto_mobility/launch/launch_common.py`)
 | 항목 | 값 | 근거 |
 |:---|:---|:---|
-| `Vis/EstimationType` | `1` (PnP) | SVD 대비 CPU 40% 절감 |
-| `OdomF2M/MaxFrames` | `10` | F2M=60은 SLAM 초기화 실패 + VO 지연 누적 |
-| `Mem/STMSize` | `10` | STM=100 대비 RAM 절감, 성능 동일 |
+| `Vis/EstimationType` | `1` (PnP) | SVD 대비 CPU 절감 (벤치 1위) |
+| **`OdomF2M/MaxSize`** | **`1000`** | **★ 2026-08-11 벤치 1위 — 기본 2000은 odom 17Hz 급락, 4000은 14Hz** |
+| `Mem/STMSize` | `10` | STM=100 대비 RAM 절감, 성능 동일 (2026-08-11 재확정) |
 | `Vis/MinInliers` | `10` | IN=6 대비 +4~5점 |
 | `Vis/MaxDepth` | `4.0` | 원거리 노이즈 필터 (MD=4/8 동일 성능) |
 | `RGBD/LinearUpdate` | `0.10` | 10cm 키프레임 간격 |
 | `Rtabmap/DetectionRate` | `5` | 5Hz 맵핑 루프 |
+
+> ⚠️ **파라미터 유효성 교정 (2026-08-11)**: RTAB-Map 0.23.7 기준 아래 키는 **존재하지 않아 무시**되던 것들입니다.
+> | 무효 키 | 유효 키로 교정 |
+> |:---|:---|
+> | `OdomF2M/MaxFrames` | `OdomF2M/MaxSize` (word 단위, 기본 2000) |
+> | `Vis/CornerMinQuality` | `GFTT/QualityLevel` |
+> | `Vis/CornerGridSize` | `Vis/GridRows` + `Vis/GridCols` |
+> | `Vis/CornerNbThreads` | 제거 (OpenCV 자동 스레딩) |
+> | `Odom/PoseGuessMode` | `Odom/GuessMotion` |
+> | `Optimizer/GravityProvided` | `Optimizer/GravitySigma` |
+> | `Vis/Robust` | `Optimizer/Robust` |
+> | `Rtabmap/ResetCountdown` | `Odom/ResetCountdown` |
+> | `RGBD/CreateIntermediateNodes` | `Rtabmap/CreateIntermediateNodes` |
+> | `Grid/VoxelSize` | `Grid/DepthDecimation` (depth 해상도 결정) |
 
 ### Open3D Mesh (`src/auto_mobility/mesh/mesh_open3d.py`)
 | 항목 | 값 | 근거 |
@@ -34,6 +51,12 @@
 | `--depth` | `8` | depth=9는 vertex 폭증 |
 | `--voxel` | `0.005` | 640x480 depth 해상도에 최적 |
 | `--simplify` | `0.5` | Quadric decimation 50% |
+
+### PLY 추출 (`scripts/utils/export_ply.sh`)
+| 옵션 | 값 | 근거 |
+|:---|:---|:---|
+| `--decimation` | `1` | **★ 2026-08-11 — 기본 4는 PLY 밀도 1/16 (mesh 품질 저하 원인). 오프라인 처리라 캡처 성능 영향 없음** |
+| `--max_range` | `5` | 4m 이상 벽/천장 포착 (기본 4m) |
 
 ---
 
@@ -49,8 +72,8 @@ Stage 1 benchmark 실측 (카메라 단독, 샘플 5초):
 
 - **원인**: 848x480의 RGB8(36.6MB/s) + Z16(24.4MB/s) = 61MB/s
   → VM 가상 USB 컨트롤러 실제 처리 한계(~50MB/s) 초과
-- **초기 benchmark(30.2Hz)가 맞았던 이유**: 카메라 콜드 상태에선 USB 버퍼 여유가 있었으나,
-  발열/지속 스트리밍 시 드랍 시작 → **촬영 중 끊김의 1차 원인**
+- **2026-08-11 재실측**: 848x480 depth 28.1Hz (환경 변동으로 19.4Hz 대비 개선, 여전히 30Hz 미달)
+  → **production 해상도는 640x480 유지**
 
 ### 2.2 benchmark가 "촬영 끊김"을 놓친 이유
 - 기존 benchmark는 **SLAM 시작 후 5초 창**만 측정 → odom 27~30Hz 기록
@@ -63,13 +86,24 @@ Stage 1 benchmark 실측 (카메라 단독, 샘플 5초):
   모두 시간 경과 저하를 해결하지 못함 → **VM의 근본적인 CPU/SLAM 한계**
 - 대응책: **2~3분 단위 세션 분할 촬영** + `capture_guard.py` 모니터링으로 실시간 감지
 
-### 2.4 잘못된 파라미터명 수정
+### 2.4 ⚠️ 무효 파라미터로 측정된 벤치마크 (2026-08-11 교정)
+- 기존 벤치마크는 `OdomF2M/MaxFrames=10`(존재하지 않는 키)으로 "F2M=10 CPU 35% 절감"을 결론냈으나,
+  **실제로는 기본값 `OdomF2M/MaxSize=2000`으로 동작한 결과**였음
+- 신규 벤치마크에서 유효 키 `OdomF2M/MaxSize` 축을 측정한 결과:
+  | MaxSize | odom Hz | 비고 |
+  |:---:|:---:|:---|
+  | **1000** | **30.0** | ✅ 벤치 1위 |
+  | 2000 | 17.4 | ⚠️ 기본값 — VO 급락 |
+  | 4000 | 14.6 | ⚠️ 과부하 |
+- `Vis/CornerNbThreads`(제거됨) 벤치 축은 삭제 — OpenCV 자동 스레딩 사용
+
+### 2.5 잘못된 파라미터명 수정
 - `rtab_live/rtab_bag.launch.py`의 `always_process_most_recent_frame`는
   rtabmap.launch.py에 **없는 인자** (무시됨)
 - 올바른 인자명: **`odom_always_process_most_recent_frame`** → `false`로 수정
   (모든 프레임 순서 처리 → 맵 밀도 확보)
 
-### 2.5 Mesh 품질: BPA vs Poisson 실측 비교
+### 2.6 Mesh 품질: BPA vs Poisson 실측 비교
 동일 point cloud(`session_20260807_153801_cloud.ply`) 기준:
 
 | 지표 | BPA (기존) | Poisson (신규) |
@@ -104,8 +138,10 @@ Stage 1 benchmark 실측 (카메라 단독, 샘플 5초):
 ---
 
 ## 4. 📋 실측 데이터 원본
-- `ros2_data/logs/slam_bench_s1_20260810_133723.json` (Stage 1: 해상도 비교)
-- `ros2_data/logs/slam_bench_s2_20260810_131421.json` (Stage 2: SLAM 파라미터 8조합)
+- `ros2_data/logs/slam_bench_s1_20260811_102435.json` (Stage 1: 해상도 비교, 2026-08-11)
+- `ros2_data/logs/slam_bench_s2_20260811_102435.json` (Stage 2: SLAM 파라미터 8조합, 2026-08-11)
+- `ros2_data/logs/slam_benchmark_20260811_102435.md` (종합 보고서, 2026-08-11)
+- `ros2_data/logs/slam_bench_s2_20260810_131421.json` (Stage 2: 구버전 무효 파라미터 측정)
 - `ros2_data/logs/capture_guard_20260810_135237.md` (통합 촬영 모니터링)
 
 ## 5. ⚠️ 남은 위험 요소
@@ -138,7 +174,8 @@ Stage 1 benchmark 실측 (카메라 단독, 샘플 5초):
 3. **RViz가 `/voxel_cloud`(없는 토픽) 구독 + cloud_map 5Hz 풀 렌더** → 죽은 디스플레이 제거 + 2Hz 중계
 
 ### 최종 확정 (cur-setting.md 참조)
-- `Vis/MaxFeatures 1000`, `Mem/STMSize 20`, `odom_always_process_most_recent_frame=true`,
+- `Vis/MaxFeatures 1000`, `Mem/STMSize 10`, `OdomF2M/MaxSize 1000`,
+  `odom_always_process_most_recent_frame=true`,
   `approx_sync_max_interval=0.15`, RViz = `cloud_map_lite` 2Hz + Path + RGB 1개
 
 > ⚠️ 검증 도중 카메라 USB 재시작 사이클로 VMware 패스스루가 이탈(장치 미인식)되어

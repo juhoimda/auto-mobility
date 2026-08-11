@@ -421,16 +421,13 @@ SLAM_PARAM_MATRIX_FULL = {
         ("VF=1500", {"Vis/MaxFeatures": 1500}),
         ("VF=2000", {"Vis/MaxFeatures": 2000}),
     ],
-    "threads": [
-        ("TH=2",  {"Vis/CornerNbThreads": 2}),
-        ("TH=4",  {"Vis/CornerNbThreads": 4}),
-        ("TH=8",  {"Vis/CornerNbThreads": 8}),
-    ],
-    "f2m_frames": [
-        ("F2M=10", {"OdomF2M/MaxFrames": 10}),
-        ("F2M=5",  {"OdomF2M/MaxFrames": 5}),
-        ("F2M=15", {"OdomF2M/MaxFrames": 15}),
-        ("F2M=60", {"OdomF2M/MaxFrames": 60}),  # 현재 production 값 (과부하 검증)
+    # ⚠️ 2026-08-11 파라미터 검증: Vis/CornerNbThreads는 RTAB-Map 0.23.7에서 제거됨 (OpenCV 자동 스레딩).
+    #   OdomF2M/MaxFrames → OdomF2M/MaxSize(로컬 맵 최대 word 수, 기본 2000) 로 리네임.
+    "f2m_size": [
+        ("F2M=1000", {"OdomF2M/MaxSize": 1000}),
+        ("F2M=2000", {"OdomF2M/MaxSize": 2000}),
+        ("F2M=4000", {"OdomF2M/MaxSize": 4000}),
+        ("F2M=8000", {"OdomF2M/MaxSize": 8000}),
     ],
     "stm_size": [
         ("STM=10",  {"Mem/STMSize": 10}),
@@ -457,10 +454,10 @@ SLAM_PARAM_MATRIX_QUICK = {
         ("EST=PnP(3D-2D)", {"Vis/EstimationType": 1}),
         ("EST=SVD(3D-3D)", {"Vis/EstimationType": 0}),
     ],
-    "f2m_frames": [
-        ("F2M=10", {"OdomF2M/MaxFrames": 10}),
-        ("F2M=5",  {"OdomF2M/MaxFrames": 5}),
-        ("F2M=60", {"OdomF2M/MaxFrames": 60}),  # 현재 production 값
+    "f2m_size": [
+        ("F2M=1000", {"OdomF2M/MaxSize": 1000}),
+        ("F2M=2000", {"OdomF2M/MaxSize": 2000}),
+        ("F2M=4000", {"OdomF2M/MaxSize": 4000}),
     ],
     "stm_size": [
         ("STM=10",  {"Mem/STMSize": 10}),
@@ -514,7 +511,7 @@ def _load_slam_base_params() -> dict:
 SLAM_BASE_PARAMS = _load_slam_base_params()
 
 
-def build_slam_test_configs(matrix: dict, nproc: int) -> list:
+def build_slam_test_configs(matrix: dict) -> list:
     """각 축의 값을 독립적으로 변경하는 1-at-a-time 방식으로 configs 생성."""
     default = {}
     default_labels = {}
@@ -543,14 +540,8 @@ def build_slam_test_configs(matrix: dict, nproc: int) -> list:
             cur_params  = {**default, **params}
             _add(cur_labels, cur_params)
 
-    valid = []
-    for c in configs:
-        th = c["params"].get("Vis/CornerNbThreads", 4)
-        if int(th) <= nproc:
-            valid.append(c)
-        else:
-            warn(f"  CornerNbThreads={th} 가 nproc={nproc} 초과 → 건너뜀")
-    return valid
+    # ⚠️ 2026-08-11: Vis/CornerNbThreads는 RTAB-Map 0.23.7에서 제거됨. nproc 필터는 생략.
+    return configs
 
 
 def run_slam_test(camera_config: dict, slam_config: dict,
@@ -690,7 +681,7 @@ def run_stage2(stage1_result: dict, sys_info: dict, quick: bool) -> dict:
 
     best_cam = stage1_result["best"]
     matrix   = SLAM_PARAM_MATRIX_QUICK if quick else SLAM_PARAM_MATRIX_FULL
-    configs  = build_slam_test_configs(matrix, nproc=sys_info["nproc"])
+    configs  = build_slam_test_configs(matrix)
 
     env = os.environ.copy()
     rmw = best_cam["rmw"]

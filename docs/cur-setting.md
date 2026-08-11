@@ -1,7 +1,7 @@
 # ⚙️ Auto-Mobility 품질 & 최적화 설정 명세 (`docs/cur-setting.md`)
 
-> **최종 갱신: 2026-08-10 (실환경 재검증 반영)** — 기존 벤치마크는 rviz off·필터 off 조건이어서
-> 실제 촬영(rviz on, 필터 on, 장시간)과 불일치 → 2026-08-10 실환경 근사 조건에서 재검증 후 재조정
+> **최종 갱신: 2026-08-11 (파라미터 유효성 검증 + 재벤치마크 반영)** — RTAB-Map 0.23.7 기준
+> 무효 파라미터 9종을 유효 키로 교정하고, `OdomF2M/MaxSize=1000` 축을 신규 측정하여 확정
 
 > **설정 단일 소스(Single Source of Truth) 안내 (리팩토링 적용)**
 > 아래 표의 값을 수정할 때는 각 파일을 직접 고치는 대신 다음 중앙 설정에서만 변경하세요:
@@ -52,30 +52,42 @@
 | **`Rtabmap/DetectionRate`** | `5` (5 Hz) | 실시간 SLAM 갱신율을 5Hz로 제어하여 vCPU 계산 지연(Lag) 예방 |
 | **`RGBD/LinearUpdate`** | `0.10` (10 cm) | 10cm 간격 키프레임 생성으로 그래프 최적화 부하 절감 및 DB 비대화 방지 |
 | **`RGBD/AngularUpdate`** | `0.10` (5.7 deg) | 5.7도 간격 키프레임 생성으로 회전 구간 매핑 안정성 확보 |
-| **`Vis/EstimationType`** | `1` | 3D-2D PnP 포즈 추정 (벤치마크 1위, SVD 대비 CPU 40% 절감) |
+| **`Vis/EstimationType`** | `1` | 3D-2D PnP 포즈 추정 (벤치마크 1위, SVD 대비 CPU 절감) |
 | **`Vis/MinInliers`** | `10` | 특징점 검증 임계값 (벤치마크 1위: IN=6 대비 +4~5점) |
-| **`Vis/CornerMinQuality`** | `0.02` | 특징점 품질 임계값 (벤치마크 검증값) |
-| **`Vis/MaxFeatures`** | `1000` | **★ 실환경 재조정(2026-08-10 재검증)** — 2000→1000: 프레임당 VO 비용 절반으로 실환경(rviz on)에서도 30fps 유지 여유 확보 |
-| **`Vis/CornerGridSize`** | `30` | 특징점 그리드 크기 (벤치마크 검증값) |
-| **`Vis/CornerNbThreads`** | `8` | vCPU 8 스레드 멀티스레딩 특징점 병렬 추출 (여유 vCPU 활용) |
-| **`OdomF2M/MaxFrames`** | `10` | **★ 벤치마크 1위** — 기존 60은 SLAM 초기화 실패 및 VO 지연 누적 |
-| **`Mem/STMSize`** | `20` | **★ 실환경 재조정** — RAM 여유분 활용, 루프클로저 안정성 (성능 차이 없음) |
-| **`Grid/VoxelSize`** | `0.01` (1 cm) | 1cm 정밀 격자 보존 및 3D Point Cloud 잡음 제거 |
+| **`GFTT/QualityLevel`** | `0.02` | **★ 2026-08-11 교정** — `Vis/CornerMinQuality`(0.23.7에 없음)의 유효 대체 키. 특징점 품질 임계값 |
+| **`Vis/MaxFeatures`** | `1000` | **★ 실환경 재조정** — 2000→1000: 프레임당 VO 비용 절반으로 실환경(rviz on)에서도 30fps 유지 여유 확보 |
+| **`Vis/GridRows`** | `16` | **★ 2026-08-11 교정** — `Vis/CornerGridSize`(0.23.7에 없음)의 유효 대체 키. 특징점 균일 분포 그리드 (640x480@30px) |
+| **`Vis/GridCols`** | `21` | **★ 2026-08-11 교정** — 상동 |
+| **`OdomF2M/MaxSize`** | `1000` | **★ 2026-08-11 벤치 1위** — `OdomF2M/MaxFrames`(0.23.7에 없음)의 유효 대체 키. 기본 2000은 odom 17Hz 급락, 4000은 14Hz |
+| **`Odom/GuessMotion`** | `true` | **★ 2026-08-11 교정** — `Odom/PoseGuessMode`(0.23.7에 없음)의 유효 대체 키. 이전 모션 기반 다음 포즈 추측 |
+| **`Optimizer/GravitySigma`** | `0.3` | **★ 2026-08-11 교정** — `Optimizer/GravityProvided`(0.23.7에 없음)의 유효 대체 키. 그래프 최적화 중력 제약 |
+| **`Mem/STMSize`** | `10` | **★ 2026-08-11 재확정** — STM=100 대비 RAM 절감, 성능 동일 |
+| **`Grid/DepthDecimation`** | `2` | **★ 2026-08-11 교정** — `Grid/VoxelSize`(0.23.7에 없음) 무시됨을 확인. 실제 depth 해상도를 결정하는 키 (기본 4 → 2로 라이브 맵 4배 고밀도) |
 | **`odom_always_process_most_recent_frame`** | `true` | **★ 근본 수정(2026-08-10 재검증)** — live 촬영은 최신 프레임 처리로 지연 누적 차단. `false`는 rosbag 오프라인 전용 (RTAB-Map 공식 가이드). 기존 false는 DDS 큐 백로그·위상 지연 누적 + 맵핑 동기화 실패 유발 |
 
-### 🧪 SLAM 파라미터 벤치마크 결과 (2026-08-10 실측, 8개 조합)
+> ⚠️ **2026-08-11 파라미터 유효성 검증 결과** — 아래 키는 RTAB-Map 0.23.7에서 **존재하지 않아 조용히 무시**되던 것들:
+> `Vis/CornerMinQuality`, `Vis/CornerGridSize`, `Vis/CornerNbThreads`(제거), `OdomF2M/MaxFrames`,
+> `Odom/PoseGuessMode`, `Optimizer/GravityProvided`, `Vis/Robust`(→`Optimizer/Robust`),
+> `Rtabmap/ResetCountdown`(→`Odom/ResetCountdown`), `RGBD/CreateIntermediateNodes`(→`Rtabmap/CreateIntermediateNodes`), `Grid/VoxelSize`
+
+### 🧪 SLAM 파라미터 벤치마크 결과 (2026-08-11 실측, 8개 조합, 유효 키 기준)
 | 순위 | 조합 | odom Hz | SLAM CPU | 점수 |
 | :---: | :--- | :---: | :---: | :---: |
-| 🥇 | **PnP \| F2M=10 \| STM=10 \| KF_0.1 \| IN=10 \| MD=4** | 29.9 | 34.3% | **65.3** |
-| 🥈 | PnP \| F2M=10 \| STM=10 \| KF_0.1 \| IN=6 \| MD=4 | 27.8 | 28.8% | 60.8 |
-| 🥉 | PnP \| F2M=10 \| STM=10 \| KF_0.2 \| IN=6 \| MD=4 | 29.9 | 27.2% | 61.0 |
+| 🥇 | **PnP \| MaxSize=1000 \| STM=10 \| KF_0.1 \| IN=10 \| MD=4** | **30.0** | 40.6% | **64.8** |
+| 🥈 | SVD \| MaxSize=1000 \| STM=10 \| KF_0.1 \| IN=6 \| MD=4 | 30.0 | 33.6% | 60.6 |
+| 🥉 | PnP \| MaxSize=2000 \| STM=10 \| KF_0.1 \| IN=6 \| MD=4 | 17.4 | 35.4% | 60.4 |
+
+> 🔑 **핵심**: `OdomF2M/MaxSize=1000`이 VO 유지에 결정적 (기본 2000은 odom 17Hz 급락).
+> 기존 "F2M=10 CPU 35% 절감" 결론은 무효 키 `OdomF2M/MaxFrames`로 측정된 것 → 2026-08-11 재벤치마크로 교정.
 
 ---
 
-## 📐 4. Open3D 3D Mesh 복원 최적화 (`src/auto_mobility/mesh/mesh_open3d.py`)
+## 📐 4. Open3D 3D Mesh 복원 최적화 (`src/auto_mobility/mesh/mesh_open3d.py` + `scripts/utils/export_ply.sh`)
 
 | 설정 항목 | 설정값 | 핵심 기능 (품질 & 최적화) |
 | :--- | :--- | :--- |
+| **`--decimation`** (export) | `1` | **★ 2026-08-11 — 기본 4는 PLY 밀도 1/16로 mesh 품질 저하의 근본 원인이었음. 오프라인 처리라 캡처 성능 영향 없음** |
+| **`--max_range`** (export) | `5` (m) | 4m 이상 벽/천장 포착 (기본 4m) |
 | **복원 방법** | `poisson` (기본) | **★ BPA→Poisson 전환** — BPA는 구멍 다수 (표면 17.5m²), Poisson은 폐곡면 보완 (115.9m², 실측) |
 | **`--depth`** | `8` | Poisson octree 깊이 (depth=9는 vertex 폭증으로 비효율) |
 | **`--voxel`** | `0.005` (5mm) | 다운샘플링 voxel 크기 (640x480 depth 해상도에 최적, 3mm는 노이즈 증폭) |

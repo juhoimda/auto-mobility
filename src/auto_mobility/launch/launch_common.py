@@ -1,15 +1,15 @@
 # RTAB-Map 파라미터 단일 소스 (rtab_live / rtab_bag launch 공용)
 # 튜닝 시 이 파일만 수정하면 live/bag 양쪽에 동일하게 적용된다.
-# VM 기준: nproc=8 (vCPU 8). Vis/CornerNbThreads는 VM vCPU 수에 맞춘다.
 #
-# [2026-08-10 실환경 정합 재조정]
-# - 벤치마크(29.9Hz)는 rviz=false + 카메라 필터 없음 + 라이브 5초 창으로 측정되어
-#   실제 촬영(rviz on, 필터 on, 장시간)과 다른 조건이었음 (capture_guard 실측 11Hz)
-# - [근본 해결] 실환경에서도 VO가 따라갈 수 있도록 프레임당 부하 절감:
-#   * Vis/MaxFeatures 2000 → 1000 (특징점 검출/매칭 비용 절반, IR 에미터로 특징량 충분)
-#   * Vis/CornerNbThreads 8 유지 (여유 vCPU 활용 → 검출 시간 단축)
-#   * Mem/STMSize 10 → 20 (RAM 여유분 활용, 루프클로저 안정성)
-# - 해상도: 640x480@30 (848x480은 depth 19.4Hz 드랍 → VM USB 대역폭 초과)
+# [하드웨어 / 환경]
+# - VMware 가상머신, vCPU 8 (Intel Core Ultra 7 265H 호스트)
+# - RAM 31GB, /dev/shm 16GB
+# - RealSense D435i @ USB 3.0 (5000 Mbps)
+# - 카메라: 640x480@30 (848x480은 depth 19.4Hz 드랍 → VM USB 대역폭 초과)
+# - 촬영 중 RViz ON (point cloud 실시간 검증용) → odom 실측 11Hz
+# - 벤치마크 29.9Hz는 rviz=false + 필터 없음 + 5초 창 조건 (실환경과 상이)
+#
+# ⚠️ RTAB-Map 0.23.7 기준 유효 키만 사용 (2026-08-11 검증 완료).
 
 import os
 from launch_ros.actions import Node
@@ -25,40 +25,38 @@ from auto_mobility.config import (
 )
 
 RTABMAP_PARAMS = {
-    # [1] 특징점 검출 및 3D-2D PnP 포즈 추정 (CPU 40% 절감 + Depth 결측 유실 방지)
-    'Vis/EstimationType': '1',  # 1: 3D-2D PnP (벤치마크 우승 조합)
-    'Vis/MinInliers': '10',     # [벤치마크 1위] IR Laser Projector와 결합 시 인라이어 10개 최적
-    'Vis/MaxFeatures': '1000',  # [실환경 재조정] 프레임당 VO 비용 절감 (30Hz 유지 여유 확보)
-    'Vis/CornerMinQuality': '0.02',   # 벤치마크 검증값 (기존 0.01)
-    'Vis/CornerGridSize': '30',       # 벤치마크 검증값 (기존 20)
+    # [1] 특징점 검출 및 3D-2D PnP 포즈 추정
+    'Vis/EstimationType': '1',  # 1: 3D-2D PnP
+    'Vis/MinInliers': '10',     # IR 에미터 환경에서의 최소 인라이어
+    'Vis/MaxFeatures': '1000',  # 프레임당 VO 비용 절감 (30Hz 유지)
+    'GFTT/QualityLevel': '0.02',# 특징점 품질 임계값 (기본 0.001)
+    'Vis/GridRows': '16',       # 특징점 균일 분포용 그리드
+    'Vis/GridCols': '21',
     'Vis/MinDepth': '0.3',
-    'Vis/MaxDepth': '4.0',      # 노이즈가 심한 원거리 뎁스 포인트 필터링 (벤치마크: MD=4/8 동일 성능, 4m로 보수적 유지)
-    'Vis/Robust': 'true',
+    'Vis/MaxDepth': '4.0',      # 원거리 노이즈 뎁스 필터링
     'Vis/InlierDistance': '1.0',
-    # [2] 병렬 검출(VM vCPU 8) + F2M 로컬 맵 최적화
-    'Vis/CornerNbThreads': '8',
-    'OdomF2M/MaxFrames': '10',  # [벤치마크 1위] F2M=60 대비 rgbd_odometry CPU 73%→~35% 절감 (촬영 끊김 제거)
-    # [3] IMU 추정치 활용 (IMU Orientation 초기 추정 + 중력 벡터 정렬)
-    'Odom/PoseGuessMode': '1',
-    'Optimizer/GravityProvided': 'true',
-    # [4] 추적 끊김 자동 복구 및 루프클로저 이상치 걸러내기
-    'Rtabmap/ResetCountdown': '0',
-    'RGBD/OptimizeMaxError': '3.0',     # 잘못된 루프 클로저 오차 차단 (지형 일그러짐 방지)
-    'RGBD/CreateIntermediateNodes': 'true',
+    # [2] IMU 추정치 활용 (중력 벡터 정렬)
+    'Odom/GuessMotion': 'true',       # 이전 모션 기반 다음 포즈 추측
+    'Optimizer/GravitySigma': '0.3',  # 그래프 최적화 중력 제약
+    # [3] 추적 끊김 복구 및 루프클로저 이상치 차단
+    'Odom/ResetCountdown': '0',
+    'RGBD/OptimizeMaxError': '3.0',   # 잘못된 루프클로저 오차 차단
+    'Rtabmap/CreateIntermediateNodes': 'true',  # 키프레임 간 중간 노드 생성 (밀도↑)
     'RGBD/ProximityBySpace': 'true',
     'RGBD/OptimizeFromGraphEnd': 'true',
-    'RGBD/NeighborLinkRefining': 'true', # 인접 키프레임 간 그래프 정밀 정렬 (동적 이동 안정성)
-    # [5] CPU 분산: 맵핑 루프 5Hz 안정화, 루프클로저 메모리 관리
-    'Rtabmap/DetectionRate': '5',       # vCPU 8 활용 및 그래프 최적화 지연 방지 5Hz 맵핑
-    'Mem/STMSize': '20',                # [실환경 재조정] STM=20: RAM 여유분 활용 + 루프클로저 안정성 (벤치마크상 성능 차이 없음)
-    # [6] 키프레임 전략: 10cm/5.7도 마다 키프레임 업데이트 (그래프 폭주 및 lag 방지)
+    'RGBD/NeighborLinkRefining': 'true',
+    # [4] CPU 분산: 맵핑 루프 5Hz, 루프클로저 메모리
+    'Rtabmap/DetectionRate': '5',
+    'OdomF2M/MaxSize': '1000',  # ★ 2026-08-11 벤치마크 1위 — 기본 2000은 odom 17Hz 급락
+    'Mem/STMSize': '10',        # ★ 2026-08-11 벤치마크 최적(STM=10), RAM 절감
+    # [5] 키프레임 전략: 10cm / 5.7도 마다
     'RGBD/LinearUpdate': '0.10',
     'RGBD/AngularUpdate': '0.10',
-    # [7] Point Cloud 품질 & 노이즈 최적화 (1cm Voxel 고해상도 매핑)
+    # [6] Point Cloud 품질 & 노이즈
     'Grid/3D': 'true',
-    'Grid/VoxelSize': '0.01',           # 1cm 정밀 격자 보존
+    'Grid/DepthDecimation': '2',      # 4→2: 라이브 맵 4배 고밀도 (기본 4)
     'Grid/RangeMin': '0.3',
-    'Grid/RangeMax': '3.0',
+    'Grid/RangeMax': '4.0',           # Vis/MaxDepth(4.0)와 일치
     'Grid/NoiseFilteringRadius': '0.05',
     'Grid/NoiseFilteringMinNeighbors': '5',
     'Grid/RayTracing': 'true',
