@@ -90,10 +90,10 @@
 | **`--max_range`** (export) | `5` (m) | 4m 이상 벽/천장 포착 (기본 4m) |
 | **복원 방법** | `poisson` (기본) | **★ BPA→Poisson 전환** — BPA는 구멍 다수 (표면 17.5m²), Poisson은 폐곡면 보완 (115.9m², 실측) |
 | **`--depth`** | `8` | Poisson octree 깊이 (depth=9는 vertex 폭증으로 비효율) |
-| **`--voxel`** | `0.005` (5mm) | 다운샘플링 voxel 크기 (640x480 depth 해상도에 최적, 3mm는 노이즈 증폭) |
+| **`--voxel`** | `0.01` | 다운샘플링 voxel 크기 (10mm). D435 depth 정밀도(1~2cm) 이내 해상도로 정보 손실 없는 성능 최적화 |
 | **`--simplify`** | `0.5` | Quadric Decimation 50% 경량화 (Isaac Sim/뷰어 로딩 성능 확보) |
 | **Normal Alignment** | `orient_normals_consistent_tangent_plane(k=15)` | Tangent Plane 기반 3D 일관 법선 정렬로 벽면/천장/측면 메쉬 표면 뒤집힘 방지 |
-| **Color Transfer** | `cKDTree k=3 IDW` | 거리 역가중 평균(IDW)으로 Point Cloud 색상을 복사하여 표면 텍스처 노이즈 및 계단 현상 완화 |
+| **Color Transfer** | `cKDTree k=1` | 최근접 이웃 색상 복사. voxel 다운샘플링이 이미 색상 평균화 → k=3 IDW 보간 중복 제거 |
 | **Outlier Removal** | `remove_statistical_outlier(nb=20, std=2.0)` | 통계적 부유 잡음 노이즈 제거 |
 | **Topology Cleanup** | `crop(bbox)` & Topology Repair | 바운딩 박스 외부 허공 메쉬 및 중복/비정상 삼각면 자동 제거 |
 

@@ -164,7 +164,7 @@ echo " 🛠️ [STEP 2-1] Open3D 기반 3D Mesh 복원 파이프라인 구동"
 echo "=========================================================="
 
 # Open3D Mesh: Poisson 기본 복원 + quadric decimation 50% (품질/성능 균형)
-"$PIPELINE_DIR/mesh.sh" "$DB_NAME" "$MESH_NAME" --force --recon-method=poisson --depth=8 --voxel=0.005
+"$PIPELINE_DIR/mesh.sh" "$DB_NAME" "$MESH_NAME" --force --recon-method=poisson --depth=8 --voxel=0.01
 
 # 🛡️ BARRIER 2: Mesh File Integrity Check
 echo ""

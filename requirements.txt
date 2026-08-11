@@ -15,7 +15,7 @@
 open3d==0.19.0
 numpy==1.26.4
 
-# mesh_open3d.py: Point Cloud -> Mesh 컬러 전송 (cKDTree IDW)
+# mesh_open3d.py: Point Cloud -> Mesh 컬러 전송 (cKDTree nearest-neighbor)
 scipy==1.8.0
 
 # config.py / common.sh: config/topics.yaml 로드

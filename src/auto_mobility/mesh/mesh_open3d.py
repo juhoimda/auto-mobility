@@ -94,24 +94,16 @@ def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_si
     mesh.remove_duplicated_vertices()
     mesh.remove_non_manifold_edges()
 
-    # Transfer RGB colors from point cloud to mesh vertices using k=3 IDW (Inverse Distance Weighting)
+    # Transfer RGB colors from point cloud to mesh vertices using nearest-neighbor search
     if pcd.has_colors() and len(pcd.points) > 0 and len(mesh.vertices) > 0:
-        print("Transferring RGB colors from point cloud using k=3 Inverse Distance Weighting...")
+        print("Transferring RGB colors from point cloud using nearest-neighbor search...")
         pcd_points = np.asarray(pcd.points)
         pcd_colors = np.asarray(pcd.colors)
         mesh_vertices = np.asarray(mesh.vertices)
-        
+
         tree = cKDTree(pcd_points)
-        k_neighbors = min(3, len(pcd_points))
-        dists, indices = tree.query(mesh_vertices, k=k_neighbors, workers=-1)
-        
-        if k_neighbors == 1:
-            mesh.vertex_colors = o3d.utility.Vector3dVector(pcd_colors[indices])
-        else:
-            weights = 1.0 / (dists + 1e-8)
-            weights /= np.sum(weights, axis=1, keepdims=True)
-            interpolated_colors = np.sum(pcd_colors[indices] * weights[:, :, np.newaxis], axis=1)
-            mesh.vertex_colors = o3d.utility.Vector3dVector(interpolated_colors)
+        _, indices = tree.query(mesh_vertices, k=1, workers=-1)
+        mesh.vertex_colors = o3d.utility.Vector3dVector(pcd_colors[indices])
 
     mesh.compute_vertex_normals()
     
