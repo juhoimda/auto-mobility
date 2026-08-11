@@ -29,9 +29,9 @@ DB_PATH="$DB_DIR/$DB_NAME.db"
 # 스마트 자동 감지: Bag 파일이 존재할 경우 내부 Depth 토픽 자동 검사
 BAG_PATH="$BAG_DIR/$DB_NAME"
 if [ -d "$BAG_PATH" ]; then
-    if ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q "/camera/camera/depth/image_rect_raw/compressedDepth"; then
+    if ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q "$DEPTH_COMPRESSED_TOPIC"; then
         echo "💡 [스마트 자동 감지] 구형(Legacy) Depth 압축 토픽 적용"
-        DEPTH_COMPRESSED_TOPIC="/camera/camera/depth/image_rect_raw/compressedDepth"
+        DEPTH_COMPRESSED_TOPIC="$DEPTH_COMPRESSED_TOPIC"
     fi
 fi
 

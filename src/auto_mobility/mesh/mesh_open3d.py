@@ -4,6 +4,9 @@ import os
 import argparse
 import time
 
+# repo 소스 실행 / 설치 실행 양쪽에서 auto_mobility 패키지 임포트 보장
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
 try:
     import open3d as o3d
     import numpy as np
@@ -12,7 +15,12 @@ except ImportError:
     print("Error: Open3D, NumPy, or SciPy is not installed. Install via `pip install open3d numpy scipy`")
     sys.exit(1)
 
-def generate_mesh(input_ply, output_mesh, depth=9, voxel_size=0.005, method="poisson", view_result=False, clean_density=True, simplify_target=0.5):
+from auto_mobility.config import MESH_DEFAULTS
+
+
+def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_size=MESH_DEFAULTS["voxel_size"],
+                  method=MESH_DEFAULTS["method"], view_result=False, clean_density=True,
+                  simplify_target=MESH_DEFAULTS["simplify_target"]):
     t0 = time.time()
     print(f"Loading point cloud: {input_ply}")
     pcd = o3d.io.read_point_cloud(input_ply)
@@ -111,7 +119,9 @@ def generate_mesh(input_ply, output_mesh, depth=9, voxel_size=0.005, method="poi
     os.makedirs(os.path.dirname(os.path.abspath(output_mesh)), exist_ok=True)
     
     print(f"Saving generated mesh to: {output_mesh}")
+    o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
     o3d.io.write_triangle_mesh(output_mesh, mesh)
+    o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Info)
     elapsed = time.time() - t0
     print(f"🎉 High-detail Mesh generation complete in {elapsed:.2f}s! Vertices: {len(mesh.vertices):,}, Triangles: {len(mesh.triangles):,}")
 
@@ -129,13 +139,13 @@ def main():
     parser = argparse.ArgumentParser(description="Generate high-quality 3D Mesh using Open3D from Point Cloud")
     parser.add_argument("input", help="Input .ply or .pcd point cloud file")
     parser.add_argument("output", help="Output mesh file (.obj or .ply)")
-    parser.add_argument("--depth", type=int, default=8, help="Poisson reconstruction depth (default: 8)")
-    parser.add_argument("--voxel", type=float, default=0.005, help="Voxel size for downsampling (default: 0.005)")
-    parser.add_argument("--method", choices=["poisson", "bpa"], default="poisson", help="Reconstruction method: poisson or bpa (default: poisson)")
+    parser.add_argument("--depth", type=int, default=MESH_DEFAULTS["depth"], help=f"Poisson reconstruction depth (default: {MESH_DEFAULTS['depth']})")
+    parser.add_argument("--voxel", type=float, default=MESH_DEFAULTS["voxel_size"], help=f"Voxel size for downsampling (default: {MESH_DEFAULTS['voxel_size']})")
+    parser.add_argument("--method", choices=["poisson", "bpa"], default=MESH_DEFAULTS["method"], help="Reconstruction method: poisson or bpa (default: poisson)")
     parser.add_argument("--view", action="store_true", help="Visualize generated mesh in interactive 3D window")
     parser.add_argument("--no-clean", action="store_true", help="Disable density cleaning filter")
     parser.add_argument("--no-simplify", action="store_true", help="Disable mesh simplification")
-    parser.add_argument("--simplify", type=float, default=0.5, help="Triangle simplification target ratio (default: 0.5)")
+    parser.add_argument("--simplify", type=float, default=MESH_DEFAULTS["simplify_target"], help="Triangle simplification target ratio (default: 0.5)")
 
     
     args = parser.parse_args()

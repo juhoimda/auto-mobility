@@ -2,6 +2,7 @@
 
 PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$PIPELINE_DIR/../common.sh"
+export PYTHONWARNINGS="ignore"
 
 POSITIONAL_ARGS=()
 VIEW_FLAG=""

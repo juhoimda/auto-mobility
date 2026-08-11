@@ -16,12 +16,25 @@ capture_guard.py - RTAB-Map 실시간 촬영 모니터링 가드 (2026-08-10 신
 
 import os
 import sys
+
+# repo 소스 실행 / 설치 실행 양쪽에서 auto_mobility 패키지 임포트 보장
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
 import time
 import json
 import signal
 import subprocess
 import threading
 from datetime import datetime
+from auto_mobility.config import (
+    CAMERA_RGB_TOPIC,
+    CAMERA_DEPTH_TOPIC,
+    CAMERA_INFO_TOPIC,
+    CAMERA_IMU_TOPIC,
+    ODOM_TOPIC,
+    LOG_DIR,
+    USB_3_MIN_SPEED_MBPS,
+)
 
 GREEN  = "\033[92m"
 YELLOW = "\033[93m"
@@ -30,17 +43,14 @@ CYAN   = "\033[96m"
 BOLD   = "\033[1m"
 RESET  = "\033[0m"
 
-# 감시 토픽: (토픽명, 최소 Hz, 설명)
+# 감시 토픽: (토픽명, 최소 Hz, 설명) — 토픽명은 config.py 단일 소스
 MONITOR_TOPICS = [
-    ("/camera/camera/color/image_raw",        15.0, "RGB 컬러"),
-    ("/camera/camera/depth/image_rect_raw",   15.0, "Depth"),
-    ("/camera/camera/color/camera_info",      15.0, "CameraInfo"),
-    ("/camera/camera/imu",                   100.0, "IMU"),
-    ("/rtabmap/odom",                          5.0, "Visual Odometry"),
+    (CAMERA_RGB_TOPIC,   15.0, "RGB 컬러"),
+    (CAMERA_DEPTH_TOPIC, 15.0, "Depth"),
+    (CAMERA_INFO_TOPIC,  15.0, "CameraInfo"),
+    (CAMERA_IMU_TOPIC,  100.0, "IMU"),
+    (ODOM_TOPIC,          5.0, "Visual Odometry"),
 ]
-
-PROJECT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-LOG_DIR = os.path.join(PROJECT_DIR, "ros2_data", "logs")
 
 stop_flag = threading.Event()
 
@@ -96,7 +106,7 @@ def get_usb_status():
         try:
             if os.path.exists(path) and open(path).read().strip() == "8086":
                 speed = open(f"/sys/bus/usb/devices/{dev}/speed").read().strip()
-                return f"{speed} Mbps (USB {'3.x' if int(speed) >= 5000 else '2.x ⚠'})"
+                return f"{speed} Mbps (USB {'3.x' if int(speed) >= USB_3_MIN_SPEED_MBPS else '2.x ⚠'})"
         except Exception:
             pass
     return "미감지"
@@ -169,7 +179,7 @@ def main():
         overall_ok = all(
             hz_map.get(t, 0.0) >= min_hz for t, min_hz, _ in MONITOR_TOPICS
         )
-        odom = hz_map.get("/rtabmap/odom", 0.0)
+        odom = hz_map.get(ODOM_TOPIC, 0.0)
         degraded = odom > 0 and odom < 10.0
 
         sample = {
@@ -203,7 +213,7 @@ def main():
     if samples:
         avg_cpu = sum(s["cpu_pct"] for s in samples) / len(samples)
         avg_ram = sum(s["ram_mb"] for s in samples) / len(samples)
-        odom_hz_series = [s["hz"].get("/rtabmap/odom", 0.0) for s in samples]
+        odom_hz_series = [s["hz"].get(ODOM_TOPIC, 0.0) for s in samples]
         first_odom = odom_hz_series[0] if odom_hz_series else 0.0
         last_odom = odom_hz_series[-1] if odom_hz_series else 0.0
 
@@ -222,7 +232,7 @@ def main():
 |:---:|:---:|
 """
         for s in samples[:: max(1, len(samples) // 20)]:
-            md += f"| {s['elapsed_s']:.0f} | {s['hz'].get('/rtabmap/odom', 0.0):.1f} |\n"
+            md += f"| {s['elapsed_s']:.0f} | {s['hz'].get(ODOM_TOPIC, 0.0):.1f} |\n"
 
         degrade = last_odom < first_odom * 0.7
         md += f"""

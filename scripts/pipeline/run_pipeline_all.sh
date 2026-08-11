@@ -7,6 +7,7 @@ PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$PIPELINE_DIR/../common.sh"
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+export PYTHONWARNINGS="ignore"
 DB_NAME="session_${TIMESTAMP}.db"
 MESH_NAME="session_${TIMESTAMP}_mesh.obj"
 SKIP_CAPTURE=false
@@ -47,6 +48,9 @@ TARGET_DB_PATH="$DB_DIR/$DB_NAME"
 TARGET_PLY_PATH="$POINTCLOUD_DIR/${DB_NAME%.db}_cloud.ply"
 TARGET_MESH_PATH="$MESH_DIR/$MESH_NAME"
 
+# 📝 파이프라인 전체 출력에서 중요 로그(WARN/ERROR/METRIC) 자동 수집 시작
+pipeline_log_start "pipeline_${DB_NAME%.db}" || true
+
 echo "=========================================================="
 echo " 🌐 Real-to-Sim End-to-End Pipeline Execution (Strict Barriers)"
 echo " 📂 Target Database : $TARGET_DB_PATH"
@@ -62,12 +66,12 @@ pre_flight() {
     echo " 🛠️ [PRE-FLIGHT] 하드웨어 환경 사전 검증"
     echo "=========================================================="
 
-    # 1. USB 링크 속도 확인 (5000 = USB 3.x)
+    # 1. USB 링크 속도 확인 (USB_3_MIN_SPEED_MBPS = USB 3.x 기준)
     USB_OK=false
     for dev in /sys/bus/usb/devices/*; do
         if [ -f "$dev/idVendor" ] && [ "$(cat "$dev/idVendor" 2>/dev/null)" = "8086" ]; then
             SPEED=$(cat "$dev/speed" 2>/dev/null)
-            if [ "$SPEED" -ge 5000 ] 2>/dev/null; then
+            if [ "$SPEED" -ge "$USB_3_MIN_SPEED_MBPS" ] 2>/dev/null; then
                 echo "✅ RealSense USB 3.x 정상 (${SPEED} Mbps)"
                 USB_OK=true
             else
@@ -87,8 +91,8 @@ pre_flight() {
     RMEM=$(sysctl net.core.rmem_max 2>/dev/null | awk '{print $3}')
     echo "✅ rmem_max: $((RMEM / 1024 / 1024))MB"
 
-    # 4. 카메라 해상도/해상도 적합성 확인 (config 로드)
-    RES_STR=$(grep -oE "depth_profile.*[0-9]+x[0-9]+" "$PROJECT_DIR/launch/camera.launch.py" | grep -oE "[0-9]+x[0-9]+" | head -1)
+    # 4. 카메라 해상도/해상도 적합성 확인 (config.py 단일 소스)
+    RES_STR="$CAMERA_RESOLUTION"
     echo "✅ 카메라 설정 해상도: ${RES_STR} (640x480이 VM 최적)"
     if [ "$RES_STR" != "640x480" ]; then
         echo "⚠️  [경고] 현재 해상도가 640x480이 아닙니다! VM USB 대역폭 초과로 depth 드랍 위험."
@@ -112,7 +116,7 @@ else
     echo "=========================================================="
     
     # 카메라 센서 토픽 발행 여부 사전 체크
-    if ! ros2 topic list | grep -q "/camera/camera/color/image_raw"; then
+    if ! ros2 topic list | grep -q "$RGB_TOPIC"; then
         echo "❌ [오류] RealSense 카메라 토픽이 감지되지 않습니다!"
         echo "👉 [터미널 1]에서 먼저 카메라를 구동해주세요:"
         echo "   ros2 launch auto_mobility camera.launch.py"
@@ -207,3 +211,6 @@ echo "💡 [Windows Isaac Sim 사용 방법]"
 echo "   Windows 공유 폴더 (ubuntu_shared) 안의"
 echo "   '${MESH_NAME}' 파일을 Isaac Sim에서 Import하면 됩니다."
 echo "=========================================================="
+
+# 📝 중요 로그 수집 종료 (요약 저장)
+pipeline_log_stop || true

@@ -4,7 +4,15 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from ament_index_python.packages import get_package_share_directory
-from auto_mobility.launch.launch_common import RTABMAP_ARGS, create_republish_node, create_imu_filter_node, create_cloud_throttle_node
+from auto_mobility.launch.launch_common import (
+    RTABMAP_ARGS,
+    RTAB_LIVE_TOPIC_QUEUE_SIZE,
+    get_rtabmap_base_args,
+    create_republish_node,
+    create_imu_filter_node,
+    create_cloud_throttle_node,
+)
+from auto_mobility.config import CAMERA_DEPTH_TOPIC
 
 def generate_launch_description():
     rtabmap_launch_dir = get_package_share_directory('rtabmap_launch')
@@ -29,8 +37,8 @@ def generate_launch_description():
 
     depth_topic_arg = DeclareLaunchArgument(
         'depth_topic',
-        default_value='/camera/camera/depth/image_rect_raw',
-        description='Depth topic name (e.g. /camera/camera/depth/image_rect_raw)'
+        default_value=CAMERA_DEPTH_TOPIC,
+        description=f'Depth topic name (default: {CAMERA_DEPTH_TOPIC})'
     )
 
     # 공통 노드 생성 (Live 환경: use_sim_time=False)
@@ -44,36 +52,14 @@ def generate_launch_description():
             os.path.join(rtabmap_launch_dir, 'launch', 'rtabmap.launch.py')
         ),
         launch_arguments={
-            'rgb_topic': '/camera/camera/color/image_raw',
+            **get_rtabmap_base_args(),
             'depth_topic': LaunchConfiguration('depth_topic'),
-            'camera_info_topic': '/camera/camera/color/camera_info',
-            'imu_topic': '/camera/camera/imu/filtered',
             'subscribe_imu': LaunchConfiguration('use_imu'),
             # true: odometry가 카메라보다 느려도 최신 프레임만 처리 → 지연/큐 백로그 누적 차단
             # (false는 rosbag 오프라인 재생용. live에서 false면 위상 지연이 계속 쌓임)
             'odom_always_process_most_recent_frame': 'true',
-            
-            # QoS profile = [0: system default, 1: Reliable, 2: Best Effort]
-            'qos_image': '2',
-            'qos_depth': '2',
-            'qos_camera_info': '2',
-            'qos_imu': '2',
-
-            'frame_id': 'camera_link',
-
-            # Synchronization
-            # 0.15s: VO delay(~70ms, always_process_most_recent_frame 특성) 흡수하여
-            # rtabmap의 간헐적 "no odometry" 스킵(맵 구멍) 방지
-            'approx_sync': 'true',
-            'approx_sync_max_interval': '0.15',
-            'topic_queue_size': '50',
+            'topic_queue_size': RTAB_LIVE_TOPIC_QUEUE_SIZE,
             'wait_for_transform': '0.5',
-
-            'visual_odometry': 'true',
-            'rviz': 'true',
-            'rviz_cfg': os.path.join(get_package_share_directory('auto_mobility'), 'config', 'rviz', 'rtabmap_vmware.rviz'),
-            'rtabmap_viz': 'false',
-            
             'database_path': LaunchConfiguration('database_path'),
             'rtabmap_args': RTABMAP_ARGS
         }.items()
@@ -89,4 +75,3 @@ def generate_launch_description():
         cloud_throttle_node,
         rtabmap_launch
     ])
-

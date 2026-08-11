@@ -3,6 +3,14 @@
 > **최종 갱신: 2026-08-10 (실환경 재검증 반영)** — 기존 벤치마크는 rviz off·필터 off 조건이어서
 > 실제 촬영(rviz on, 필터 on, 장시간)과 불일치 → 2026-08-10 실환경 근사 조건에서 재검증 후 재조정
 
+> **설정 단일 소스(Single Source of Truth) 안내 (리팩토링 적용)**
+> 아래 표의 값을 수정할 때는 각 파일을 직접 고치는 대신 다음 중앙 설정에서만 변경하세요:
+> - **토픽명**: `config/topics.yaml` → `config.py` / `common.sh` / launch / node 에 자동 반영
+> - **카메라 파라미터**: `src/auto_mobility/config.py` 의 `CAMERA_PARAMS` (camera.launch.py / benchmark 공용)
+> - **RTAB-Map SLAM 파라미터**: `src/auto_mobility/launch/launch_common.py` 의 `RTABMAP_PARAMS` (live/bag 공용, benchmark 기준으로도 사용)
+> - **Mesh 파라미터**: `src/auto_mobility/config.py` 의 `MESH_DEFAULTS` (CLI default 일치)
+> - **데이터 경로 / FastDDS XML / USB 기준**: `src/auto_mobility/config.py` 의 경로 상수
+
 ---
 
 ## 📸 1. 카메라 하드웨어 최적화 (`launch/camera.launch.py`)

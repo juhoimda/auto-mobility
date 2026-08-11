@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+import os
+import sys
+
+# repo 소스 실행 / 설치 실행 양쪽에서 auto_mobility 패키지 임포트 보장
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -6,17 +12,23 @@ from sensor_msgs.msg import CompressedImage, Image
 from cv_bridge import CvBridge
 import numpy as np
 import cv2
+from auto_mobility.config import (
+    CAMERA_RGB_TOPIC,
+    CAMERA_RGB_COMPRESSED_TOPIC,
+    CAMERA_DEPTH_TOPIC,
+    CAMERA_DEPTH_COMPRESSED_TOPIC,
+)
 
 class CompressedRepublisher(Node):
     def __init__(self):
         super().__init__('compressed_republisher')
         self.bridge = CvBridge()
         
-        # ROS2 주제(Topic) 파라미터 선언 및 취득
-        self.declare_parameter('rgb_compressed_topic', '/camera/camera/color/image_raw/compressed')
-        self.declare_parameter('depth_compressed_topic', '/camera/camera/depth/image_rect_raw/compressedDepth')
-        self.declare_parameter('rgb_raw_topic', '/camera/camera/color/image_raw')
-        self.declare_parameter('depth_raw_topic', '/camera/camera/depth/image_rect_raw')
+        # ROS2 주제(Topic) 파라미터 선언 및 취득 (기본값은 config.py 단일 소스)
+        self.declare_parameter('rgb_compressed_topic', CAMERA_RGB_COMPRESSED_TOPIC)
+        self.declare_parameter('depth_compressed_topic', CAMERA_DEPTH_COMPRESSED_TOPIC)
+        self.declare_parameter('rgb_raw_topic', CAMERA_RGB_TOPIC)
+        self.declare_parameter('depth_raw_topic', CAMERA_DEPTH_TOPIC)
 
         rgb_comp = self.get_parameter('rgb_compressed_topic').get_parameter_value().string_value
         depth_comp = self.get_parameter('depth_compressed_topic').get_parameter_value().string_value

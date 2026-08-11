@@ -11,17 +11,24 @@ VMware 소프트웨어 렌더링 RViz의 PointCloud2 렌더링 부하를 줄이�
   ros2 run auto_mobility cloud_throttle.py [--ros-args -p max_rate:=2.0]
 """
 
+import os
+import sys
+
+# repo 소스 실행 / 설치 실행 양쪽에서 auto_mobility 패키지 임포트 보장
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import PointCloud2
+from auto_mobility.config import CLOUD_MAP_TOPIC, CLOUD_MAP_LITE_TOPIC
 
 
 class CloudThrottle(Node):
     def __init__(self):
         super().__init__('cloud_throttle')
-        self.declare_parameter('input_topic', '/rtabmap/cloud_map')
-        self.declare_parameter('output_topic', '/rtabmap/cloud_map_lite')
+        self.declare_parameter('input_topic', CLOUD_MAP_TOPIC)
+        self.declare_parameter('output_topic', CLOUD_MAP_LITE_TOPIC)
         self.declare_parameter('max_rate', 2.0)
 
         in_topic = self.get_parameter('input_topic').get_parameter_value().string_value
