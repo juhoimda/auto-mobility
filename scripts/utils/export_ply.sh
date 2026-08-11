@@ -34,8 +34,8 @@ OUTPUT_BASE="$(basename "$OUTPUT_PATH" .ply)"
 
 echo "Extracting PointCloud from $DB_FILE -> $OUTPUT_PATH"
 # --decimation 1: 풀해상도 depth (기본 4는 1/16 밀도로 PLY가 희박해짐)
-# --max_range 5: 4m 이상 벽/천장 포착 (D435i 사용 가능 범위, 오프라인 처리라 캡처 성능 영향 없음)
-rtabmap-export --cloud --decimation 1 --max_range 5 --output_dir "$OUTPUT_DIR" --output "$OUTPUT_BASE" "$DB_FILE" >/dev/null 2>&1
+# --max_range 4: Vis/MaxDepth(4.0)와 일치 — 4m 이상 원거리 depth 노이즈 차단
+rtabmap-export --cloud --decimation 1 --max_range 4 --output_dir "$OUTPUT_DIR" --output "$OUTPUT_BASE" "$DB_FILE" >/dev/null 2>&1
 
 # rtabmap-export 생성 결과 파일명 맞춤 (_cloud.ply 처리)
 GENERATED_FILE1="$OUTPUT_DIR/${OUTPUT_BASE}_cloud.ply"
