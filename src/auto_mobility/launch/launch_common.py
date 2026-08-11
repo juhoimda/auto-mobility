@@ -36,10 +36,8 @@ RTABMAP_PARAMS = {
     'Vis/MaxDepth': '4.0',      # 원거리 노이즈 뎁스 필터링
     'Vis/InlierDistance': '1.0',
     # [2] IMU 추정치 활용 (중력 벡터 정렬)
-    'Odom/GuessMotion': 'true',       # 이전 모션 기반 다음 포즈 추측
     'Optimizer/GravitySigma': '0.3',  # 그래프 최적화 중력 제약
     # [3] 추적 끊김 복구 및 루프클로저 이상치 차단
-    'Odom/ResetCountdown': '0',
     'RGBD/OptimizeMaxError': '3.0',   # 잘못된 루프클로저 오차 차단
     'Rtabmap/CreateIntermediateNodes': 'true',  # 키프레임 간 중간 노드 생성 (밀도↑)
     'RGBD/ProximityBySpace': 'true',
@@ -47,7 +45,6 @@ RTABMAP_PARAMS = {
     'RGBD/NeighborLinkRefining': 'true',
     # [4] CPU 분산: 맵핑 루프 5Hz, 루프클로저 메모리
     'Rtabmap/DetectionRate': '5',
-    'OdomF2M/MaxSize': '1000',  # ★ 2026-08-11 벤치마크 1위 — 기본 2000은 odom 17Hz 급락
     'Mem/STMSize': '10',        # ★ 2026-08-11 벤치마크 최적(STM=10), RAM 절감
     # [5] 키프레임 전략: 10cm / 5.7도 마다
     'RGBD/LinearUpdate': '0.10',
@@ -62,8 +59,21 @@ RTABMAP_PARAMS = {
     'Grid/RayTracing': 'true',
 }
 
+# ⚠️ ODOM_ARGS: rgbd_odometry 노드 전용 파라미터 (2026-08-11 확인)
+# rtabmap 메인 노드는 Odom/*, OdomF2M/* 키를 ROS2 파라미터로 선언하지 않아
+# rtabmap_args로 전달하면 ParameterNotDeclaredException → SIGABRT 크래시 발생.
+# rtabmap.launch.py의 odom_args 인자로 전달해야 rgbd_odometry에서 정상 적용된다.
+ODOM_PARAMS = {
+    'Odom/GuessMotion': 'true',       # 이전 모션 기반 다음 포즈 추측
+    'Odom/ResetCountdown': '0',       # 연속 실패 시 자동 리셋
+    'OdomF2M/MaxSize': '1000',        # ★ 2026-08-11 벤치 1위 — 기본 2000은 odom 17Hz 급락
+}
+
 # RTABMAP_ARGS: rtabmap.launch.py의 rtabmap_args 인자에 넘겨줄 커맨드라인 렌더링 문자열
 RTABMAP_ARGS = ' '.join([f'--{k} {v}' for k, v in RTABMAP_PARAMS.items()])
+
+# ODOM_ARGS: rtabmap.launch.py의 odom_args 인자 (rgbd_odometry 노드에 전달)
+ODOM_ARGS = ' '.join([f'--{k} {v}' for k, v in ODOM_PARAMS.items()])
 
 # live / bag 런치에서 서로 다른 값을 쓰는 인자 (단일 소스로 명시적 관리)
 RTAB_LIVE_TOPIC_QUEUE_SIZE = '50'

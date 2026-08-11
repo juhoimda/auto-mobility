@@ -369,10 +369,24 @@ def _param_to_str(value) -> str:
 
 
 def _build_rtabmap_args(params: dict) -> str:
-    """dict → '--Key Value ...' 형태의 rtabmap_args 문자열로 변환."""
+    """dict → '--Key Value ...' 형태의 rtabmap_args 문자열로 변환.
+
+    ⚠️ Odom/*, OdomF2M/* 키는 rtabmap 메인 노드가 선언하지 않아
+    ParameterNotDeclaredException → SIGABRT 크래시를 유발하므로 제외한다.
+    (2026-08-11 실측 확인. 해당 키는 odom_args 로 전달해야 한다)
+    """
     parts = []
     for k, v in params.items():
-        if k != "align_depth":
+        if k != "align_depth" and not k.startswith("Odom/"):
+            parts.append(f"--{k} {_param_to_str(v)}")
+    return " ".join(parts)
+
+
+def _build_odom_args(params: dict) -> str:
+    """Odom/*, OdomF2M/* 키만 추출해 rgbd_odometry 전용 odom_args 문자열 생성."""
+    parts = []
+    for k, v in params.items():
+        if k.startswith("Odom/"):
             parts.append(f"--{k} {_param_to_str(v)}")
     return " ".join(parts)
 
@@ -569,6 +583,7 @@ def run_slam_test(camera_config: dict, slam_config: dict,
     rtabmap_only = {k: v for k, v in slam_config["params"].items()
                     if k not in LAUNCH_KEYS}
     rtabmap_args = _build_rtabmap_args(rtabmap_only)
+    odom_args = _build_odom_args(rtabmap_only)
 
     bench_db_path = os.path.join(LOG_DIR, "bench_rtabmap.db")
     if os.path.exists(bench_db_path):
@@ -594,6 +609,7 @@ def run_slam_test(camera_config: dict, slam_config: dict,
         "rtabmap_viz:=false",
         f"database_path:={bench_db_path}",
         f"rtabmap_args:={rtabmap_args}",
+        f"odom_args:={odom_args}",
     ]
 
     label = slam_config["label"]
@@ -774,6 +790,7 @@ def run_stage3(stage1_result: dict, stage2_result: dict, quick: bool) -> dict:
     rtabmap_only = {k: v for k, v in best_slam["params"].items()
                     if k not in LAUNCH_KEYS}
     rtabmap_args = _build_rtabmap_args(rtabmap_only)
+    odom_args = _build_odom_args(rtabmap_only)
 
     slam_cmd = [
         "ros2", "launch", "rtabmap_launch", "rtabmap.launch.py",
@@ -785,6 +802,7 @@ def run_stage3(stage1_result: dict, stage2_result: dict, quick: bool) -> dict:
         "visual_odometry:=true",
         "rviz:=false", "rtabmap_viz:=false",
         f"rtabmap_args:={rtabmap_args}",
+        f"odom_args:={odom_args}",
     ]
 
     cam_proc = stage2_result.get("cam_proc")

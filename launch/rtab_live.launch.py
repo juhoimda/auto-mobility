@@ -6,6 +6,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from ament_index_python.packages import get_package_share_directory
 from auto_mobility.launch.launch_common import (
     RTABMAP_ARGS,
+    ODOM_ARGS,
     RTAB_LIVE_TOPIC_QUEUE_SIZE,
     get_rtabmap_base_args,
     create_republish_node,
@@ -61,7 +62,9 @@ def generate_launch_description():
             'topic_queue_size': RTAB_LIVE_TOPIC_QUEUE_SIZE,
             'wait_for_transform': '0.5',
             'database_path': LaunchConfiguration('database_path'),
-            'rtabmap_args': RTABMAP_ARGS
+            'rtabmap_args': RTABMAP_ARGS,
+            # Odom/OdomF2M 계열은 rtabmap 메인이 선언하지 않아 크래시 → rgbd_odometry에 odom_args로 전달
+            'odom_args': ODOM_ARGS
         }.items()
     )
 
