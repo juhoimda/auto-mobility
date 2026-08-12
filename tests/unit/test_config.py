@@ -73,7 +73,7 @@ class TestConfigUnit(unittest.TestCase):
 
     def test_mesh_defaults(self):
         self.assertEqual(MESH_DEFAULTS["depth"], 8)
-        self.assertEqual(MESH_DEFAULTS["voxel_size"], 0.01)
+        self.assertEqual(MESH_DEFAULTS["voxel_size"], 0.02)
         self.assertEqual(MESH_DEFAULTS["method"], "poisson")
         self.assertEqual(MESH_DEFAULTS["simplify_target"], 0.5)
 

@@ -12,6 +12,7 @@ DB_NAME="session_${TIMESTAMP}.db"
 MESH_NAME="session_${TIMESTAMP}_mesh.obj"
 SKIP_CAPTURE=false
 SKIP_ISAAC=false
+FAST_MODE=false
 
 # CLI 옵션 파싱
 while [[ $# -gt 0 ]]; do
@@ -29,11 +30,16 @@ while [[ $# -gt 0 ]]; do
             SKIP_ISAAC=true
             shift
             ;;
+        --fast)
+            FAST_MODE=true
+            shift
+            ;;
         -h|--help)
             echo "=========================================================="
-            echo " 사용법: $0 [--db=DB_NAME.db] [--skip-capture] [--skip-isaac]"
+            echo " 사용법: $0 [--db=DB_NAME.db] [--skip-capture] [--skip-isaac] [--fast]"
             echo " 예시  : $0 (실시간 캡처부터 Isaac Sim 검증까지 전체 실행)"
             echo " 예시  : $0 --db=my_room.db --skip-capture (기존 DB로 Mesh 및 Isaac Sim 실행)"
+            echo " 예시  : $0 --skip-isaac --fast (Mesh를 최대 속도로만 생성, 시뮬레이션 제외)"
             echo "=========================================================="
             exit 0
             ;;
@@ -164,7 +170,14 @@ echo " 🛠️ [STEP 2-1] Open3D 기반 3D Mesh 복원 파이프라인 구동"
 echo "=========================================================="
 
 # Open3D Mesh: Poisson 기본 복원 + quadric decimation 50% (품질/성능 균형)
-"$PIPELINE_DIR/mesh.sh" "$DB_NAME" "$MESH_NAME" --force --recon-method=poisson --depth=8 --voxel=0.01
+# 실측(2026-08-12): voxel 0.01→0.02 로 pre-Poisson 전처리 5배 단축, 품질은 유지 이상.
+# --fast: Poisson depth 8→7 (복원 시간 약 2배 단축, 삼각형 수는 감소)
+MESH_ARGS="--force --recon-method=poisson --depth=8 --voxel=0.02"
+if [ "$FAST_MODE" = true ]; then
+    MESH_ARGS="--force --recon-method=poisson --depth=7 --voxel=0.02"
+    echo "⚡ [STEP 2-1] --fast 모드: Poisson depth=7 적용 (고속, 저해상도)"
+fi
+"$PIPELINE_DIR/mesh.sh" "$DB_NAME" "$MESH_NAME" $MESH_ARGS
 
 # 🛡️ BARRIER 2: Mesh File Integrity Check
 echo ""

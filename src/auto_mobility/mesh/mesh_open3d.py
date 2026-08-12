@@ -17,6 +17,12 @@ except ImportError:
 
 from auto_mobility.config import MESH_DEFAULTS
 
+# CUDA voxel downsample이 CPU 대비 실질 이득을 내는 최소 포인트 수.
+# 실측(2026-08-12, WSL2 paravirtualized GPU): GPU copy-in 오버헤드가 커서
+# 2M 포인트에서도 CPU(tensor)와 비슷(0.94s vs 0.92s), 작은 클라우드는 CPU가 더 빠름.
+# 실제 이산형 NVIDIA GPU를 사용한다면 이 임계값을 낮추거나 CPU 경로를 유지해도 무방.
+GPU_VOXEL_MIN_POINTS = 5_000_000
+
 
 def _cuda_available() -> bool:
     """CUDA 사용 가능 여부 (Open3D Tensor API)"""
@@ -27,14 +33,24 @@ def _cuda_available() -> bool:
         return False
 
 
-def _voxel_down_gpu(pcd, voxel_size):
-    """CUDA(Tensor API) 기반 voxel downsampling — 실측(2026-08-12): CPU 대비 ~170배 빠름."""
+def _voxel_down(pcd, voxel_size, use_cuda=True):
+    """Tensor API 기반 voxel downsampling.
+
+    실측(2026-08-12): legacy voxel_down_sample 대비 더 빠르고 (2.2M pts: legacy
+    1.67s vs tensor 0.92s), CUDA는 paravirtualized GPU에서 copy-in 오버헤드로
+    이득이 없어 기본 CPU 사용. 대규모 클라우드에 한해 자동 CUDA 선택.
+    """
     import open3d.core as o3c
     pts = np.asarray(pcd.points).astype(np.float32)
-    tpc = o3d.t.geometry.PointCloud(o3c.Tensor(pts, device=o3c.Device("CUDA:0")))
+    use_gpu = bool(use_cuda and _cuda_available() and len(pts) >= GPU_VOXEL_MIN_POINTS)
+    device = o3c.Device("CUDA:0") if use_gpu else o3c.Device("CPU:0")
+    if use_gpu:
+        print(f"  [GPU] voxel_down_sample (CUDA Tensor, {len(pts):,} pts)")
+    else:
+        print(f"  [CPU] voxel_down_sample (Tensor, {len(pts):,} pts)")
+    tpc = o3d.t.geometry.PointCloud(o3c.Tensor(pts, device=device))
     if pcd.has_colors():
-        tpc.point.colors = o3c.Tensor(np.asarray(pcd.colors).astype(np.float32),
-                                      device=o3c.Device("CUDA:0"))
+        tpc.point.colors = o3c.Tensor(np.asarray(pcd.colors).astype(np.float32), device=device)
     tpc = tpc.voxel_down_sample(voxel_size)
     out = o3d.geometry.PointCloud()
     out.points = o3d.utility.Vector3dVector(tpc.point.positions.cpu().numpy().astype(np.float64))
@@ -45,39 +61,54 @@ def _voxel_down_gpu(pcd, voxel_size):
 
 def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_size=MESH_DEFAULTS["voxel_size"],
                   method=MESH_DEFAULTS["method"], view_result=False, clean_density=True,
-                  simplify_target=MESH_DEFAULTS["simplify_target"], use_cuda=True):
+                  simplify_target=MESH_DEFAULTS["simplify_target"], use_cuda=True,
+                  orient="centroid"):
     t0 = time.time()
     print(f"Loading point cloud: {input_ply}")
     pcd = o3d.io.read_point_cloud(input_ply)
-    
+
     if pcd.is_empty():
         print("Error: Point cloud is empty!")
         sys.exit(1)
-        
+
     num_orig_points = len(pcd.points)
     print(f"Original point count: {num_orig_points:,}")
-    
-    print(f"Downsampling with fine resolution (voxel_size={voxel_size}m) and statistical outlier removal...")
-    if use_cuda and _cuda_available():
-        print("  [GPU] voxel_down_sample (CUDA Tensor API)")
-        pcd = _voxel_down_gpu(pcd, voxel_size)
+
+    print(f"Downsampling with fine resolution (voxel_size={voxel_size}m)...")
+    raw_points = np.asarray(pcd.points)
+    raw_normals = np.asarray(pcd.normals) if pcd.has_normals() else None
+    pcd = _voxel_down(pcd, voxel_size, use_cuda=use_cuda)
+
+    # Tensor voxel downsampling은 법선을 보존하지 않으므로,
+    # RTAB-Map이 제공한 법선이 있으면 최근접점으로 복사 (재계산보다 빠르고 SLAM 법선 유지).
+    # 없을 경우에만 다중스레드 법선 추정 수행.
+    if raw_normals is not None and len(pcd.points) > 0:
+        print("Reusing normals from input point cloud (RTAB-Map)...")
+        tree = cKDTree(raw_points)
+        _, idx = tree.query(np.asarray(pcd.points), k=1, workers=-1)
+        pcd.normals = o3d.utility.Vector3dVector(raw_normals[idx])
     else:
-        print("  [CPU] voxel_down_sample (Legacy API)")
-        pcd = pcd.voxel_down_sample(voxel_size=voxel_size)
+        print("Estimating normals using fast multi-threaded computation...")
+        pcd.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=max(voxel_size * 5.0, 0.03), max_nn=30),
+            fast_normal_computation=True
+        )
+
     cl, ind = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
     pcd = pcd.select_by_index(ind)
     print(f"Cleaned point count: {len(pcd.points):,}")
-    
-    # 640x480 depth 기반 point cloud 는 노이즈/홀이 많다.
-    # 충분한 밀도 확보를 위해 가벼운 hole filling 은 BPA 복원 시 자연 처리.
-    print("Estimating normals using fast multi-threaded computation...")
-    pcd.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=max(voxel_size * 5.0, 0.03), max_nn=30),
-        fast_normal_computation=True
-    )
-    # Z축 단일 강제 정렬 대신 Tangent Plane 기반 3D 일관성 정렬 적용 (벽/천장 mesh 뒤집힘 방지)
-    pcd.orient_normals_consistent_tangent_plane(k=15)
-    
+
+    # 법선 방향 정렬: 기본은 전역 MST(tangent plane) 대신 장면 중심(centroid) 방향 정렬.
+    # 실측(2026-08-12): 실내 캡처에서 centroid 방향이 더 빠르고(~0s vs 16-49s)
+    # 최종 mesh의 포인트클라우드 충실도도 더 우수함 (p99 오차 6.7cm vs 14.1cm).
+    # --orient=tangent 로 기존 동작 복원 가능.
+    if orient.lower() == "tangent":
+        print("Orienting normals using tangent-plane consistent orientation (global MST)...")
+        pcd.orient_normals_consistent_tangent_plane(k=15)
+    else:
+        print("Orienting normals towards scene centroid...")
+        pcd.orient_normals_towards_camera_location(pcd.get_center())
+
     if method.lower() == "bpa":
         print("Reconstructing surface using Ball Pivoting Algorithm (BPA)...")
         distances = pcd.compute_nearest_neighbor_distance()
@@ -92,18 +123,18 @@ def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_si
         mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
             pcd, depth=depth, scale=1.1, linear_fit=True, n_threads=-1
         )
-        
+
         if clean_density:
             print("Cleaning low-density Poisson reconstruction artifacts...")
             densities_arr = np.asarray(densities)
             density_threshold = np.quantile(densities_arr, 0.03)
             vertices_to_remove = densities_arr < density_threshold
             mesh.remove_vertices_by_mask(vertices_to_remove)
-    
+
     # Crop to bounding box of point cloud to prevent floating shell artifacts
     bbox = pcd.get_axis_aligned_bounding_box()
     mesh = mesh.crop(bbox)
-    
+
     # Simplify: Isaac Sim / viewer 로딩 성능을 위해 target 비율로 경량화 (기본 50%)
     if simplify_target and 0.0 < simplify_target < 1.0:
         n_before = len(mesh.triangles)
@@ -136,10 +167,10 @@ def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_si
         mesh.vertex_colors = o3d.utility.Vector3dVector(pcd_colors[indices])
 
     mesh.compute_vertex_normals()
-    
+
     # Ensure output directory exists
     os.makedirs(os.path.dirname(os.path.abspath(output_mesh)), exist_ok=True)
-    
+
     print(f"Saving generated mesh to: {output_mesh}")
     o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
     o3d.io.write_triangle_mesh(output_mesh, mesh)
@@ -150,7 +181,7 @@ def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_si
     if view_result:
         print("Opening interactive 3D Mesh Viewer (Close window to exit)...")
         o3d.visualization.draw_geometries(
-            [mesh], 
+            [mesh],
             window_name=f"3D Mesh Viewer - {os.path.basename(output_mesh)}",
             width=1280,
             height=720,
@@ -161,7 +192,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate high-quality 3D Mesh using Open3D from Point Cloud")
     parser.add_argument("input", help="Input .ply or .pcd point cloud file")
     parser.add_argument("output", help="Output mesh file (.obj or .ply)")
-    parser.add_argument("--depth", type=int, default=MESH_DEFAULTS["depth"], help=f"Poisson reconstruction depth (default: {MESH_DEFAULTS['depth']})")
+    parser.add_argument("--depth", type=int, default=MESH_DEFAULTS["depth"], help=f"Poisson reconstruction depth (default: {MESH_DEFAULTS['depth']}, 8=고품질, 7=약 2배 빠름)")
     parser.add_argument("--voxel", type=float, default=MESH_DEFAULTS["voxel_size"], help=f"Voxel size for downsampling (default: {MESH_DEFAULTS['voxel_size']})")
     parser.add_argument("--method", choices=["poisson", "bpa"], default=MESH_DEFAULTS["method"], help="Reconstruction method: poisson or bpa (default: poisson)")
     parser.add_argument("--view", action="store_true", help="Visualize generated mesh in interactive 3D window")
@@ -169,27 +200,27 @@ def main():
     parser.add_argument("--no-simplify", action="store_true", help="Disable mesh simplification")
     parser.add_argument("--simplify", type=float, default=MESH_DEFAULTS["simplify_target"], help="Triangle simplification target ratio (default: 0.5)")
     parser.add_argument("--no-gpu", action="store_true", help="Disable CUDA voxel downsampling (use CPU)")
+    parser.add_argument("--orient", choices=["centroid", "tangent"], default="centroid",
+                        help="Normal orientation method: centroid(빠름, 기본) or tangent(전역 MST, 느림)")
 
-    
     args = parser.parse_args()
-    
+
     if not os.path.exists(args.input):
         print(f"Error: Input file does not exist: {args.input}")
         sys.exit(1)
-        
+
     generate_mesh(
-        args.input, 
-        args.output, 
-        depth=args.depth, 
+        args.input,
+        args.output,
+        depth=args.depth,
         voxel_size=args.voxel,
         method=args.method,
-        view_result=args.view, 
+        view_result=args.view,
         clean_density=not args.no_clean,
         simplify_target=0.0 if args.no_simplify else args.simplify,
-        use_cuda=not args.no_gpu
+        use_cuda=not args.no_gpu,
+        orient=args.orient
     )
 
 if __name__ == "__main__":
     main()
-
-

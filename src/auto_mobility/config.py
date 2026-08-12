@@ -184,7 +184,9 @@ if __name__ == "__main__":
 # mesh_open3d.py 함수 시그니처 / CLI argparse / run_pipeline_all.sh 가 공용으로 사용.
 MESH_DEFAULTS = {
     "depth": 8,             # Poisson octree 깊이
-    "voxel_size": 0.01,     # 다운샘플링 voxel 크기 (10mm) — D435 depth 정밀도(1~2cm) 이내라 정보 손실 없음
+    "voxel_size": 0.02,     # 다운샘플링 voxel 크기 (20mm) — 실측(2026-08-12):
+                            # Poisson depth=8 octree 해상도(~2.8cm, 방 7m 기준) 이하라
+                            # 10mm 입력이 품질 향상 없이 전처리만 5배 느리게 함.
     "method": "poisson",    # poisson | bpa
     "simplify_target": 0.5, # Quadric Decimation 50% 경량화
 }

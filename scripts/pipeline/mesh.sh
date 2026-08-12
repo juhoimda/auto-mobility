@@ -50,7 +50,7 @@ done
 
 if [ ${#POSITIONAL_ARGS[@]} -lt 1 ]; then
     echo "=========================================================="
-    echo " 사용법: $0 DB_NAME [OUTPUT_MESH_NAME] [--view] [--force] [--method open3d|rtabmap] [--depth=8] [--voxel=0.01] [--recon-method=poisson|bpa]"
+    echo " 사용법: $0 DB_NAME [OUTPUT_MESH_NAME] [--view] [--force] [--method open3d|rtabmap] [--depth=8] [--voxel=0.02] [--recon-method=poisson|bpa]"
     echo " 예시  : $0 my_room_db.db my_room_mesh.obj --view --depth=9"
     echo "=========================================================="
     exit 1
