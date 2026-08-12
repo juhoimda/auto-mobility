@@ -126,13 +126,13 @@ else
         exit 1
     fi
 
-    # 촬영 품질 모니터링 가드를 백그라운드로 기동 (Ctrl+C 로 종료 시 보고서 저장)
-    CAPTURE_GUARD_LOG="$LOG_DIR/capture_guard_${DB_NAME%.db}.log"
-    echo "📊 capture_guard 모니터링 시작 → $CAPTURE_GUARD_LOG"
+    # 촬영 품질 모니터링 가드를 백그라운드로 기동 (종료 시 .md 보고서 + .json 요약 저장)
+    CAPTURE_GUARD_BASE="$LOG_DIR/capture_guard_${DB_NAME%.db}"
+    echo "📊 capture_guard 모니터링 시작 → ${CAPTURE_GUARD_BASE}.md / .json"
     python3 "$PROJECT_DIR/src/auto_mobility/monitor/capture_guard.py" \
         --interval 5 --headless \
-        --report "$LOG_DIR/capture_guard_${DB_NAME%.db}.md" \
-        > "$CAPTURE_GUARD_LOG" 2>&1 &
+        --report "${CAPTURE_GUARD_BASE}.md" \
+        --json "${CAPTURE_GUARD_BASE}.json" &
     GUARD_PID=$!
     trap "kill $GUARD_PID 2>/dev/null || true" EXIT INT TERM
 
@@ -144,9 +144,9 @@ else
     wait $GUARD_PID 2>/dev/null || true
     trap - EXIT INT TERM
     echo ""
-    echo "📄 촬영 품질 보고서: $LOG_DIR/capture_guard_${DB_NAME%.db}.md"
-    if [ -f "$LOG_DIR/capture_guard_${DB_NAME%.db}.md" ]; then
-        grep -E "시작 Odom|종료 Odom|시간 경과 저하" "$LOG_DIR/capture_guard_${DB_NAME%.db}.md"
+    echo "📄 촬영 품질 보고서: ${CAPTURE_GUARD_BASE}.md"
+    if [ -f "${CAPTURE_GUARD_BASE}.md" ]; then
+        grep -E "시작|종료|Odom 시계열|평균 CPU" "${CAPTURE_GUARD_BASE}.md" | head -5
     fi
 fi
 
@@ -220,5 +220,20 @@ echo "   Windows 공유 폴더 (ubuntu_shared) 안의"
 echo "   '${MESH_NAME}' 파일을 Isaac Sim에서 Import하면 됩니다."
 echo "=========================================================="
 
-# 📝 중요 로그 수집 종료 (요약 저장)
+# 📝 중요 로그 수집 종료 (요약 저장) — 종료 전 로그 파일 경로 보존
+PLOG_FILE="$PIPELINE_LOG_FILE"
 pipeline_log_stop || true
+
+# 📊 세션 통합 분석 요약 생성 (구조화 JSON, 파일 비대화 없이 핵심 지표만)
+SUMMARY_JSON="$LOG_DIR/session_${DB_NAME%.db}.summary.json"
+if [ -n "$PLOG_FILE" ] && [ -f "$PLOG_FILE" ]; then
+    echo ""
+    echo "📊 세션 분석 요약 생성 → $SUMMARY_JSON"
+    python3 "$PROJECT_DIR/src/auto_mobility/monitor/analyze_session.py" \
+        --db "$TARGET_DB_PATH" \
+        --log "$PLOG_FILE" \
+        --guard-json "$LOG_DIR/capture_guard_${DB_NAME%.db}.json" \
+        --out "$SUMMARY_JSON" || true
+else
+    echo "⏩ 세션 분석 요약 생략 (파이프라인 로그 없음)"
+fi

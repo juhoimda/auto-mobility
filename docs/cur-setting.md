@@ -111,15 +111,21 @@
 
 ---
 
-## 🛡️ 5. 촬영 품질 모니터링 (`src/auto_mobility/monitor/capture_guard.py`) — 신규
+## 🛡️ 5. 촬영 품질 모니터링 & 세션 분석 (2026-08-12 v2 개편)
 
-`run_pipeline_all.sh` 촬영 중 **병렬 실행**되어 FPS/CPU/RAM/USB를 실시간 감시하고,
-종료 시 Markdown 보고서(`ros2_data/logs/capture_guard_*.md`)를 생성한다.
+`run_pipeline_all.sh` 촬영 중 **병렬 실행**되어 센서 토픽 FPS / 프로세스별 CPU / RAM / USB를 감시하고,
+종료 시 **3종의 컴팩트 로그**를 남긴다 (원시 로그 비대화 없이 분석 데이터 보존).
+
+| 로그 파일 | 내용 |
+| :--- | :--- |
+| `logs/capture_guard_<ts>.md` | 5개 토픽(RGB/Depth/Info/IMU/Odom) FPS 시계열(다운샘플 20행) + 프로세스별 CPU + 저하 이벤트 |
+| `logs/capture_guard_<ts>.json` | **전체 샘플 시계열** (토픽 Hz + 프로세스별 CPU + RAM) — 구조화, 수 KB |
+| `logs/pipeline_<ts>_<ts>.log` | 노드 WARN/ERROR/METRIC 필터 로그 (중복 압축, **--max-lines 50000 상한**) |
+| `logs/session_<ts>.summary.json` | **세션 통합 요약** — VO 품질(quality=0·최장 끊김·delay·update time)·매핑(등록 실패·루프클로저·맵 노드)·TSDF(추출/적분/스킵)·단계별 소요·환경/버전/config 해시 |
 
 - **감시 토픽**: color(≥15Hz), depth(≥15Hz), camera_info(≥15Hz), IMU(≥100Hz), odom(≥5Hz)
-- **핵심 지표**: 시작/종료 odom Hz 비교로 시간 경과 저하 감지
-- **실측 발견(재검증 후)**: 설정 정합 시 VO delay는 ~70ms로 고정(누적 없음), odom 17~26Hz 유지
-  (기존 설정 대비 12Hz→개선). 잔여 저하는 호스트(VMware/thermal) 요인이 주원인
+- **v2 효율 개선**: 5개 토픽 **병렬 측정**(측정 주기 15s→3s), 프로세스별 CPU 시계열, headless 0바이트 .log 제거
+- **분석 도구**: `src/auto_mobility/monitor/analyze_session.py` (파이프라인 로그+DB 파싱 → summary JSON)
 
 ---
 

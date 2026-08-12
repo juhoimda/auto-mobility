@@ -66,16 +66,22 @@ def main():
     ap.add_argument("logfile", help="저장할 로그 파일 경로")
     ap.add_argument("--context", type=int, default=3,
                     help="중요 라인 직전에 함께 저장할 맥락 라인 수 (기본 3)")
+    ap.add_argument("--max-lines", type=int, default=50000,
+                    help="최대 저장 라인 수 (기본 50000). 초과분은 저장하지 않고 건수만 집계 — 파일 비대화 방지")
     args = ap.parse_args()
 
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     logfile = args.logfile
     context_n = max(0, args.context)
+    max_lines = max(1000, args.max_lines)
     os.makedirs(os.path.dirname(logfile) or ".", exist_ok=True)
 
     now = datetime.now()
     counts = {"error": 0, "warn": 0, "metric": 0, "context": 0, "info": 0}
+    stored = 0
+    skipped = 0
+    truncated_note_written = False
 
     # 중복 압축: 마지막으로 저장한 라인과 반복 횟수
     prev_plain = None
@@ -85,13 +91,20 @@ def main():
     pending = deque(maxlen=context_n)
 
     def flush_prev(f):
-        nonlocal prev_plain, prev_count
+        nonlocal prev_plain, prev_count, stored, skipped, truncated_note_written
         if prev_plain is None:
+            return
+        if stored >= max_lines:
+            # 용량 상한 도달 → 세부 라인 저장 중단, 건수만 집계
+            skipped += prev_count
+            prev_plain = None
+            prev_count = 0
             return
         ts = datetime.now().strftime("%H:%M:%S")
         suffix = f"  (x{prev_count})" if prev_count > 1 else ""
         f.write(f"[{ts}] [{prev_class.upper():<7}] {prev_plain}{suffix}\n")
         counts[prev_class] += 1
+        stored += 1
         prev_plain = None
         prev_count = 0
 
@@ -125,11 +138,13 @@ def main():
                 continue
 
             # 중요 라인 발견 → 맥락 라인 먼저 저장
-            for ctx in pending:
-                if ctx and not SEPARATOR_RE.match(ctx):
-                    ts = datetime.now().strftime("%H:%M:%S")
-                    f.write(f"[{ts}] [CONTEXT ] {ctx}\n")
-                    counts["context"] += 1
+            if stored < max_lines:
+                for ctx in pending:
+                    if ctx and not SEPARATOR_RE.match(ctx):
+                        ts = datetime.now().strftime("%H:%M:%S")
+                        f.write(f"[{ts}] [CONTEXT ] {ctx}\n")
+                        counts["context"] += 1
+                        stored += 1
             pending.clear()
 
             # 중요 라인 저장 (압축 단위로 flush_prev 로 처리)
@@ -139,13 +154,16 @@ def main():
 
         flush_prev(f)
 
-        # 요약 저장
+        # 요약 저장 (상한 도달 시 잘린 건수 명시)
         total_kept = counts["error"] + counts["warn"] + counts["metric"] + counts["context"]
         f.write("# " + "=" * 60 + "\n")
         f.write(f"# 종료: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"# 요약: ERROR {counts['error']} / WARN {counts['warn']} / "
                 f"METRIC {counts['metric']} / CONTEXT {counts['context']} "
-                f"(저장 라인 {total_kept}줄)\n")
+                f"(저장 라인 {total_kept}줄")
+        if skipped > 0:
+            f.write(f", 상한 {max_lines} 도달로 {skipped}건 미저장")
+        f.write(")\n")
 
     print(f"\n📝 [로그 수집] 분석용 중요 로그 저장: {logfile}")
     print(f"   ERROR {counts['error']} / WARN {counts['warn']} / "

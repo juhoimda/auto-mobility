@@ -155,8 +155,9 @@ pipeline_log_start() {
     exec 3>&1 4>&2
 
     # 수집기: FIFO → 필터링 → 로그 파일 (+ 콘솔 그대로 전달)
+    # --max-lines: 파일 비대화 방지용 상한 (초과분은 건수만 집계)
     python3 "$PROJECT_DIR/scripts/utils/pipeline_log_collector.py" \
-        "$PIPELINE_LOG_FILE" < "$PIPELINE_LOG_FIFO" >&3 &
+        "$PIPELINE_LOG_FILE" --max-lines 50000 < "$PIPELINE_LOG_FIFO" >&3 &
     PIPELINE_COLLECTOR_PID=$!
 
     # stdout/stderr 전체를 FIFO 로 리다이렉트
