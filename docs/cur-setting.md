@@ -91,6 +91,10 @@
 
 ## 📐 4. Open3D 3D Mesh 복원 최적화 (`src/auto_mobility/mesh/mesh_open3d.py` + `scripts/utils/export_ply.sh`)
 
+> **★ 2026-08-12 파이프라인 기본 변경**: `run_pipeline_all.sh` 는 **TSDF가 기본** (`--recon=poisson`/`--fast`/PLY 경로 제거).
+> Poisson(PLY) 기반 복원은 `scripts/pipeline/mesh.sh --method=open3d` 로만 가능.
+> TSDF 설정 단일 소스: `src/auto_mobility/mesh/reconstruct_tsdf.py` (voxel 1cm, **weight-thr 1.5**).
+
 | 설정 항목 | 설정값 | 핵심 기능 (품질 & 최적화) |
 | :--- | :--- | :--- |
 | **`--decimation`** (export) | `1` | **★ 2026-08-11 — 기본 4는 PLY 밀도 1/16로 mesh 품질 저하의 근본 원인이었음. 오프라인 처리라 캡처 성능 영향 없음** |
