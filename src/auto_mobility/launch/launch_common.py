@@ -1,13 +1,11 @@
 # RTAB-Map 파라미터 단일 소스 (rtab_live / rtab_bag launch 공용)
 # 튜닝 시 이 파일만 수정하면 live/bag 양쪽에 동일하게 적용된다.
 #
-# [하드웨어 / 환경]
-# - VMware 가상머신, vCPU 8 (Intel Core Ultra 7 265H 호스트)
-# - RAM 31GB, /dev/shm 16GB
-# - RealSense D435i @ USB 3.0 (5000 Mbps)
-# - 카메라: 640x480@30 (848x480은 depth 19.4Hz 드랍 → VM USB 대역폭 초과)
-# - 촬영 중 RViz ON (point cloud 실시간 검증용) → odom 실측 11Hz
-# - 벤치마크 29.9Hz는 rviz=false + 필터 없음 + 5초 창 조건 (실환경과 상이)
+# [하드웨어 / 환경] (2026-08-12 WSL2 기준 갱신)
+# - WSL2, Intel Core Ultra 7 265H / 32GB RAM / /dev/shm 16GB
+# - RealSense D435i @ USB 3.2 패스스루 (usbipd 5.3.0)
+# - 카메라: 640x480@30 (WSL2 USB 패스스루에서 848x480 이상은 프레임 손상 → 640x480 고정)
+# - 촬영 중 RViz ON (cloud_map_lite 2Hz 중계) → odom 실측 7~11Hz
 #
 # ⚠️ RTAB-Map 0.23.7 기준 유효 키만 사용 (2026-08-11 검증 완료).
 
@@ -102,7 +100,7 @@ def get_rtabmap_base_args() -> dict:
         'approx_sync_max_interval': '0.15',
         'visual_odometry': 'true',
         'rviz': 'true',
-        'rviz_cfg': os.path.join(get_package_share_directory('auto_mobility'), 'config', 'rviz', 'rtabmap_vmware.rviz'),
+        'rviz_cfg': os.path.join(get_package_share_directory('auto_mobility'), 'config', 'rviz', 'rtabmap_live.rviz'),
         'rtabmap_viz': 'false',
     }
 

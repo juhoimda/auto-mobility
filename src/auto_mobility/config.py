@@ -90,7 +90,8 @@ MESH_DIR       = DATA_DIR / "meshes"
 ISAAC_DIR      = DATA_DIR / "isaac_sim"
 LOG_DIR        = DATA_DIR / "logs"
 FASTDDS_XML    = CONFIG_DIR / "dds" / "fastdds_camera.xml"
-SHARED_DIR     = Path("/mnt/hgfs/ubuntu_shared")
+# Windows 공유 폴더 (WSL2: /mnt/c). VMware(=/mnt/hgfs)에서 이관됨 (2026-08-12).
+SHARED_DIR     = Path("/mnt/c/ubuntu_shared")
 
 # RealSense USB 링크 속도 기준 (Mbps). 5000 이상 = USB 3.x
 USB_3_MIN_SPEED_MBPS = 5000
@@ -106,7 +107,7 @@ CAMERA_PARAMS = {
     "depth_module.depth_profile": CAMERA_PROFILE,
     "rgb_camera.color_profile": CAMERA_PROFILE,
     "rgb_camera.color_format": "RGB8",
-    "align_depth.enable": False,        # vCPU 정렬 병목 제거 (RTAB-Map 자체 정렬 사용)
+    "align_depth.enable": False,        # CPU 정렬 병목 제거 (RTAB-Map 자체 정렬 사용)
     "enable_infra1": False,
     "enable_infra2": False,
     "depth_module.emitter_enabled": 1,  # IR Laser Projector
@@ -114,21 +115,69 @@ CAMERA_PARAMS = {
     "enable_gyro": True,
     "enable_sync": True,
     "unite_imu_method": 1,              # 1: copy mode
-    "enable_metadata": False,
     "global_time_enabled": False,
     "initial_reset": False,
-    "rgb_camera.auto_exposure_priority": False,
-    "color_qos": "SENSOR_DATA",
-    "color_info_qos": "SENSOR_DATA",
-    "depth_qos": "SENSOR_DATA",
-    "depth_info_qos": "SENSOR_DATA",
-    "filters": "spatial,temporal,hole_filling",
-    "spatial_filter.spatial_alpha": 0.5,
-    "spatial_filter.spatial_delta": 20,
-    "temporal_filter.temporal_alpha": 0.4,
-    "temporal_filter.temporal_delta": 20,
+    # NOTE(2026-08-12 WSL2 실측): color_qos/depth_qos 등 QoS 파라미터는
+    # realsense2_camera 4.58.3에서 스트림 FPS를 30→~10fps로 급락시킴 (실측 확인).
+    # 따라서 제거하고 기본 RELIABLE QoS를 사용한다. (RTAB-Map은 BE로 구독하므로 무해)
+    # NOTE: 'filters' 콤마 문자열 키는 이 버전에서 무시됨("Parameter not set").
+    #       필터 옵션 키도 'spatial_filter.spatial_alpha'가 아니라
+    #       'spatial_filter.filter_smooth_alpha'가 유효함 (실측 param list 확인).
+    "spatial_filter.enable": True,
+    "temporal_filter.enable": True,
+    "hole_filling_filter.enable": True,
+    "spatial_filter.filter_smooth_alpha": 0.5,
+    "spatial_filter.filter_smooth_delta": 20,
+    "temporal_filter.filter_smooth_alpha": 0.4,
+    "temporal_filter.filter_smooth_delta": 20,
     "hole_filling_filter.holes_fill": 1,
 }
+
+
+# ──────────────────────── 카메라 파라미터 유효성 검증 ────────────────────────
+# realsense2_camera 4.58.3 실측(param list + launch 경고)으로 확인된 문제 키.
+# 잘못된 키는 노드가 조용히 무시하므로, 설정 실수 방지를 위해 여기서 사전 차단한다.
+
+# 1) QoS 키: v4.58.3에서 스트림 FPS 급락(30→~10fps)을 유발 (2026-08-12 실측). 사용 금지.
+FORBIDDEN_CAMERA_PARAMS = {
+    "color_qos": "FPS 급락 유발(실측). 기본 RELIABLE 사용",
+    "color_info_qos": "FPS 급락 유발(실측). 기본 RELIABLE 사용",
+    "depth_qos": "FPS 급락 유발(실측). 기본 RELIABLE 사용",
+    "depth_info_qos": "FPS 급락 유발(실측). 기본 RELIABLE 사용",
+}
+
+# 2) 무효 키: 노드가 선언하지 않아 "Parameter not set"로 조용히 무시되는 키들 (실측).
+INVALID_CAMERA_PARAMS = {
+    "filters": "'spatial_filter.enable' 등 개별 키로 대체",
+    "rgb_camera.auto_exposure_priority": "'rgb_camera.enable_auto_exposure'만 존재",
+    "spatial_filter.spatial_alpha": "'spatial_filter.filter_smooth_alpha'가 유효",
+    "spatial_filter.spatial_delta": "'spatial_filter.filter_smooth_delta'가 유효",
+    "temporal_filter.temporal_alpha": "'temporal_filter.filter_smooth_alpha'가 유효",
+    "temporal_filter.temporal_delta": "'temporal_filter.filter_smooth_delta'가 유효",
+    "enable_metadata": "선언되지 않은 키",
+}
+
+
+def validate_camera_params(params: dict) -> list:
+    """CAMERA_PARAMS 를 검증해 문제 목록을 반환한다. (문제 없으면 빈 리스트)"""
+    issues = []
+    for key, reason in FORBIDDEN_CAMERA_PARAMS.items():
+        if key in params:
+            issues.append(f"[FORBIDDEN] {key}: {reason}")
+    for key, reason in INVALID_CAMERA_PARAMS.items():
+        if key in params:
+            issues.append(f"[INVALID] {key}: {reason}")
+    return issues
+
+
+if __name__ == "__main__":
+    issues = validate_camera_params(CAMERA_PARAMS)
+    if issues:
+        print("카메라 파라미터 문제 발견:")
+        for i in issues:
+            print("  -", i)
+        raise SystemExit(1)
+    print("카메라 파라미터 검증 통과 (문제 없음)")
 
 
 # ──────────────────────── Mesh 기본값 단일 소스 ────────────────────────

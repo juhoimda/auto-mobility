@@ -82,7 +82,7 @@ auto-mobility/
 ## ✨ 특징
 
 1. **IMU 융합 Visual SLAM** — D435i IMU(200Hz)를 Madgwick 필터로 처리해 맵 수평 유지 및 추적 안정화
-2. **VMware 최적화** — FastDDS SHM + vCPU 8 활용, 640x480에서 안정적인 30FPS 확보
+2. **WSL2 최적화** — FastDDS SHM + CUDA(Open3D) 활용, 640x480에서 안정적인 30FPS 확보
 3. **자동 품질 검증** — DB → Point Cloud → Mesh 3단계 무결성 검사 + 촬영 품질 모니터링(`capture_guard`)
 
 ---

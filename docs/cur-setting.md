@@ -1,7 +1,7 @@
 # ⚙️ Auto-Mobility 품질 & 최적화 설정 명세 (`docs/cur-setting.md`)
 
-> **최종 갱신: 2026-08-11 (파라미터 유효성 검증 + 재벤치마크 반영)** — RTAB-Map 0.23.7 기준
-> 무효 파라미터 9종을 유효 키로 교정하고, `OdomF2M/MaxSize=1000` 축을 신규 측정하여 확정
+> **최종 갱신: 2026-08-12 (WSL2 이관 + 카메라 QoS 회귀 해결 + IMU 활성화)** — 상세 근거는 [docs/final_report.md](final_report.md)
+> 2026-08-11: RTAB-Map 0.23.7 무효 파라미터 9종 유효 키 교정, `OdomF2M/MaxSize=1000` 확정
 
 > **설정 단일 소스(Single Source of Truth) 안내 (리팩토링 적용)**
 > 아래 표의 값을 수정할 때는 각 파일을 직접 고치는 대신 다음 중앙 설정에서만 변경하세요:
@@ -20,16 +20,19 @@
 | **`enable_sync`** | `True` | RGB-Depth 하드웨어 프레임 동기화. **⚠ sync=False 시 depth 4Hz 폭락** (실측) |
 | **`unite_imu_method`** | `1` | Gyro-Accel copy 통합 (CPU 절감, 벤치마크 검증) |
 | **`depth_module.emitter_enabled`** | `1` | IR Laser Projector 활성화로 무늬 없는 벽면의 3D 특징점 강제 생성 |
-| **`rgb_camera.color_profile`** | `640x480x30` | **★ 벤치마크 확정** — 848x480은 depth 19.4Hz로 드랍 (VM USB 대역폭 초과) |
-| **`depth_module.depth_profile`** | `640x480x30` | **★ 벤치마크 확정** — depth 29.1Hz 안정 유지 (실측) |
-| **`align_depth.enable`** | `False` | vCPU 픽셀 정렬 병목 제거 (RTAB-Map이 자체 정렬, 벤치마크 확정값) |
-| **`auto_exposure_priority`** | `False` | 저조도 스캔 시 카메라 프레임레이트(FPS) 폭락 방지 |
+| **`rgb_camera.color_profile`** | `640x480x30` | **★ 확정** — 848x480 이상은 USB 패스스루에서 프레임 손상 (WSL2 실측) |
+| **`depth_module.depth_profile`** | `640x480x30` | **★ 확정** — 29.7fps 안정 (WSL2 실측) |
+| **`align_depth.enable`** | `False` | CPU 픽셀 정렬 병목 제거 (RTAB-Map이 자체 정렬, 벤치마크 확정값) |
+| **QoS 키 (`color_qos` 등)** | **미사용** | ★ **v4.58.3 FPS 급락 원인(30→~10fps) 실측 → 제거. 기본 RELIABLE 사용** |
+| **필터** | `spatial/temporal/hole_filling` (개별 enable 키) | ★ v4.58.3에서 `filters` 문자열 키는 무효. `spatial_filter.enable` 등으로 설정 |
+| **IMU** | gyro+accel, ~200Hz | ★ WSL2 커널(HID_SENSOR_HUB) + udev 규칙으로 활성화 (191Hz 실측) |
 
-### 📊 해상도 벤치마크 결과 (2026-08-10 실측)
+### 📊 해상도 벤치마크 결과 (WSL2 2026-08-12 실측, rosbag 기준)
 | 해상도 | color Hz | depth Hz | 드랍 여부 | 비고 |
 | :--- | :---: | :---: | :---: | :--- |
-| **640x480@30** | 30.1 | **29.1** | 없음 ✅ | **최종 확정** |
-| 848x480@30 | 30.0 | **19.4** | **35% 드랍** ❌ | RGB8+Z16 = 61MB/s > VM USB 한계(~50MB/s) |
+| **640x480@30** | 30.0 | **29.7** | 없음 ✅ | **최종 확정** (필터 ON + IMU ON) |
+| 848x480@30 단독 | ~30 | ~30 | **0.35% 손상** ❌ | "Incomplete video frame" 발생 → 미채택 |
+| 848x480 + 1280x720 color | 29.2 | 27.3 | 손상 1건/15s | USB 패스스루 한계 |
 
 ---
 
@@ -91,6 +94,7 @@
 | **복원 방법** | `poisson` (기본) | **★ BPA→Poisson 전환** — BPA는 구멍 다수 (표면 17.5m²), Poisson은 폐곡면 보완 (115.9m², 실측) |
 | **`--depth`** | `8` | Poisson octree 깊이 (depth=9는 vertex 폭증으로 비효율) |
 | **`--voxel`** | `0.01` | 다운샘플링 voxel 크기 (10mm). D435 depth 정밀도(1~2cm) 이내 해상도로 정보 손실 없는 성능 최적화 |
+| **voxel_down 연산** | **GPU(CUDA Tensor)** | ★ 2026-08-12 실측: CPU 2183ms → GPU 12.7ms (2.2M 포인트, ~172배). mesh_open3d.py 자동 감지 |
 | **`--simplify`** | `0.5` | Quadric Decimation 50% 경량화 (Isaac Sim/뷰어 로딩 성능 확보) |
 | **Normal Alignment** | `orient_normals_consistent_tangent_plane(k=15)` | Tangent Plane 기반 3D 일관 법선 정렬로 벽면/천장/측면 메쉬 표면 뒤집힘 방지 |
 | **Color Transfer** | `cKDTree k=1` | 최근접 이웃 색상 복사. voxel 다운샘플링이 이미 색상 평균화 → k=3 IDW 보간 중복 제거 |
@@ -111,13 +115,14 @@
 
 ---
 
-## 🖥️ 6. RViz 촬영 뷰어 최적화 (`config/rviz/rtabmap_vmware.rviz` + `cloud_throttle.py`)
+## 🖥️ 6. RViz 촬영 뷰어 최적화 (`config/rviz/rtabmap_live.rviz` + `cloud_throttle.py`)
 
-VMware 소프트웨어 렌더링에서 RViz가 vCPU를 경쟁하며 VO를 방해하지 않도록 최적화:
+소프트웨어 렌더링(WSLg D3D12 검은 화면 방지)에서 RViz가 CPU를 경쟁하며 VO를 방해하지 않도록 최적화:
 
 | 항목 | 변경 | 효과 |
 | :--- | :--- | :--- |
-| **`/rtabmap/cloud_map_lite`** | `cloud_throttle.py`가 `/rtabmap/cloud_map`(5Hz)을 **2Hz**로 중계 | PointCloud 소프트웨어 렌더링 부하 ~60% 절감. SLAM 내부 처리 영향 없음 |
+| **`/rtabmap/cloud_map_lite`** | `cloud_throttle.py`가 `/rtabmap/cloud_map`을 **2Hz**로 중계 | PointCloud 소프트웨어 렌더링 부하 ~60% 절감. SLAM 내부 처리 영향 없음 |
+| **Image QoS** | **`Reliable`로 변경** | ★ 2026-08-12: 카메라 RELIABLE 발행 ↔ RViz BE 구독 불일치로 이미지 유실 → Reliable로 수정 |
 | **죽은 디스플레이 제거** | `/voxel_cloud`(존재하지 않는 토픽) PointCloud2 삭제 | 무의미한 렌더링 제거 |
 | **Path (Trajectory)** 추가 | `/rtabmap/odom` 기반 이동 궤적 표시 (경량) | 촬영 진행 확인용 저비용 시각화 |
 | **TF 표시 축소** | `camera_link`/`odom`/`map` 외 비활성 | TF 오버레이 부하 감소 |

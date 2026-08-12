@@ -2,7 +2,7 @@
 """
 cloud_throttle.py - RTAB-Map cloud_map 저주파 중계 노드
 
-VMware 소프트웨어 렌더링 RViz의 PointCloud2 렌더링 부하를 줄이기 위해
+RViz PointCloud2 렌더링 부하를 줄이기 위해
 /rtabmap/cloud_map 을 최대 max_rate(기본 2Hz)로 /rtabmap/cloud_map_lite 에 중계한다.
 - SLAM 내부 처리(rtabmap 노드)에는 영향이 없다.
 - 최신 프레임만 보관 후 타이머로 발행하므로 렌더링이 늦어도 지연이 누적되지 않는다.

@@ -188,8 +188,8 @@ else
     "$PIPELINE_DIR/isaac.sh" "$TARGET_MESH_PATH"
 fi
 
-# 📂 VMware 공유 폴더(/mnt/hgfs/ubuntu_shared)로 Mesh 자동 복사
-SHARED_TARGET="/mnt/hgfs/ubuntu_shared"
+# 📂 Windows 공유 폴더(/mnt/c/ubuntu_shared)로 Mesh 자동 복사 (WSL2)
+SHARED_TARGET="/mnt/c/ubuntu_shared"
 COPIED_TO_SHARED=false
 
 if [ -d "$SHARED_TARGET" ] || mkdir -p "$SHARED_TARGET" 2>/dev/null; then

@@ -1,4 +1,9 @@
-# 📊 2026-08-11 실측 벤치마크 최종 보고서 (D435i + RTAB-Map + Open3D)
+# 📊 실측 벤치마크 보고서 (D435i + RTAB-Map + Open3D)
+
+> **2026-08-12 WSL2 갱신**: 본 문서 하단 데이터는 **기존 VMware 환경** 기준입니다.
+> **WSL2 이관 후 최신 실측 결과와 최종 구성은 [docs/final_report.md](final_report.md) 를 참조**하세요.
+> 주요 변화: 카메라 QoS 파라미터 FPS 회귀 발견·해결, IMU 활성화(커널 재빌드),
+> Open3D voxel_down GPU 가속(172배), USB 패스스루 한계(640x480 고정).
 
 본 보고서는 **현재 HW 환경(VMware Ubuntu 22.04, USB 3.x, 8vCPU, 31GB)**에서
 카메라/RTAB-Map/Open3D Mesh 파이프라인의 최적 설정을 **직접 실측**한 결과입니다.

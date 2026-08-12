@@ -14,7 +14,7 @@ POINTCLOUD_DIR="$DATA_DIR/pointclouds"
 MESH_DIR="$DATA_DIR/meshes"
 ISAAC_DIR="$DATA_DIR/isaac_sim"
 LOG_DIR="$DATA_DIR/logs"
-SHARED_DIR="/mnt/hgfs/ubuntu_shared"
+SHARED_DIR="/mnt/c/ubuntu_shared"
 
 RAM_BAG_DIR="/dev/shm/ros2_bags"
 STORAGE_FORMAT="mcap"
@@ -119,7 +119,12 @@ if [ -z "$DISPLAY" ]; then
     export DISPLAY=:0
 fi
 export QT_X11_NO_MITSHM=1
-export LIBGL_ALWAYS_SOFTWARE=0
+# WSLg RViz2 검은 화면 방지 (2026-08-12 실측):
+#  - glxinfo는 D3D12(Intel Arc)로 GPU 가속 동작
+#  - 그러나 RViz2(OGRE/GLX)는 D3D12 경로에서 창이 검게 채워지고 무반응(사용자 실측)
+#  - 따라서 RViz2만 Mesa 소프트웨어 렌더링(llvmpipe)으로 실행한다.
+#  - CUDA(Open3D 등) / CPU 파이프라인 성능에는 영향 없음 (GL 미사용).
+export LIBGL_ALWAYS_SOFTWARE=1
 
 # ---------------------------------------------------------
 # 파이프라인 중요 로그 자동 수집 (2026-08-10 추가, 분석용)
