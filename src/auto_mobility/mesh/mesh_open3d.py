@@ -75,24 +75,16 @@ def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_si
     print(f"Original point count: {num_orig_points:,}")
 
     print(f"Downsampling with fine resolution (voxel_size={voxel_size}m)...")
-    raw_points = np.asarray(pcd.points)
-    raw_normals = np.asarray(pcd.normals) if pcd.has_normals() else None
     pcd = _voxel_down(pcd, voxel_size, use_cuda=use_cuda)
 
-    # Tensor voxel downsampling은 법선을 보존하지 않으므로,
-    # RTAB-Map이 제공한 법선이 있으면 최근접점으로 복사 (재계산보다 빠르고 SLAM 법선 유지).
-    # 없을 경우에만 다중스레드 법선 추정 수행.
-    if raw_normals is not None and len(pcd.points) > 0:
-        print("Reusing normals from input point cloud (RTAB-Map)...")
-        tree = cKDTree(raw_points)
-        _, idx = tree.query(np.asarray(pcd.points), k=1, workers=-1)
-        pcd.normals = o3d.utility.Vector3dVector(raw_normals[idx])
-    else:
-        print("Estimating normals using fast multi-threaded computation...")
-        pcd.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=max(voxel_size * 5.0, 0.03), max_nn=30),
-            fast_normal_computation=True
-        )
+    # 실측(2026-08-12): Tensor voxel이 법선을 버리므로 다운샘플된 클라우드에
+    # estimate_normals 를 재수행. 원본 전체 클라우드 cKDTree로 법선을 복사하는
+    # 방식(2.7s/1.25M)보다 다운샘플 클라우드 재추정(0.36s/441k)이 훨씬 빠르다.
+    print("Estimating normals using fast multi-threaded computation...")
+    pcd.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=max(voxel_size * 5.0, 0.03), max_nn=30),
+        fast_normal_computation=True
+    )
 
     cl, ind = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
     pcd = pcd.select_by_index(ind)
