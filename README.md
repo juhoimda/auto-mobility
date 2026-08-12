@@ -64,10 +64,13 @@ auto-mobility/
 | 설정 | 값 | 비고 |
 | :--- | :--- | :--- |
 | 포즈 추정 | `Vis/EstimationType 1` (PnP) | 벤치마크 1위 |
-| 특징점 | `Vis/MaxFeatures 1000` | CPU/성능 균형 |
+| 특징점 | `Vis/MaxFeatures 2000` | ★ 2026-08-12: 회전 시 키프레임 중첩 확보 |
+| 특징점 품질 | `GFTT/QualityLevel 0.005` | ★ 2026-08-12: blur/회전 프레임 특징점 0개 방지 |
 | 로컬 맵 크기 | `OdomF2M/MaxSize 1000` | **★ 벤치 1위** — 기본 2000은 odom 17Hz 급락 |
 | 키프레임 간격 | `RGBD/LinearUpdate 0.10` | 10cm 마다 |
-| Point Cloud 밀도 | `Grid/DepthDecimation 2` | 기본 4 대비 4배 고밀도 |
+| 루프클로저 | `OptimizeFromGraphEnd/NeighborLinkRefining/ProximityBySpace false` | ★ 2026-08-12: 루프클로저 보정 활성화, 맵 스레드 스톨 방지 |
+| 맵핑 주기 | `Rtabmap/DetectionRate 3` | ★ 2026-08-12: 맵 스레드 부하 40% 감소 |
+| Point Cloud 밀도 | `Grid/DepthDecimation 4` | 라이브 맵 경량 (최종 메쉬는 offline TSDF) |
 
 ### Mesh — `scripts/utils/export_ply.sh` + `src/auto_mobility/mesh/mesh_open3d.py`
 | 단계 | 값 | 비고 |

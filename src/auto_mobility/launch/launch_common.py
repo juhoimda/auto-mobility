@@ -25,9 +25,9 @@ from auto_mobility.config import (
 RTABMAP_PARAMS = {
     # [1] 특징점 검출 및 3D-2D PnP 포즈 추정
     'Vis/EstimationType': '1',  # 1: 3D-2D PnP
-    'Vis/MinInliers': '10',     # IR 에미터 환경에서의 최소 인라이어
-    'Vis/MaxFeatures': '1000',  # 프레임당 VO 비용 절감 (30Hz 유지)
-    'GFTT/QualityLevel': '0.02',# 특징점 품질 임계값 (기본 0.001)
+    'Vis/MinInliers': '8',      # 회전 구간에서 불필요한 실패 판정 감소 (기존 10)
+    'Vis/MaxFeatures': '2000',  # 회전 시 키프레임 중첩 확보 (기존 1000)
+    'GFTT/QualityLevel': '0.005',# 특징점 품질 임계값 (기존 0.02 → blur/회전 프레임 0개 방지)
     'Vis/GridRows': '16',       # 특징점 균일 분포용 그리드
     'Vis/GridCols': '21',
     'Vis/MinDepth': '0.3',
@@ -38,23 +38,27 @@ RTABMAP_PARAMS = {
     # [3] 추적 끊김 복구 및 루프클로저 이상치 차단
     'RGBD/OptimizeMaxError': '3.0',   # 잘못된 루프클로저 오차 차단
     'Rtabmap/CreateIntermediateNodes': 'true',  # 키프레임 간 중간 노드 생성 (밀도↑)
-    'RGBD/ProximityBySpace': 'true',
-    'RGBD/OptimizeFromGraphEnd': 'true',
-    'RGBD/NeighborLinkRefining': 'true',
-    # [4] CPU 분산: 맵핑 루프 5Hz, 루프클로저 메모리
-    'Rtabmap/DetectionRate': '5',
+    # ★ 2026-08-12 euijin 세션(143506/142815) 실측 분석 반영:
+    #   재방문 환경에서 ProximityBySpace+NeighborLinkRefining+OptimizeFromGraphEnd 조합이
+    #   "Map correction should be identity" 에러 105회 / loop closure 전량 거부 / 맵 스레드 0.94s 스톨 유발.
+    #   루프클로저가 그래프를 보정할 수 있도록 전부 비활성화.
+    'RGBD/ProximityBySpace': 'false',
+    'RGBD/OptimizeFromGraphEnd': 'false',
+    'RGBD/NeighborLinkRefining': 'false',
+    # [4] CPU 분산: 맵핑 루프 3Hz, 루프클로저 메모리
+    'Rtabmap/DetectionRate': '3',
     'Mem/STMSize': '10',        # ★ 2026-08-11 벤치마크 최적(STM=10), RAM 절감
     # [5] 키프레임 전략: 10cm / 5.7도 마다
     'RGBD/LinearUpdate': '0.10',
     'RGBD/AngularUpdate': '0.10',
-    # [6] Point Cloud 품질 & 노이즈
+    # [6] Point Cloud 품질 & 노이즈 (라이브 클라우드 경량화 — 최종 메쉬는 offline TSDF)
     'Grid/3D': 'true',
-    'Grid/DepthDecimation': '2',      # 4→2: 라이브 맵 4배 고밀도 (기본 4)
+    'Grid/DepthDecimation': '4',      # 기존 2 → 4: 라이브 맵 4배 경량 (기본 4)
     'Grid/RangeMin': '0.3',
     'Grid/RangeMax': '4.0',           # Vis/MaxDepth(4.0)와 일치
     'Grid/NoiseFilteringRadius': '0.05',
     'Grid/NoiseFilteringMinNeighbors': '5',
-    'Grid/RayTracing': 'true',
+    'Grid/RayTracing': 'false',       # 2D 점유격자용 — 구독자 없음 (기존 true)
 }
 
 # ⚠️ ODOM_ARGS: rgbd_odometry 노드 전용 파라미터 (2026-08-11 확인)

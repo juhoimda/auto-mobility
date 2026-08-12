@@ -15,17 +15,21 @@ class TestLaunchCommonUnit(unittest.TestCase):
     def test_rtabmap_params_structure(self):
         self.assertIsInstance(RTABMAP_PARAMS, dict)
         self.assertIn("Vis/MinInliers", RTABMAP_PARAMS)
-        self.assertEqual(RTABMAP_PARAMS["Vis/MinInliers"], "10")
-        self.assertEqual(RTABMAP_PARAMS["Grid/RayTracing"], "true")
+        self.assertEqual(RTABMAP_PARAMS["Vis/MinInliers"], "8")
+        self.assertEqual(RTABMAP_PARAMS["Grid/RayTracing"], "false")
+        # ★ 2026-08-12 euijin 실측 반영: 루프클로저 보정을 위해 전부 비활성화
+        self.assertEqual(RTABMAP_PARAMS["RGBD/OptimizeFromGraphEnd"], "false")
+        self.assertEqual(RTABMAP_PARAMS["RGBD/NeighborLinkRefining"], "false")
+        self.assertEqual(RTABMAP_PARAMS["RGBD/ProximityBySpace"], "false")
 
     def test_rtabmap_args_formatting(self):
         self.assertIsInstance(RTABMAP_ARGS, str)
-        self.assertIn("--Vis/MinInliers 10", RTABMAP_ARGS)
-        self.assertIn("--Grid/RayTracing true", RTABMAP_ARGS)
+        self.assertIn("--Vis/MinInliers 8", RTABMAP_ARGS)
+        self.assertIn("--Grid/RayTracing false", RTABMAP_ARGS)
         # 인자들이 공백으로 명확히 구분되었는지 검증
         args_list = RTABMAP_ARGS.split()
         self.assertIn("--Vis/MinInliers", args_list)
-        self.assertIn("10", args_list)
+        self.assertIn("8", args_list)
 
     def test_rtabmap_topic_queue_constants(self):
         # live/bag 은 의도적으로 다른 큐 크기를 쓴다 (단일 소스로 명시 관리)

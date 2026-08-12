@@ -52,20 +52,24 @@
 | :--- | :--- | :--- |
 | **Madgwick `gain`** | `0.03` | 자이로스코프 노이즈 필터링 및 빠른 회전 시 맵 수평 드리프트 억제 |
 | **`approx_sync_max_interval`**| `0.15` (150 ms) | **★ 실환경 재조정** — VO delay(~70ms, 항상 최신 프레임 처리 특성)를 흡수. 기존 0.08은 간헐적 "no odometry" 스킵(맵 구멍) 유발 |
-| **`Rtabmap/DetectionRate`** | `5` (5 Hz) | 실시간 SLAM 갱신율을 5Hz로 제어하여 vCPU 계산 지연(Lag) 예방 |
+| **`Rtabmap/DetectionRate`** | `3` (3 Hz) | **★ 2026-08-12 euijin 실측 반영** — 5→3Hz: 맵 스레드 부하 40% 감소 (5Hz 시 RTAB-Map=0.2s/검출로 스레드 100% 점유) |
 | **`RGBD/LinearUpdate`** | `0.10` (10 cm) | 10cm 간격 키프레임 생성으로 그래프 최적화 부하 절감 및 DB 비대화 방지 |
 | **`RGBD/AngularUpdate`** | `0.10` (5.7 deg) | 5.7도 간격 키프레임 생성으로 회전 구간 매핑 안정성 확보 |
 | **`Vis/EstimationType`** | `1` | 3D-2D PnP 포즈 추정 (벤치마크 1위, SVD 대비 CPU 절감) |
-| **`Vis/MinInliers`** | `10` | 특징점 검증 임계값 (벤치마크 1위: IN=6 대비 +4~5점) |
-| **`GFTT/QualityLevel`** | `0.02` | **★ 2026-08-11 교정** — `Vis/CornerMinQuality`(0.23.7에 없음)의 유효 대체 키. 특징점 품질 임계값 |
-| **`Vis/MaxFeatures`** | `1000` | **★ 실환경 재조정** — 2000→1000: 프레임당 VO 비용 절반으로 실환경(rviz on)에서도 30fps 유지 여유 확보 |
+| **`Vis/MinInliers`** | `8` | **★ 2026-08-12 조정** — 10→8: 회전 구간에서 불필요한 추적 실패 판정 감소 |
+| **`GFTT/QualityLevel`** | `0.005` | **★ 2026-08-12 조정** — 0.02→0.005: blur/회전 프레임에서 특징점 0개(fromWords=0) 방지. `Vis/CornerMinQuality`(0.23.7에 없음)의 유효 대체 키 |
+| **`Vis/MaxFeatures`** | `2000` | **★ 2026-08-12 조정** — 1000→2000: 회전 시 키프레임 중첩 확보 (맵 스레드 경량화로 CPU 여유 확보됨) |
 | **`Vis/GridRows`** | `16` | **★ 2026-08-11 교정** — `Vis/CornerGridSize`(0.23.7에 없음)의 유효 대체 키. 특징점 균일 분포 그리드 (640x480@30px) |
 | **`Vis/GridCols`** | `21` | **★ 2026-08-11 교정** — 상동 |
 | **`OdomF2M/MaxSize`** | `1000` | **★ 2026-08-11 벤치 1위** — `OdomF2M/MaxFrames`(0.23.7에 없음)의 유효 대체 키. 기본 2000은 odom 17Hz 급락, 4000은 14Hz |
 | **`Odom/GuessMotion`** | `true` | **★ 2026-08-11 교정** — `Odom/PoseGuessMode`(0.23.7에 없음)의 유효 대체 키. 이전 모션 기반 다음 포즈 추측 |
 | **`Optimizer/GravitySigma`** | `0.3` | **★ 2026-08-11 교정** — `Optimizer/GravityProvided`(0.23.7에 없음)의 유효 대체 키. 그래프 최적화 중력 제약 |
 | **`Mem/STMSize`** | `10` | **★ 2026-08-11 재확정** — STM=100 대비 RAM 절감, 성능 동일 |
-| **`Grid/DepthDecimation`** | `2` | **★ 2026-08-11 교정** — `Grid/VoxelSize`(0.23.7에 없음) 무시됨을 확인. 실제 depth 해상도를 결정하는 키 (기본 4 → 2로 라이브 맵 4배 고밀도) |
+| **`RGBD/ProximityBySpace`** | `false` | **★ 2026-08-12 euijin 실측 반영** — 재방문마다 공간 루프클로저 검색 중단. 단일 구역 촬영은 시간 기반으로 충분 |
+| **`RGBD/OptimizeFromGraphEnd`** | `false` | **★ 2026-08-12 euijin 실측 반영** — 루프클로저 보정 활성화. true 시 "Map correction should be identity" 에러 105회 + loop closure 전량 거부 (euijin 143506/142815 실측) |
+| **`RGBD/NeighborLinkRefining`** | `false` | **★ 2026-08-12 euijin 실측 반영** — 재방문 시 재최적화 폭주 차단 → RTAB-Map 스레드 0.94s 스톨 방지 |
+| **`Grid/DepthDecimation`** | `4` | **★ 2026-08-12 조정** — 2→4: 라이브 맵 4배 경량 (기본 4). 최종 메쉬는 offline TSDF에서 생성 |
+| **`Grid/RayTracing`** | `false` | **★ 2026-08-12 조정** — 2D 점유격자용, 구독자 없음 |
 | **`odom_always_process_most_recent_frame`** | `true` | **★ 근본 수정(2026-08-10 재검증)** — live 촬영은 최신 프레임 처리로 지연 누적 차단. `false`는 rosbag 오프라인 전용 (RTAB-Map 공식 가이드). 기존 false는 DDS 큐 백로그·위상 지연 누적 + 맵핑 동기화 실패 유발 |
 
 > ⚠️ **2026-08-11 파라미터 유효성 검증 결과** — 아래 키는 RTAB-Map 0.23.7에서 **존재하지 않아 조용히 무시**되던 것들:
