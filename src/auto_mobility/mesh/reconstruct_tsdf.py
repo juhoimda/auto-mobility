@@ -16,7 +16,7 @@ reconstruct_tsdf.py — RTAB-Map DB → Open3D Tensor TSDF → Mesh
 사용법:
   python3 reconstruct_tsdf.py <session.db> <output.obj>
     [--voxel 0.01] [--trunc-mult 8] [--depth-max 4.0] [--depth-min 0.3]
-    [--poses-opt 0] [--weight-thr 3.0] [--block-count 50000]
+    [--poses-opt 0] [--weight-thr 1.5] [--block-count 50000]
     [--no-color] [--view] [--keep] [--workdir PATH]
 
 실측 검증 (2026-08-12):
@@ -234,7 +234,7 @@ def main():
     parser.add_argument("--depth-min", type=float, default=0.3, help="최소 depth (m, 기본 0.3)")
     parser.add_argument("--poses-opt", type=int, default=0, choices=[0, 2],
                         help="rtabmap-export --opt: 0=전역 최적화(파이프라인과 동일), 2=DB 저장 pose")
-    parser.add_argument("--weight-thr", type=float, default=3.0, help="표면 추출 weight 임계값 (기본 3.0)")
+    parser.add_argument("--weight-thr", type=float, default=1.5, help="표면 추출 weight 임계값 (기본 1.5, 2026-08-12 조정: 기존 3.0은 sparse 적분 시 표면 4배 축소 유발)")
     parser.add_argument("--block-count", type=int, default=50000, help="voxel block hash map 용량")
     parser.add_argument("--no-color", action="store_true", help="geometry 전용 (컬러 통합 생략)")
     parser.add_argument("--no-gpu", action="store_true", help="CUDA 비활성 (CPU)")
