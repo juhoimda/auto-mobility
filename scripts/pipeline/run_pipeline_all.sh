@@ -13,6 +13,7 @@ MESH_NAME="session_${TIMESTAMP}_mesh.obj"
 SKIP_CAPTURE=false
 SKIP_ISAAC=false
 FAST_MODE=false
+RECON_METHOD="poisson"
 
 # CLI 옵션 파싱
 while [[ $# -gt 0 ]]; do
@@ -34,12 +35,17 @@ while [[ $# -gt 0 ]]; do
             FAST_MODE=true
             shift
             ;;
+        --recon=*)
+            RECON_METHOD="${1#*=}"
+            shift
+            ;;
         -h|--help)
             echo "=========================================================="
-            echo " 사용법: $0 [--db=DB_NAME.db] [--skip-capture] [--skip-isaac] [--fast]"
+            echo " 사용법: $0 [--db=DB_NAME.db] [--skip-capture] [--skip-isaac] [--fast] [--recon=poisson|tsdf]"
             echo " 예시  : $0 (실시간 캡처부터 Isaac Sim 검증까지 전체 실행)"
             echo " 예시  : $0 --db=my_room.db --skip-capture (기존 DB로 Mesh 및 Isaac Sim 실행)"
             echo " 예시  : $0 --skip-isaac --fast (Mesh를 최대 속도로만 생성, 시뮬레이션 제외)"
+            echo " 예시  : $0 --skip-isaac --recon=tsdf (원본 RGB-D + pose → Open3D Tensor TSDF, GPU)"
             echo "=========================================================="
             exit 0
             ;;
@@ -52,6 +58,10 @@ done
 
 TARGET_DB_PATH="$DB_DIR/$DB_NAME"
 TARGET_PLY_PATH="$POINTCLOUD_DIR/${DB_NAME%.db}_cloud.ply"
+# TSDF 재구성은 Poisson mesh와 비교 위해 별도 파일명 사용 (덮어쓰기 방지)
+if [ "$RECON_METHOD" == "tsdf" ] && [[ "$MESH_NAME" != *"_tsdf.obj" ]]; then
+    MESH_NAME="${DB_NAME%.db}_tsdf.obj"
+fi
 TARGET_MESH_PATH="$MESH_DIR/$MESH_NAME"
 
 # 📝 파이프라인 전체 출력에서 중요 로그(WARN/ERROR/METRIC) 자동 수집 시작
@@ -172,12 +182,20 @@ echo "=========================================================="
 # Open3D Mesh: Poisson 기본 복원 + quadric decimation 50% (품질/성능 균형)
 # 실측(2026-08-12): voxel 0.01→0.02 로 pre-Poisson 전처리 5배 단축, 품질은 유지 이상.
 # --fast: Poisson depth 8→7 (복원 시간 약 2배 단축, 삼각형 수는 감소)
-MESH_ARGS="--force --recon-method=poisson --depth=8 --voxel=0.02"
-if [ "$FAST_MODE" = true ]; then
-    MESH_ARGS="--force --recon-method=poisson --depth=7 --voxel=0.02"
-    echo "⚡ [STEP 2-1] --fast 모드: Poisson depth=7 적용 (고속, 저해상도)"
+# --recon=tsdf: 누적 Point Cloud 대신 원본 RGB-D + 최적화 pose를 TSDF로 직접 적분 (GPU)
+MESH_METHOD_ARGS="--method=open3d"
+if [ "$RECON_METHOD" == "tsdf" ]; then
+    MESH_METHOD_ARGS="--method=tsdf"
+    MESH_ARGS="--force --voxel=0.01"
+    echo "🧊 [STEP 2-1] TSDF 재구성 모드: 원본 RGB-D + pose → Open3D Tensor TSDF (voxel 1cm)"
+else
+    MESH_ARGS="--force --recon-method=poisson --depth=8 --voxel=0.02"
+    if [ "$FAST_MODE" = true ]; then
+        MESH_ARGS="--force --recon-method=poisson --depth=7 --voxel=0.02"
+        echo "⚡ [STEP 2-1] --fast 모드: Poisson depth=7 적용 (고속, 저해상도)"
+    fi
 fi
-"$PIPELINE_DIR/mesh.sh" "$DB_NAME" "$MESH_NAME" $MESH_ARGS
+"$PIPELINE_DIR/mesh.sh" "$DB_NAME" "$MESH_NAME" $MESH_METHOD_ARGS $MESH_ARGS
 
 # 🛡️ BARRIER 2: Mesh File Integrity Check
 echo ""
