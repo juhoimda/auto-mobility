@@ -135,13 +135,13 @@
 
 | 항목 | 변경 | 효과 |
 | :--- | :--- | :--- |
-| **`/rtabmap/cloud_map_lite`** | `cloud_throttle.py`가 `/rtabmap/cloud_map`을 **2Hz**로 중계 | PointCloud 소프트웨어 렌더링 부하 ~60% 절감. SLAM 내부 처리 영향 없음 |
-| **Image QoS** | **`Reliable`로 변경** | ★ 2026-08-12: 카메라 RELIABLE 발행 ↔ RViz BE 구독 불일치로 이미지 유실 → Reliable로 수정 |
-| **죽은 디스플레이 제거** | `/voxel_cloud`(존재하지 않는 토픽) PointCloud2 삭제 | 무의미한 렌더링 제거 |
-| **Path (Trajectory)** 추가 | `/rtabmap/odom` 기반 이동 궤적 표시 (경량) | 촬영 진행 확인용 저비용 시각화 |
+| **RGB Image display 제거** | ★ 2026-08-12 — 30fps RGB 이미지 렌더링 제거 | llvmpipe 부하의 **~80% 절감** (이전 "이미지 1개만 활성"에서 완전 제거) |
+| **Grid 제거** | ★ 2026-08-12 — 바닥 격자 제거 | 렌더링 부하 추가 절감 |
+| **`/rtabmap/cloud_map_lite`** | `cloud_throttle.py`가 `/rtabmap/cloud_map`을 **2Hz**로 중계 (유지) | PointCloud 소프트웨어 렌더링 부하 절감. SLAM 내부 처리 영향 없음 |
+| **Path (Trajectory)** 유지 | `/rtabmap/odom` 기반 이동 궤적 표시 (경량) | 촬영 진행 확인용 저비용 시각화 |
 | **TF 표시 축소** | `camera_link`/`odom`/`map` 외 비활성 | TF 오버레이 부하 감소 |
-| **이미지 중복 제거** | RGB 1개만 활성, depth 이미지 미표시 | 텍스처 업로드 부하 절반 |
 
 - 실행: `cloud_throttle.py`는 `rtab_live.launch.py`에서 자동 기동 (CMakeLists에 등록됨)
+- **실시간 프레이밍 확인**: RGB 화면이 필요하면 `rqt_image_view /camera/camera/color/image_raw` (RViz 대비 1/10 부하)
 - 촬영 중 원본 품질 확인 필요 시 rviz에서 `PointCloud2 (RTAB-Map Map)`의 토픽을
-  `/rtabmap/cloud_map`으로 일시 전환하면 5Hz 원본을 볼 수 있음
+  `/rtabmap/cloud_map`으로 일시 전환하면 3Hz 원본을 볼 수 있음
