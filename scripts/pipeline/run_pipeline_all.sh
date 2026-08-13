@@ -29,12 +29,17 @@ while [[ $# -gt 0 ]]; do
             SKIP_ISAAC=true
             shift
             ;;
+        --remote-camera)
+            CAMERA_MODE=remote
+            shift
+            ;;
         -h|--help)
             echo "=========================================================="
-            echo " 사용법: $0 [--db=DB_NAME.db] [--skip-capture] [--skip-isaac]"
+            echo " 사용법: $0 [--db=DB_NAME.db] [--skip-capture] [--skip-isaac] [--remote-camera]"
             echo " 예시  : $0 (실시간 캡처부터 Mesh(TSDF) 및 Isaac Sim 검증까지 전체 실행)"
             echo " 예시  : $0 --db=my_room.db --skip-capture (기존 DB로 TSDF Mesh 및 Isaac Sim 실행)"
             echo " 예시  : $0 --skip-isaac (촬영 후 TSDF Mesh만 생성, 시뮬레이션 제외)"
+            echo " 예시  : $0 --remote-camera (Windows 네이티브 카메라 토픽 수신, 압축 토픽 기본 사용)"
             echo " 💡 Mesh 재구성은 TSDF가 기본(원본 RGB-D + pose → Open3D Tensor TSDF, GPU)"
             echo "    Poisson(PLY) 기반 복원을 원하면 scripts/pipeline/mesh.sh 를 직접 사용"
             echo "=========================================================="
@@ -46,6 +51,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# 원격 카메라 모드: WSL에선 드라이버 미구동, 압축 토픽 수신이 기본
+if [ "$CAMERA_MODE" = "remote" ]; then
+    USE_COMPRESSED="${USE_COMPRESSED:-true}"
+fi
 
 TARGET_DB_PATH="$DB_DIR/$DB_NAME"
 TARGET_PLY_PATH="$POINTCLOUD_DIR/${DB_NAME%.db}_cloud.ply"
@@ -70,20 +80,25 @@ pre_flight() {
     echo "=========================================================="
 
     # 1. USB 링크 속도 확인 (USB_3_MIN_SPEED_MBPS = USB 3.x 기준)
-    USB_OK=false
-    for dev in /sys/bus/usb/devices/*; do
-        if [ -f "$dev/idVendor" ] && [ "$(cat "$dev/idVendor" 2>/dev/null)" = "8086" ]; then
-            SPEED=$(cat "$dev/speed" 2>/dev/null)
-            if [ "$SPEED" -ge "$USB_3_MIN_SPEED_MBPS" ] 2>/dev/null; then
-                echo "✅ RealSense USB 3.x 정상 (${SPEED} Mbps)"
-                USB_OK=true
-            else
-                echo "⚠️  RealSense USB ${SPEED} Mbps — USB 2.x로 낮게 연결됨 (성능 저하 위험)"
+    #    ⚠️ 원격 카메라 모드(Windows 네이티브)에서는 USB가 WSL에 없으므로 검사 생략
+    if [ "$CAMERA_MODE" = "local" ]; then
+        USB_OK=false
+        for dev in /sys/bus/usb/devices/*; do
+            if [ -f "$dev/idVendor" ] && [ "$(cat "$dev/idVendor" 2>/dev/null)" = "8086" ]; then
+                SPEED=$(cat "$dev/speed" 2>/dev/null)
+                if [ "$SPEED" -ge "$USB_3_MIN_SPEED_MBPS" ] 2>/dev/null; then
+                    echo "✅ RealSense USB 3.x 정상 (${SPEED} Mbps)"
+                    USB_OK=true
+                else
+                    echo "⚠️  RealSense USB ${SPEED} Mbps — USB 2.x로 낮게 연결됨 (성능 저하 위험)"
+                fi
             fi
+        done
+        if [ "$USB_OK" = false ]; then
+            echo "⚠️  RealSense USB 장치를 감지하지 못했습니다."
         fi
-    done
-    if [ "$USB_OK" = false ]; then
-        echo "⚠️  RealSense USB 장치를 감지하지 못했습니다."
+    else
+        echo "🌐 [원격 카메라] Windows 네이티브 모드 — USB 로컬 검사를 건너뜁니다."
     fi
 
     # 2. /dev/shm 용량 확인
@@ -121,8 +136,12 @@ else
     # 카메라 센서 토픽 발행 여부 사전 체크
     if ! ros2 topic list | grep -q "$RGB_TOPIC"; then
         echo "❌ [오류] RealSense 카메라 토픽이 감지되지 않습니다!"
-        echo "👉 [터미널 1]에서 먼저 카메라를 구동해주세요:"
-        echo "   ros2 launch auto_mobility camera.launch.py"
+        if [ "$CAMERA_MODE" = "remote" ]; then
+            echo "👉 [Windows]에서 카메라 노드(네임스페이스 /camera)와 압축 republish를 먼저 실행해주세요."
+        else
+            echo "👉 [터미널 1]에서 먼저 카메라를 구동해주세요:"
+            echo "   ros2 launch auto_mobility camera.launch.py"
+        fi
         exit 1
     fi
 
@@ -137,7 +156,13 @@ else
     trap "kill $GUARD_PID 2>/dev/null || true" EXIT INT TERM
 
     # RTAB-Map Visual SLAM 실시간 데이터 수집 (종료 시 바로 DB 생성)
-    ros2 launch auto_mobility rtab_live.launch.py database_path:="$TARGET_DB_PATH" || true
+    RTAB_LIVE_ARGS=("database_path:=$TARGET_DB_PATH")
+    if [ "$CAMERA_MODE" = "remote" ]; then
+        # Windows 원격 카메라: 네트워크 대역폭 절감을 위해 압축 토픽을 로컬에서 복원
+        echo "🌐 원격 카메라 모드 → use_compressed:=$USE_COMPRESSED"
+        RTAB_LIVE_ARGS+=("use_compressed:=$USE_COMPRESSED")
+    fi
+    ros2 launch auto_mobility rtab_live.launch.py "${RTAB_LIVE_ARGS[@]}" || true
 
     # 촬영 종료 → 모니터 종료 & 보고서 확인
     kill $GUARD_PID 2>/dev/null || true

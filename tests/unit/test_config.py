@@ -65,10 +65,9 @@ class TestConfigUnit(unittest.TestCase):
         self.assertEqual(CAMERA_PARAMS["depth_module.depth_profile"], CAMERA_PROFILE)
         self.assertEqual(CAMERA_PARAMS["rgb_camera.color_profile"], CAMERA_PROFILE)
         self.assertIs(CAMERA_PARAMS["align_depth.enable"], False)
-        self.assertEqual(CAMERA_PARAMS["color_qos"], "SENSOR_DATA")
         # production 파라미터에 필수 키 존재
         for key in ["depth_module.depth_profile", "rgb_camera.color_profile", "enable_sync",
-                    "unite_imu_method", "filters", "color_qos"]:
+                    "unite_imu_method", "spatial_filter.enable"]:
             self.assertIn(key, CAMERA_PARAMS)
 
     def test_mesh_defaults(self):

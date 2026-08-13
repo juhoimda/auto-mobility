@@ -27,6 +27,7 @@ for hid in /sys/bus/hid/devices/*; do
             chmod 0666 "$iio"/scan_elements/in_* 2>/dev/null || true
         fi
         # buffer / trigger
+        chmod 0666 "$iio"/buffer*/enable "$iio"/buffer*/length 2>/dev/null || true
         chmod 0666 "$iio"/buffer/enable "$iio"/buffer/length 2>/dev/null || true
         chmod 0666 "$iio"/trigger/current_trigger 2>/dev/null || true
         chmod 0666 "$iio"/in_* 2>/dev/null || true

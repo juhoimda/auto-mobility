@@ -84,6 +84,15 @@ PYEOF
 fi
 USB_3_MIN_SPEED_MBPS="${USB_3_MIN_SPEED_MBPS:-5000}"
 
+# 카메라 구동 위치 (2026-08-13 추가)
+#   local : WSL USB 패스스루(usbipd) — WSL에서 camera.launch.py 로 직접 구동
+#   remote: Windows 네이티브에서 발행하는 토픽을 수신 — WSL에서는 드라이버 미구동
+CAMERA_MODE="${CAMERA_MODE:-local}"
+export CAMERA_MODE
+# 원격 카메라 시 압축 토픽 기본 사용 (로컬은 raw 그대로)
+USE_COMPRESSED="${USE_COMPRESSED:-false}"
+export USE_COMPRESSED
+
 mkdir -p "$BAG_DIR" "$DB_DIR" "$POINTCLOUD_DIR" "$MESH_DIR" "$ISAAC_DIR" "$LOG_DIR" "$RAM_BAG_DIR"
 
 if [ -f "$PROJECT_DIR/install/setup.bash" ]; then

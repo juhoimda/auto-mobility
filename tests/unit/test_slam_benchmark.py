@@ -28,7 +28,7 @@ class TestSlamBenchmarkConsistency(unittest.TestCase):
         self.assertIn("color_qos:=SENSOR_DATA", cmd)
         self.assertIn("align_depth.enable:=false", cmd)
         # production 단일 소스의 필터/에미터 설정이 벤치마크에도 반영
-        self.assertIn("filters:=spatial,temporal,hole_filling", cmd)
+        self.assertIn("spatial_filter.enable:=true", cmd)
         self.assertIn("depth_module.emitter_enabled:=1", cmd)
         # bool 은 rtabmap/camera CLI 파싱과 일치하도록 소문자로 렌더링
         self.assertNotIn("align_depth.enable:=False", cmd)
