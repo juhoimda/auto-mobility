@@ -4,6 +4,12 @@
 PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$PIPELINE_DIR/../common.sh"
 
+# WSLg(Wayland)에서 Open3D의 GLFW가 wayland-0 소켓을 잡아
+# "Failed to initialize GLEW"로 창이 안 뜨는 문제 → X11 백엔드로 강제 폴백
+if [ -d /mnt/wslg ]; then
+    export WAYLAND_DISPLAY=
+fi
+
 if [ -z "$1" ]; then
     echo "=========================================================="
     echo " 사용법: $0 MESH_FILE_NAME [--wireframe] [--no-backface]"

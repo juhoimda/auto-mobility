@@ -46,9 +46,10 @@ def view_mesh(mesh_path, wireframe=False, back_face=True):
     vis.add_geometry(mesh)
     
     opt = vis.get_render_option()
-    opt.mesh_show_back_face = back_face
-    opt.mesh_show_wireframe = wireframe
-    opt.background_color = np.array([0.1, 0.1, 0.1])
+    if opt is not None:
+        opt.mesh_show_back_face = back_face
+        opt.mesh_show_wireframe = wireframe
+        opt.background_color = np.array([0.1, 0.1, 0.1])
     
     try:
         while True:

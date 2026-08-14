@@ -23,10 +23,24 @@ import subprocess
 import json
 import argparse
 import signal
-import re
 import threading
 from datetime import datetime
-from pathlib import Path
+
+# repo 소스 실행 / 설치 실행 양쪽에서 auto_mobility 패키지 임포트 보장
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+from auto_mobility.config import (
+    CAMERA_RGB_TOPIC as TOPIC_COLOR,
+    CAMERA_DEPTH_TOPIC,
+    CAMERA_ALIGNED_DEPTH_TOPIC as TOPIC_DEPTH,
+    CAMERA_INFO_TOPIC as TOPIC_CAMERA_INFO,
+    CAMERA_IMU_TOPIC as TOPIC_IMU,
+    ODOM_TOPIC as TOPIC_ODOM,
+    MAP_TOPIC as TOPIC_MAP,
+    CAMERA_PARAMS,
+    LOG_DIR,
+    FASTDDS_XML,
+)
 
 # ──────────────────────────── 터미널 컬러 ────────────────────────────
 GREEN  = "\033[92m"
@@ -39,19 +53,7 @@ BOLD   = "\033[1m"
 RESET  = "\033[0m"
 
 # ──────────────────────────── 경로 설정 ──────────────────────────────
-PROJECT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-CONFIG_DIR  = os.path.join(PROJECT_DIR, "config")
-LOG_DIR     = os.path.join(PROJECT_DIR, "ros2_data", "logs")
-
-FASTDDS_XML = os.path.join(CONFIG_DIR, "fastdds_camera.xml")
-
-# ──────────────────────────── 토픽 상수 ──────────────────────────────
-TOPIC_COLOR      = "/camera/camera/color/image_raw"
-TOPIC_DEPTH      = "/camera/camera/aligned_depth_to_color/image_raw"
-TOPIC_CAMERA_INFO= "/camera/camera/color/camera_info"
-TOPIC_IMU        = "/camera/camera/imu"
-TOPIC_ODOM       = "/rtabmap/odom"
-TOPIC_MAP        = "/rtabmap/mapData"
+# PROJECT_DIR / CONFIG_DIR / LOG_DIR / FASTDDS_XML 는 config.py 단일 소스 사용
 
 # ═══════════════════════════════════════════════════════════════════════
 #  공통 유틸
@@ -235,12 +237,14 @@ CAMERA_CONFIGS_FULL = [
     # (width, height, fps)
     (640,  480, 15),
     (640,  480, 30),
+    (848,  480, 30),
     (1280, 720, 15),
     (1280, 720, 30),
 ]
 
 CAMERA_CONFIGS_QUICK = [
     (640,  480, 30),
+    (848,  480, 30),
     (1280, 720, 15),
     (1280, 720, 30),
 ]
@@ -265,26 +269,7 @@ def run_camera_test(rmw, use_shm, res_w, res_h, fps, qos,
             shm_label = "UDP"
 
     prof = f"{res_w}x{res_h}x{fps}"
-    cmd = [
-        "ros2", "run", "realsense2_camera", "realsense2_camera_node",
-        "--ros-args",
-        "-p", f"depth_module.depth_profile:={prof}",
-        "-p", f"rgb_camera.color_profile:={prof}",
-        "-p", "rgb_camera.color_format:=RGB8",
-        "-p", "enable_infra1:=false",
-        "-p", "enable_infra2:=false",
-        "-p", "align_depth.enable:=false",
-        "-p", "enable_accel:=true",
-        "-p", "enable_gyro:=true",
-        "-p", "unite_imu_method:=1",
-        "-p", "rgb_camera.auto_exposure_priority:=false",
-        "-p", f"color_qos:={qos}",
-        "-p", f"color_info_qos:={qos}",
-        "-p", f"depth_qos:={qos}",
-        "-p", f"depth_info_qos:={qos}",
-        "-r", "__ns:=/camera",
-        "-r", "__node:=camera",
-    ]
+    cmd = build_camera_cmd(prof, qos)
 
     label = f"{rmw}({shm_label}) | {res_w}x{res_h}@{fps}fps | QoS={qos}"
     step(f"[Stage 1] {label}")
@@ -307,7 +292,7 @@ def run_camera_test(rmw, use_shm, res_w, res_h, fps, qos,
 
     # raw image_raw + raw depth 동시 측정 (샘플링 시간 4.0초)
     hz_map = measure_hz_multi(
-        [TOPIC_COLOR, "/camera/camera/depth/image_rect_raw"],
+        [TOPIC_COLOR, CAMERA_DEPTH_TOPIC],
         duration=sample_duration, env=env
     )
     cpu, ram_mb = measure_resources_of("realsense2_camera", samples=4, interval=sample_duration / 4)
@@ -316,7 +301,7 @@ def run_camera_test(rmw, use_shm, res_w, res_h, fps, qos,
     time.sleep(1.5)  # 센서 안전 릴리즈 쿨다운 단축
 
     color_hz = hz_map.get(TOPIC_COLOR, 0.0)
-    depth_hz = hz_map.get("/camera/camera/depth/image_rect_raw", 0.0)
+    depth_hz = hz_map.get(CAMERA_DEPTH_TOPIC, 0.0)
     drop_pct = max(0.0, (fps - color_hz) / fps * 100) if fps > 0 else 100.0
 
     # 점수: FPS 달성(60) + 품질(30) + QoS(10) - RAM 사용량 감점
@@ -343,12 +328,16 @@ def run_stage1(sys_info, quick: bool) -> dict:
     banner("Stage 1 — 카메라 / DDS / QoS 최적 조합 탐색")
 
     if quick:
-        # 빠른 모드: 단일 640x480@30fps 최적 세션 검증 (카메라 USB 반복 리셋 방지)
-        configs = [("rmw_fastrtps_cpp", True, 640, 480, 30, "SENSOR_DATA")]
-    else:
-        # 정밀 모드: 핵심 해상도 2종만 안정적으로 검증
+        # 빠른 모드: 현재 production 해상도(848x480) 포함 핵심 검증 (카메라 USB 반복 리셋 방지)
         configs = [
             ("rmw_fastrtps_cpp", True, 640, 480, 30, "SENSOR_DATA"),
+            ("rmw_fastrtps_cpp", True, 848, 480, 30, "SENSOR_DATA"),
+        ]
+    else:
+        # 정밀 모드: 핵심 해상도 3종 안정적으로 검증
+        configs = [
+            ("rmw_fastrtps_cpp", True, 640, 480, 30, "SENSOR_DATA"),
+            ("rmw_fastrtps_cpp", True, 848, 480, 30, "SENSOR_DATA"),
             ("rmw_fastrtps_cpp", True, 1280, 720, 15, "SENSOR_DATA"),
         ]
 
@@ -372,13 +361,57 @@ def run_stage1(sys_info, quick: bool) -> dict:
 #  Stage 2: SLAM(RTAB-Map) 파라미터 조합 측정 (CPU, RAM, Disk I/O 정밀 검증)
 # ═══════════════════════════════════════════════════════════════════════
 
+def _param_to_str(value) -> str:
+    """bool 은 rtabmap/camera CLI 파싱과 일치하도록 소문자 'true'/'false' 로 변환."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
 def _build_rtabmap_args(params: dict) -> str:
-    """dict → '--Key Value ...' 형태의 rtabmap_args 문자열로 변환."""
+    """dict → '--Key Value ...' 형태의 rtabmap_args 문자열로 변환.
+
+    ⚠️ Odom/*, OdomF2M/* 키는 rtabmap 메인 노드가 선언하지 않아
+    ParameterNotDeclaredException → SIGABRT 크래시를 유발하므로 제외한다.
+    (2026-08-11 실측 확인. 해당 키는 odom_args 로 전달해야 한다)
+    """
     parts = []
     for k, v in params.items():
-        if k != "align_depth":
-            parts.append(f"--{k} {v}")
+        if k != "align_depth" and not k.startswith("Odom/"):
+            parts.append(f"--{k} {_param_to_str(v)}")
     return " ".join(parts)
+
+
+def _build_odom_args(params: dict) -> str:
+    """Odom/*, OdomF2M/* 키만 추출해 rgbd_odometry 전용 odom_args 문자열 생성."""
+    parts = []
+    for k, v in params.items():
+        if k.startswith("Odom/"):
+            parts.append(f"--{k} {_param_to_str(v)}")
+    return " ".join(parts)
+
+
+def build_camera_cmd(profile: str, qos: str, align_depth: bool = False) -> list:
+    """config.CAMERA_PARAMS(production 단일 소스) 기준 카메라 노드 커맨드 생성.
+
+    벤치마크가 바꾸는 해상도 프로파일/QoS 만 동적 오버라이드한다.
+    (production 설정인 필터/에미터/동기화를 포함해 실환경과 정합되도록 함)
+    """
+    params = dict(CAMERA_PARAMS)
+    params.update({
+        "depth_module.depth_profile": profile,
+        "rgb_camera.color_profile": profile,
+        "align_depth.enable": align_depth,
+        "color_qos": qos,
+        "color_info_qos": qos,
+        "depth_qos": qos,
+        "depth_info_qos": qos,
+    })
+    cmd = ["ros2", "run", "realsense2_camera", "realsense2_camera_node", "--ros-args"]
+    for k, v in params.items():
+        cmd += ["-p", f"{k}:={_param_to_str(v)}"]
+    cmd += ["-r", "__ns:=/camera", "-r", "__node:=camera"]
+    return cmd
 
 
 # SLAM 파라미터 후보 집합 (Depth 정렬, I/O 키프레임, F2M 로컬 맵, MinInliers 포함)
@@ -402,15 +435,17 @@ SLAM_PARAM_MATRIX_FULL = {
         ("VF=1500", {"Vis/MaxFeatures": 1500}),
         ("VF=2000", {"Vis/MaxFeatures": 2000}),
     ],
-    "threads": [
-        ("TH=2",  {"Vis/CornerNbThreads": 2}),
-        ("TH=4",  {"Vis/CornerNbThreads": 4}),
-        ("TH=8",  {"Vis/CornerNbThreads": 8}),
+    # ⚠️ 2026-08-11 파라미터 검증: Vis/CornerNbThreads는 RTAB-Map 0.23.7에서 제거됨 (OpenCV 자동 스레딩).
+    #   OdomF2M/MaxFrames → OdomF2M/MaxSize(로컬 맵 최대 word 수, 기본 2000) 로 리네임.
+    "f2m_size": [
+        ("F2M=1000", {"OdomF2M/MaxSize": 1000}),
+        ("F2M=2000", {"OdomF2M/MaxSize": 2000}),
+        ("F2M=4000", {"OdomF2M/MaxSize": 4000}),
+        ("F2M=8000", {"OdomF2M/MaxSize": 8000}),
     ],
-    "f2m_frames": [
-        ("F2M=5",  {"OdomF2M/MaxFrames": 5}),
-        ("F2M=10", {"OdomF2M/MaxFrames": 10}),
-        ("F2M=15", {"OdomF2M/MaxFrames": 15}),
+    "stm_size": [
+        ("STM=10",  {"Mem/STMSize": 10}),
+        ("STM=100", {"Mem/STMSize": 100}),      # 현재 production 값 (과부하 검증)
     ],
     "keyframe": [
         ("KF_0.1", {"RGBD/LinearUpdate": 0.1, "RGBD/AngularUpdate": 0.1}),
@@ -422,6 +457,10 @@ SLAM_PARAM_MATRIX_FULL = {
         ("IN=10", {"Vis/MinInliers": 10}),
         ("IN=12", {"Vis/MinInliers": 12}),
     ],
+    "max_depth": [
+        ("MD=4", {"Vis/MaxDepth": 4.0}),   # 현재 production 값
+        ("MD=8", {"Vis/MaxDepth": 8.0}),   # benchmark 검증값
+    ],
 }
 
 SLAM_PARAM_MATRIX_QUICK = {
@@ -429,9 +468,14 @@ SLAM_PARAM_MATRIX_QUICK = {
         ("EST=PnP(3D-2D)", {"Vis/EstimationType": 1}),
         ("EST=SVD(3D-3D)", {"Vis/EstimationType": 0}),
     ],
-    "f2m_frames": [
-        ("F2M=10", {"OdomF2M/MaxFrames": 10}),
-        ("F2M=5",  {"OdomF2M/MaxFrames": 5}),
+    "f2m_size": [
+        ("F2M=1000", {"OdomF2M/MaxSize": 1000}),
+        ("F2M=2000", {"OdomF2M/MaxSize": 2000}),
+        ("F2M=4000", {"OdomF2M/MaxSize": 4000}),
+    ],
+    "stm_size": [
+        ("STM=10",  {"Mem/STMSize": 10}),
+        ("STM=100", {"Mem/STMSize": 100}),      # 현재 production 값
     ],
     "keyframe": [
         ("KF_0.1", {"RGBD/LinearUpdate": 0.1, "RGBD/AngularUpdate": 0.1}),
@@ -441,30 +485,47 @@ SLAM_PARAM_MATRIX_QUICK = {
         ("IN=6",  {"Vis/MinInliers": 6}),
         ("IN=10", {"Vis/MinInliers": 10}),
     ],
+    "max_depth": [
+        ("MD=4", {"Vis/MaxDepth": 4.0}),
+        ("MD=8", {"Vis/MaxDepth": 8.0}),
+    ],
 }
 
-# SLAM 기준 파라미터
-SLAM_BASE_PARAMS = {
-    "Vis/CornerMinQuality"  : 0.02,
-    "Vis/CornerGridSize"    : 30,
-    "Vis/MinDepth"          : 0.3,
-    "Vis/MaxDepth"          : 8.0,
-    "Vis/Robust"            : "true",
-    "Vis/InlierDistance"    : 1.0,
-    "Odom/PoseGuessMode"    : 0,
-    "Odom/ResetCountdown"   : 2,
-    "Rtabmap/ResetCountdown": 0,
-    "RGBD/CreateIntermediateNodes": "true",
-    "RGBD/ProximityBySpace" : "true",
-    "RGBD/OptimizeFromGraphEnd": "true",
-    "Mem/STMSize"           : 10,
-    "approx_sync"           : "true",
-    "approx_sync_max_interval": 0.15,
-    "topic_queue_size"      : 30,
-}
+# SLAM 기준 파라미터: production(RTABMAP_PARAMS)을 단일 소스로 사용해 drift 를 방지한다.
+# 벤치마크가 독립적으로 변형하는 축(행렬) 값이 기준값을 오버라이드한다.
+def _coerce_param(value):
+    """RTABMAP_PARAMS 의 문자열 값을 벤치마크 처리용 네이티브 타입으로 변환."""
+    if isinstance(value, str):
+        if value.lower() == "true":
+            return True
+        if value.lower() == "false":
+            return False
+        try:
+            return int(value)
+        except ValueError:
+            try:
+                return float(value)
+            except ValueError:
+                return value
+    return value
 
 
-def build_slam_test_configs(matrix: dict, nproc: int) -> list:
+def _load_slam_base_params() -> dict:
+    from auto_mobility.launch.launch_common import RTABMAP_PARAMS
+    base = {k: _coerce_param(v) for k, v in RTABMAP_PARAMS.items()}
+    # 벤치마크 전용 launch 인자 (RTABMAP_PARAMS 에 없는 키)
+    base.update({
+        "approx_sync": "true",
+        "approx_sync_max_interval": 0.15,
+        "topic_queue_size": 30,
+    })
+    return base
+
+
+SLAM_BASE_PARAMS = _load_slam_base_params()
+
+
+def build_slam_test_configs(matrix: dict) -> list:
     """각 축의 값을 독립적으로 변경하는 1-at-a-time 방식으로 configs 생성."""
     default = {}
     default_labels = {}
@@ -493,14 +554,8 @@ def build_slam_test_configs(matrix: dict, nproc: int) -> list:
             cur_params  = {**default, **params}
             _add(cur_labels, cur_params)
 
-    valid = []
-    for c in configs:
-        th = c["params"].get("Vis/CornerNbThreads", 4)
-        if int(th) <= nproc:
-            valid.append(c)
-        else:
-            warn(f"  CornerNbThreads={th} 가 nproc={nproc} 초과 → 건너뜀")
-    return valid
+    # ⚠️ 2026-08-11: Vis/CornerNbThreads는 RTAB-Map 0.23.7에서 제거됨. nproc 필터는 생략.
+    return configs
 
 
 def run_slam_test(camera_config: dict, slam_config: dict,
@@ -522,12 +577,13 @@ def run_slam_test(camera_config: dict, slam_config: dict,
 
     fps = camera_config["target_fps"]
     align_depth_enabled = bool(slam_config["params"].get("align_depth", False))
-    depth_topic_to_use = TOPIC_DEPTH if align_depth_enabled else "/camera/camera/depth/image_rect_raw"
+    depth_topic_to_use = TOPIC_DEPTH if align_depth_enabled else CAMERA_DEPTH_TOPIC
 
     LAUNCH_KEYS = {"approx_sync", "approx_sync_max_interval", "topic_queue_size", "align_depth"}
     rtabmap_only = {k: v for k, v in slam_config["params"].items()
                     if k not in LAUNCH_KEYS}
     rtabmap_args = _build_rtabmap_args(rtabmap_only)
+    odom_args = _build_odom_args(rtabmap_only)
 
     bench_db_path = os.path.join(LOG_DIR, "bench_rtabmap.db")
     if os.path.exists(bench_db_path):
@@ -553,6 +609,7 @@ def run_slam_test(camera_config: dict, slam_config: dict,
         "rtabmap_viz:=false",
         f"database_path:={bench_db_path}",
         f"rtabmap_args:={rtabmap_args}",
+        f"odom_args:={odom_args}",
     ]
 
     label = slam_config["label"]
@@ -640,7 +697,7 @@ def run_stage2(stage1_result: dict, sys_info: dict, quick: bool) -> dict:
 
     best_cam = stage1_result["best"]
     matrix   = SLAM_PARAM_MATRIX_QUICK if quick else SLAM_PARAM_MATRIX_FULL
-    configs  = build_slam_test_configs(matrix, nproc=sys_info["nproc"])
+    configs  = build_slam_test_configs(matrix)
 
     env = os.environ.copy()
     rmw = best_cam["rmw"]
@@ -657,26 +714,7 @@ def run_stage2(stage1_result: dict, sys_info: dict, quick: bool) -> dict:
           f"{best_cam['resolution']}@{fps}fps QoS={qos}")
 
     step("Stage 2 시작: 카메라 지속 세션 기동 중... (USB 리셋 방지)")
-    camera_cmd = [
-        "ros2", "run", "realsense2_camera", "realsense2_camera_node",
-        "--ros-args",
-        "-p", f"depth_module.depth_profile:={prof}",
-        "-p", f"rgb_camera.color_profile:={prof}",
-        "-p", "rgb_camera.color_format:=RGB8",
-        "-p", "enable_infra1:=false",
-        "-p", "enable_infra2:=false",
-        "-p", "align_depth.enable:=false",
-        "-p", "enable_accel:=true",
-        "-p", "enable_gyro:=true",
-        "-p", "unite_imu_method:=1",
-        "-p", "rgb_camera.auto_exposure_priority:=false",
-        "-p", f"color_qos:={qos}",
-        "-p", f"color_info_qos:={qos}",
-        "-p", f"depth_qos:={qos}",
-        "-p", f"depth_info_qos:={qos}",
-        "-r", "__ns:=/camera",
-        "-r", "__node:=camera",
-    ]
+    camera_cmd = build_camera_cmd(prof, qos)
 
     cam_proc = subprocess.Popen(camera_cmd, env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -740,37 +778,19 @@ def run_stage3(stage1_result: dict, stage2_result: dict, quick: bool) -> dict:
     prof = f"{res_w}x{res_h}x{fps}"
 
     align_depth_enabled = bool(best_slam["params"].get("align_depth", False))
-    depth_topic_to_use = TOPIC_DEPTH if align_depth_enabled else "/camera/camera/depth/image_rect_raw"
+    depth_topic_to_use = TOPIC_DEPTH if align_depth_enabled else CAMERA_DEPTH_TOPIC
 
     print(f"최적 카메라 설정: {best_cam['rmw']}({best_cam['shm']}) "
           f"{best_cam['resolution']}@{fps}fps QoS={qos}")
     print(f"최적 SLAM 파라미터: {best_slam['label']}\n")
 
-    cam_cmd = [
-        "ros2", "run", "realsense2_camera", "realsense2_camera_node",
-        "--ros-args",
-        "-p", f"depth_module.depth_profile:={prof}",
-        "-p", f"rgb_camera.color_profile:={prof}",
-        "-p", "rgb_camera.color_format:=RGB8",
-        "-p", "enable_infra1:=false",
-        "-p", "enable_infra2:=false",
-        "-p", f"align_depth.enable:={'true' if align_depth_enabled else 'false'}",
-        "-p", "enable_accel:=true",
-        "-p", "enable_gyro:=true",
-        "-p", "unite_imu_method:=1",
-        "-p", "rgb_camera.auto_exposure_priority:=false",
-        "-p", f"color_qos:={qos}",
-        "-p", f"color_info_qos:={qos}",
-        "-p", f"depth_qos:={qos}",
-        "-p", f"depth_info_qos:={qos}",
-        "-r", "__ns:=/camera",
-        "-r", "__node:=camera",
-    ]
+    cam_cmd = build_camera_cmd(prof, qos, align_depth=align_depth_enabled)
 
     LAUNCH_KEYS = {"approx_sync", "approx_sync_max_interval", "topic_queue_size", "align_depth"}
     rtabmap_only = {k: v for k, v in best_slam["params"].items()
                     if k not in LAUNCH_KEYS}
     rtabmap_args = _build_rtabmap_args(rtabmap_only)
+    odom_args = _build_odom_args(rtabmap_only)
 
     slam_cmd = [
         "ros2", "launch", "rtabmap_launch", "rtabmap.launch.py",
@@ -782,6 +802,7 @@ def run_stage3(stage1_result: dict, stage2_result: dict, quick: bool) -> dict:
         "visual_odometry:=true",
         "rviz:=false", "rtabmap_viz:=false",
         f"rtabmap_args:={rtabmap_args}",
+        f"odom_args:={odom_args}",
     ]
 
     cam_proc = stage2_result.get("cam_proc")
@@ -886,7 +907,7 @@ def write_report(sys_info: dict, s1: dict, s2: dict, s3: dict,
     rtabmap_args_lines = []
     for k, v in slam_params.items():
         if k not in {"approx_sync", "approx_sync_max_interval", "topic_queue_size", "align_depth"}:
-            rtabmap_args_lines.append(f"    '--{k} {v} '")
+            rtabmap_args_lines.append(f"    '--{k} {_param_to_str(v)} '")
     suggested_rtabmap_args = "RTABMAP_ARGS = (\n" + "\n".join(rtabmap_args_lines) + "\n)"
 
     md = f"""# 📊 통합 SLAM 파이프라인 벤치마크 보고서 (CPU, RAM, Disk I/O 하드웨어 가속 검증)

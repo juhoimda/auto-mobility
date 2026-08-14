@@ -2,11 +2,15 @@
 
 PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$PIPELINE_DIR/../common.sh"
+export PYTHONWARNINGS="ignore"
 
 POSITIONAL_ARGS=()
 VIEW_FLAG=""
 FORCE_FLAG=""
 METHOD="open3d"
+DEPTH_ARG=""
+VOXEL_ARG=""
+RECON_METHOD_ARG=""
 
 # 파라미터 파싱
 for arg in "$@"; do
@@ -20,8 +24,20 @@ for arg in "$@"; do
         --method=*)
             METHOD="${arg#*=}"
             ;;
+        --depth=*)
+            DEPTH_ARG="--depth ${arg#*=}"
+            ;;
+        --voxel=*)
+            VOXEL_ARG="--voxel ${arg#*=}"
+            ;;
+        --recon-method=*)
+            RECON_METHOD_ARG="--method ${arg#*=}"
+            ;;
         rtabmap)
             METHOD="rtabmap"
+            ;;
+        tsdf)
+            METHOD="tsdf"
             ;;
         open3d)
             METHOD="open3d"
@@ -37,8 +53,9 @@ done
 
 if [ ${#POSITIONAL_ARGS[@]} -lt 1 ]; then
     echo "=========================================================="
-    echo " 사용법: $0 DB_NAME [OUTPUT_MESH_NAME] [--view] [--force] [--method open3d|rtabmap]"
-    echo " 예시  : $0 my_room_db.db my_room_mesh.obj --view"
+    echo " 사용법: $0 DB_NAME [OUTPUT_MESH_NAME] [--view] [--force] [--method open3d|rtabmap|tsdf] [--depth=8] [--voxel=0.01] [--recon-method=poisson|bpa]"
+    echo " 예시  : $0 my_room_db.db my_room_mesh.obj --view --depth=9"
+    echo " 예시  : $0 my_room_db.db my_room_tsdf.obj --method=tsdf --voxel=0.01"
     echo "=========================================================="
     exit 1
 fi
@@ -79,6 +96,15 @@ if [ "$METHOD" == "rtabmap" ]; then
     echo "2️⃣ RTAB-Map 자체 텍스처 Mesh 추출 실행..."
     rtabmap-export --mesh --texture --output "$MESH_PATH" "$DB_FILE"
     echo "✅ RTAB-Map Mesh 추출 완료: $MESH_PATH"
+elif [ "$METHOD" == "tsdf" ]; then
+    echo "1️⃣ DB 검증 실행..."
+    python3 "$PROJECT_DIR/src/auto_mobility/utils/validate.py" --db "$DB_FILE" || true
+    echo "2️⃣ Open3D Tensor TSDF 재구성 실행 (원본 RGB-D + 최적화 pose 적분)..."
+    # TSDF 전용: --depth(Poisson octree)는 무시, --voxel만 전달
+    TSDF_ARGS="$VOXEL_ARG"
+    # shellcheck disable=SC2086
+    python3 "$PROJECT_DIR/src/auto_mobility/mesh/reconstruct_tsdf.py" "$DB_FILE" "$MESH_PATH" $VIEW_FLAG $TSDF_ARGS
+    echo "✅ TSDF Mesh 추출 완료: $MESH_PATH"
 else
     echo "1️⃣ DB에서 Point Cloud (.ply) 추출 중..."
     "$PIPELINE_DIR/../utils/export_ply.sh" "$(basename "$DB_FILE")" "${BASE_NAME}_cloud.ply"
@@ -98,6 +124,6 @@ else
     fi
 
     echo ""
-    echo "2️⃣ Open3D 기반 3D Mesh 복원 및 정제 중..."
-    python3 "$PROJECT_DIR/src/auto_mobility/mesh/mesh_open3d.py" "$PLY_PATH" "$MESH_PATH" $VIEW_FLAG
+    echo "2️⃣ Open3D 기반 3D Mesh 고속 복원 및 정제 중..."
+    python3 "$PROJECT_DIR/src/auto_mobility/mesh/mesh_open3d.py" "$PLY_PATH" "$MESH_PATH" $VIEW_FLAG $DEPTH_ARG $VOXEL_ARG $RECON_METHOD_ARG
 fi

@@ -10,6 +10,19 @@ import time
 import subprocess
 import threading
 
+# repo 소스 실행 / 설치 실행 양쪽에서 auto_mobility 패키지 임포트 보장
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+from auto_mobility.config import (
+    CAMERA_RGB_TOPIC,
+    CAMERA_RGB_COMPRESSED_TOPIC,
+    CAMERA_DEPTH_TOPIC,
+    CAMERA_ALIGNED_DEPTH_TOPIC,
+    CAMERA_ALIGNED_DEPTH_COMPRESSED_TOPIC,
+    CAMERA_INFO_TOPIC,
+    CAMERA_IMU_TOPIC,
+)
+
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
 RED = "\033[91m"
@@ -74,62 +87,62 @@ def inspect_topics_rclpy():
     node = Node("system_inspector_node")
 
     topic_stats = {
-        "/camera/camera/color/image_raw": {"count": 0, "res": "N/A", "encoding": "N/A", "frame_id": "N/A", "qos": "SENSOR_DATA"},
-        "/camera/camera/color/image_raw/compressed": {"count": 0, "res": "N/A", "encoding": "jpeg", "frame_id": "N/A", "qos": "SENSOR_DATA"},
-        "/camera/camera/depth/image_rect_raw": {"count": 0, "res": "N/A", "encoding": "N/A", "frame_id": "N/A", "qos": "SENSOR_DATA"},
-        "/camera/camera/aligned_depth_to_color/image_raw": {"count": 0, "res": "N/A", "encoding": "N/A", "frame_id": "N/A", "qos": "SENSOR_DATA"},
-        "/camera/camera/aligned_depth_to_color/image_raw/compressedDepth": {"count": 0, "res": "N/A", "encoding": "compressedDepth (png)", "frame_id": "N/A", "qos": "SENSOR_DATA"},
-        "/camera/camera/color/camera_info": {"count": 0, "res": "N/A", "encoding": "N/A", "frame_id": "N/A", "qos": "SENSOR_DATA"},
-        "/camera/camera/imu": {"count": 0, "res": "N/A", "encoding": "N/A", "frame_id": "N/A", "qos": "SENSOR_DATA"},
+        CAMERA_RGB_TOPIC: {"count": 0, "res": "N/A", "encoding": "N/A", "frame_id": "N/A", "qos": "SENSOR_DATA"},
+        CAMERA_RGB_COMPRESSED_TOPIC: {"count": 0, "res": "N/A", "encoding": "jpeg", "frame_id": "N/A", "qos": "SENSOR_DATA"},
+        CAMERA_DEPTH_TOPIC: {"count": 0, "res": "N/A", "encoding": "N/A", "frame_id": "N/A", "qos": "SENSOR_DATA"},
+        CAMERA_ALIGNED_DEPTH_TOPIC: {"count": 0, "res": "N/A", "encoding": "N/A", "frame_id": "N/A", "qos": "SENSOR_DATA"},
+        CAMERA_ALIGNED_DEPTH_COMPRESSED_TOPIC: {"count": 0, "res": "N/A", "encoding": "compressedDepth (png)", "frame_id": "N/A", "qos": "SENSOR_DATA"},
+        CAMERA_INFO_TOPIC: {"count": 0, "res": "N/A", "encoding": "N/A", "frame_id": "N/A", "qos": "SENSOR_DATA"},
+        CAMERA_IMU_TOPIC: {"count": 0, "res": "N/A", "encoding": "N/A", "frame_id": "N/A", "qos": "SENSOR_DATA"},
     }
 
     def cb_color(msg):
-        t = topic_stats["/camera/camera/color/image_raw"]
+        t = topic_stats[CAMERA_RGB_TOPIC]
         t["count"] += 1
         t["res"] = f"{msg.width}x{msg.height}"
         t["encoding"] = msg.encoding
         t["frame_id"] = msg.header.frame_id
 
     def cb_color_comp(msg):
-        t = topic_stats["/camera/camera/color/image_raw/compressed"]
+        t = topic_stats[CAMERA_RGB_COMPRESSED_TOPIC]
         t["count"] += 1
         t["format"] = msg.format
 
     def cb_depth_raw(msg):
-        t = topic_stats["/camera/camera/depth/image_rect_raw"]
+        t = topic_stats[CAMERA_DEPTH_TOPIC]
         t["count"] += 1
         t["res"] = f"{msg.width}x{msg.height}"
         t["encoding"] = msg.encoding
         t["frame_id"] = msg.header.frame_id
 
     def cb_depth(msg):
-        t = topic_stats["/camera/camera/aligned_depth_to_color/image_raw"]
+        t = topic_stats[CAMERA_ALIGNED_DEPTH_TOPIC]
         t["count"] += 1
         t["res"] = f"{msg.width}x{msg.height}"
         t["encoding"] = msg.encoding
         t["frame_id"] = msg.header.frame_id
 
     def cb_depth_comp(msg):
-        t = topic_stats["/camera/camera/aligned_depth_to_color/image_raw/compressedDepth"]
+        t = topic_stats[CAMERA_ALIGNED_DEPTH_COMPRESSED_TOPIC]
         t["count"] += 1
         t["format"] = msg.format
 
     def cb_info(msg):
-        t = topic_stats["/camera/camera/color/camera_info"]
+        t = topic_stats[CAMERA_INFO_TOPIC]
         t["count"] += 1
         t["res"] = f"{msg.width}x{msg.height}"
 
     def cb_imu(msg):
-        t = topic_stats["/camera/camera/imu"]
+        t = topic_stats[CAMERA_IMU_TOPIC]
         t["count"] += 1
 
-    node.create_subscription(Image, "/camera/camera/color/image_raw", cb_color, qos_profile_sensor_data)
-    node.create_subscription(CompressedImage, "/camera/camera/color/image_raw/compressed", cb_color_comp, qos_profile_sensor_data)
-    node.create_subscription(Image, "/camera/camera/depth/image_rect_raw", cb_depth_raw, qos_profile_sensor_data)
-    node.create_subscription(Image, "/camera/camera/aligned_depth_to_color/image_raw", cb_depth, qos_profile_sensor_data)
-    node.create_subscription(CompressedImage, "/camera/camera/aligned_depth_to_color/image_raw/compressedDepth", cb_depth_comp, qos_profile_sensor_data)
-    node.create_subscription(CameraInfo, "/camera/camera/color/camera_info", cb_info, qos_profile_sensor_data)
-    node.create_subscription(Imu, "/camera/camera/imu", cb_imu, qos_profile_sensor_data)
+    node.create_subscription(Image, CAMERA_RGB_TOPIC, cb_color, qos_profile_sensor_data)
+    node.create_subscription(CompressedImage, CAMERA_RGB_COMPRESSED_TOPIC, cb_color_comp, qos_profile_sensor_data)
+    node.create_subscription(Image, CAMERA_DEPTH_TOPIC, cb_depth_raw, qos_profile_sensor_data)
+    node.create_subscription(Image, CAMERA_ALIGNED_DEPTH_TOPIC, cb_depth, qos_profile_sensor_data)
+    node.create_subscription(CompressedImage, CAMERA_ALIGNED_DEPTH_COMPRESSED_TOPIC, cb_depth_comp, qos_profile_sensor_data)
+    node.create_subscription(CameraInfo, CAMERA_INFO_TOPIC, cb_info, qos_profile_sensor_data)
+    node.create_subscription(Imu, CAMERA_IMU_TOPIC, cb_imu, qos_profile_sensor_data)
 
     duration = 3.0
     start_time = time.time()

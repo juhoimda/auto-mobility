@@ -57,16 +57,16 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# 3. 녹화 토픽 설정 (동적 Depth 토픽 감지)
+# 3. 녹화 토픽 설정 (동적 Depth 토픽 감지, 토픽명은 common.sh/config 단일 소스)
 DETECTED_DEPTH=""
 DETECTED_DEPTH_COMPRESSED=""
 
-if ros2 topic list | grep -qx "/camera/camera/depth/image_rect_raw"; then
-    DETECTED_DEPTH="/camera/camera/depth/image_rect_raw"
-    DETECTED_DEPTH_COMPRESSED="/camera/camera/depth/image_rect_raw/compressedDepth"
-elif ros2 topic list | grep -qx "/camera/camera/aligned_depth_to_color/image_raw"; then
-    DETECTED_DEPTH="/camera/camera/aligned_depth_to_color/image_raw"
-    DETECTED_DEPTH_COMPRESSED="/camera/camera/aligned_depth_to_color/image_raw/compressedDepth"
+if ros2 topic list | grep -qx "$DEPTH_TOPIC"; then
+    DETECTED_DEPTH="$DEPTH_TOPIC"
+    DETECTED_DEPTH_COMPRESSED="$DEPTH_COMPRESSED_TOPIC"
+elif ros2 topic list | grep -qx "$ALIGNED_DEPTH_TOPIC"; then
+    DETECTED_DEPTH="$ALIGNED_DEPTH_TOPIC"
+    DETECTED_DEPTH_COMPRESSED="$ALIGNED_DEPTH_COMPRESSED_TOPIC"
 else
     DETECTED_DEPTH="$DEPTH_TOPIC"
     DETECTED_DEPTH_COMPRESSED="$DEPTH_COMPRESSED_TOPIC"

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastrtps_profiles">
+    <!-- 원격(Windows) 카메라용 프로파일 (2026-08-14 추가)
+         - SHM 제거: 이 환경에서 "SHM Transport is not supported in the current platform"
+           오류로 노드 생성이 불안정해짐. 원격 통신은 어차피 UDP 이므로 SHM 불필요.
+         - UDPv4 소켓 버퍼 확장 + non-blocking send -->
+    <transport_descriptors>
+        <transport_descriptor>
+            <transport_id>udpv4_transport</transport_id>
+            <type>UDPv4</type>
+            <sendBufferSize>10485760</sendBufferSize>
+            <receiveBufferSize>10485760</receiveBufferSize>
+            <non_blocking_send>true</non_blocking_send>
+        </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="auto_mobility_remote_profile" is_default_profile="true">
+        <rtps>
+            <useBuiltinTransports>false</useBuiltinTransports>
+            <userTransports>
+                <transport_id>udpv4_transport</transport_id>
+            </userTransports>
+        </rtps>
+    </participant>
+</profiles>

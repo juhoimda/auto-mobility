@@ -14,6 +14,17 @@ import argparse
 import signal
 from datetime import datetime
 
+# repo 소스 실행 / 설치 실행 양쪽에서 auto_mobility 패키지 임포트 보장
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+from auto_mobility.config import (
+    LOG_DIR,
+    CONFIG_DIR,
+    FASTDDS_XML,
+    CAMERA_RGB_TOPIC,
+    CAMERA_RGB_COMPRESSED_TOPIC,
+)
+
 # Standard colors for terminal output
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
@@ -21,10 +32,6 @@ RED = "\033[91m"
 CYAN = "\033[96m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
-
-PROJECT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-CONFIG_DIR = os.path.join(PROJECT_DIR, "config")
-LOG_DIR = os.path.join(PROJECT_DIR, "ros2_data", "logs")
 
 def check_system_environment():
     """Checks USB connection, network buffer, and available RMWs."""
@@ -109,7 +116,7 @@ def run_single_test(rmw, use_shm, res_w, res_h, fps, qos, is_compressed, sample_
     shm_status = "Default"
     if rmw == "rmw_fastrtps_cpp":
         if use_shm:
-            fastdds_xml = os.path.join(CONFIG_DIR, "fastdds_camera.xml")
+            fastdds_xml = str(FASTDDS_XML)
             if os.path.exists(fastdds_xml):
                 env["FASTRTPS_DEFAULT_PROFILES_FILE"] = fastdds_xml
                 shm_status = "SHM 활성화"
@@ -145,7 +152,7 @@ def run_single_test(rmw, use_shm, res_w, res_h, fps, qos, is_compressed, sample_
     
     time.sleep(3.5)
     
-    target_topic = "/camera/camera/color/image_raw/compressed" if is_compressed else "/camera/camera/color/image_raw"
+    target_topic = CAMERA_RGB_COMPRESSED_TOPIC if is_compressed else CAMERA_RGB_TOPIC
     measured_fps, cpu_pct = measure_topic_hz_and_cpu(target_topic, duration=sample_duration, env=env)
     
     try:

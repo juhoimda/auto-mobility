@@ -1,0 +1,26 @@
+# ============================================================
+# Auto-Mobility (WSL 마이그레이션용) Python 의존성
+# ------------------------------------------------------------
+# ROS2 Humble 관련 패키지(rclpy, cv_bridge, sensor_msgs,
+# launch, launch_ros, ament_index_python, rosbag2 등)와
+# OpenCV(cv2)는 pip 가 아닌 apt 로 설치하므로 여기에 포함하지 않는다.
+#
+#   sudo apt install ros-humble-{realsense2-camera,rtabmap-ros,
+#     rtabmap-launch,image-transport,compressed-image-transport,
+#     compressed-depth-image-transport,rviz2,rosbag2,
+#     imu-filter-madgwick} python3-opencv
+# ============================================================
+
+# mesh_open3d.py / view_mesh.py / validate.py 에서 직접 사용
+open3d==0.19.0
+numpy==1.26.4
+
+# mesh_open3d.py: Point Cloud -> Mesh 컬러 전송 (cKDTree nearest-neighbor)
+scipy==1.8.0
+
+# config.py / common.sh: config/topics.yaml 로드
+PyYAML==5.4.1
+
+# ---- 테스트 실행 (scripts/utils/run_tests.sh) ----
+pytest==6.2.5
+coverage==6.2

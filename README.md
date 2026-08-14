@@ -1,165 +1,99 @@
-# 📐 Auto-Mobility System Architecture & Technical Specifications
+# 📐 Auto-Mobility
 
-본 문서는 RealSense D435i 센서 기반 **Visual-Inertial 3D SLAM 및 Digital Twin 파이프라인의 데이터 흐름, 시스템 아키텍처, 주요 설정 사양**을 설명하는 기술 명세서입니다.
+RealSense D435i 기반 **Real-to-Sim 파이프라인** — 실제 공간을 촬영해 3D 메시로 복원하고, Isaac Sim에서 디지털 트윈으로 검증합니다.
 
----
-
-## 0. 프로젝트 계획 일정표
-
-<img width="750" height="464" alt="KakaoTalk_Photo_2026-08-06-16-40-10" src="https://github.com/user-attachments/assets/e75bd310-3f85-40ba-ba1c-35e2d385177f" />
-
-
----
-
-## 🏗️ 1. 전체 시스템 아키텍처 (System Architecture)
-
-전체 시스템은 **센서 수집 & IMU 필터링 ➔ DDS 압축 통신 ➔ 실시간 융합 SLAM ➔ 3D Mesh 변환** 파이프라인으로 구성되어 있습니다.
-
-```mermaid
-graph LR
-
-    subgraph S["1. Sensor Hardware (RealSense D435i)"]
-        A["RealSense D435i"]
-        A --> B["RGB (640x480@30fps)"]
-        A --> C["Depth (640x480@30fps)"]
-        A --> D["IMU (Accel+Gyro ~200Hz)"]
-        A --> E["Camera Info"]
-    end
-
-    subgraph C1["2. Camera Driver & Filter Nodes"]
-        B --> F["RGB image_raw"]
-        C --> G["Depth image_rect_raw"]
-        D --> H["/camera/camera/imu"]
-        E --> I["Camera Info"]
-
-        H --> IMU_F["imu_filter_madgwick"]
-        IMU_F --> H2["/camera/camera/imu/filtered"]
-
-        B --> F2["RGB compressed"]
-        C --> G2["Depth compressedDepth"]
-    end
-
-    subgraph P1["Option 1 : Online VI-SLAM"]
-        F --> J["RTAB-Map Graph SLAM"]
-        G --> J
-        H2 --> J
-        I --> J
-    end
-
-    subgraph P2["Option 2 : Offline Bag SLAM"]
-        F2 --> K["ROS2 Bag (MCAP)"]
-        G2 --> K
-        H --> K
-        I --> K
-
-        K --> L["Playback"]
-        L --> M["Image Decompression"]
-        M --> N["RTAB-Map Graph SLAM"]
-    end
-
-    subgraph R["Mapping & 3D Reconstruction"]
-        J --> X["Visual-Inertial Odometry (/rtabmap/odom)"]
-        N --> X
-
-        J --> Y["RTAB-Map Database (.db)"]
-        N --> Y
-
-        Y --> Z["Dense Point Cloud (.ply)"]
-        Z --> O["Open3D Poisson Reconstruction"]
-        O --> P["Digital Twin Mesh (.obj)"]
-    end
+```
+RealSense D435i ──▶ RTAB-Map SLAM ──▶ Point Cloud(.ply) ──▶ Mesh(.obj) ──▶ Isaac Sim
+(RGB+Depth+IMU)      (실시간 맵핑)      (풀해상도 추출)      (Poisson 복원)   (디지털 트윈)
 ```
 
 ---
 
-## 📁 2. 프로젝트 디렉터리 구조 (Directory Structure)
+## 🚀 Quick Start
+
+```bash
+# 1. 전체 파이프라인 실행 (촬영 → Mesh → Isaac Sim 검증)
+./scripts/pipeline/run_pipeline_all.sh
+
+# 2. Mesh 변환까지만 (Isaac Sim 생략) — 권장
+./scripts/pipeline/run_pipeline_all.sh --skip-isaac
+
+# 3. 기존 DB로 Mesh만 재생성
+./scripts/pipeline/run_pipeline_all.sh --db=my_room.db --skip-capture --skip-isaac
+```
+
+자세한 실행 방법: **[docs/guide.md](docs/guide.md)**
+
+---
+
+## 🏗️ 시스템 구성
+
+| 구성요소 | 역할 |
+| :--- | :--- |
+| **RealSense D435i** | RGB(640x480@30) + Depth(Z16) + IMU(200Hz) |
+| **RTAB-Map** | 실시간 Visual-Inertial SLAM → 공간 DB(.db) 생성 |
+| **Open3D** | DB에서 풀해상도 Point Cloud(.ply) 추출 후 Poisson Mesh 복원 |
+| **Isaac Sim** | 생성된 Mesh(.obj)의 물리 충돌 검증 |
+
+### 디렉터리 구조
 
 ```
-auto-mobility/                         # [패키지 루트]
-├── CMakeLists.txt                      # ROS2 CMake 빌드 파일
-├── package.xml                         # ROS2 패키지 매니페스트
-├── README.md                           # 시스템 아키텍처 및 설정 명세서
-│
-├── src/                                # 🟢 ROS 2 정석 소스 디렉터리
-│   └── auto_mobility/                  # Python 패키지 모듈 (도메인별 분리)
-│       ├── config.py                   # topics.yaml 파싱 & 설정 로더
-│       ├── launch/                     # Launch 공통 헬퍼 & RTABMAP_ARGS
-│       │   └── launch_common.py
-│       ├── nodes/                      # ROS2 파이썬 노드 모듈
-│       │   └── republish.py            # 압축 해제 재발행 노드
-│       ├── mesh/                       # 3D Mesh 생성 및 뷰어 (mesh_open3d, view_mesh)
-│       ├── isaac/                      # Isaac Sim 디지털 트윈 로더 (load_isaac_mesh)
-│       ├── slam/                       # Visual SLAM 평가 및 벤치마크 (benchmark_slam)
-│       └── utils/                      # 데이터 검증 & HW 진단 (validate, inspect_system, benchmark_hw)
-│
-├── scripts/                            # 🟡 CLI 실행 도구 (Shell Scripts)
-│   ├── common.sh                       # 공통 환경설정 및 PYTHONPATH 정의
-│   ├── pipeline/                       # 핵심 실행 파이프라인 (run_live, run_bag, record, play, mesh, isaac)
-│   └── utils/                          # 유틸리티 도구 (check, export_ply, view_mesh, run_tests)
-│
-├── config/                             # 🔵 FastDDS, RViz2 및 센서 토픽 설정 파일
-│   ├── dds/                            # Middleware / FastDDS 공유메모리 프로필 (fastdds_camera.xml)
-│   ├── rviz/                           # RViz2 디스플레이 프로필 (rtabmap_vmware.rviz, digital_twin.rviz)
-│   └── topics.yaml                     # 센서 토픽 & SLAM 프레임 중앙 설정 파일
-├── launch/                             # ROS2 Launch 파일 (camera, rtab_live, rtab_bag)
-├── tests/                              # 🟣 자동화 단위 & 통합 테스트 수트 (unit, integration)
-└── docs/                               # 개발자 파이프라인 운영 가이드 (guide.md)
+auto-mobility/
+├── src/auto_mobility/     # Python 모듈 (config / launch / mesh / slam / utils)
+├── scripts/               # 셸 실행 도구 (pipeline / utils)
+├── config/                # FastDDS / RViz2 / 토픽 설정
+├── launch/                # ROS2 launch 파일 (camera / rtab_live / rtab_bag)
+├── ros2_data/             # 생성 데이터 (databases / pointclouds / meshes / logs)
+└── docs/                  # 가이드 및 벤치마크 보고서
 ```
 
 ---
 
-## ⚙️ 3. 주요 시스템 사양 및 설정 (Technical Specifications)
+## ⚙️ 핵심 설정 요약
 
-### 📸 센서 및 카메라 설정 (`launch/camera.launch.py`)
+> 모든 설정은 **단일 소스**로 관리됩니다. 값을 수정하려면 아래 파일만 수정하면 전체에 적용됩니다.
 
-| 항목 | 설정값 | 상세 설명 |
+### 카메라 — `src/auto_mobility/config.py` (`CAMERA_PARAMS`)
+| 설정 | 값 | 비고 |
 | :--- | :--- | :--- |
-| **카메라 모델** | Intel RealSense D435i | RGB-D + IMU (가속도계 + 자이로스코프) |
-| **RGB 해상도 & FPS** | `640x480` @ **30 FPS** | RGB8 포맷, RTAB-Map SLAM 특징점 추적 최적 해상도 |
-| **Depth 해상도 & FPS** | `640x480` @ **30 FPS** | Z16 비손실 깊이 스트림 |
-| **IMU 센서 스트림** | `enable_accel: True`, `enable_gyro: True` | Accel(100Hz) + Gyro(200Hz) 모션 모듈 활성화 |
-| **IMU 통합 방식** | `unite_imu_method: 1` | Accel/Gyro 데이터를 단일 `/camera/camera/imu` 토픽(~200Hz)으로 통합 |
-| **노출 고정** | `auto_exposure_priority: False` | 저조도 환경에서 프레임 레이트(FPS) 폭락 방지 |
+| 해상도 / FPS | `640x480@30` | 848x480은 VM에서 depth 드랍 |
+| IR 에미터 | `emitter_enabled: 1` | 무벽면 특징점 확보 |
+| Depth 필터 | `spatial + temporal + hole_filling` | 노이즈 제거 |
+
+### SLAM — `src/auto_mobility/launch/launch_common.py` (`RTABMAP_PARAMS`)
+| 설정 | 값 | 비고 |
+| :--- | :--- | :--- |
+| 포즈 추정 | `Vis/EstimationType 1` (PnP) | 벤치마크 1위 |
+| 특징점 | `Vis/MaxFeatures 2000` | ★ 2026-08-12: 회전 시 키프레임 중첩 확보 |
+| 특징점 품질 | `GFTT/QualityLevel 0.005` | ★ 2026-08-12: blur/회전 프레임 특징점 0개 방지 |
+| 로컬 맵 크기 | `OdomF2M/MaxSize 1000` | **★ 벤치 1위** — 기본 2000은 odom 17Hz 급락 |
+| 키프레임 간격 | `RGBD/LinearUpdate 0.10` | 10cm 마다 |
+| 루프클로저 | `OptimizeFromGraphEnd/NeighborLinkRefining/ProximityBySpace false` | ★ 2026-08-12: 루프클로저 보정 활성화, 맵 스레드 스톨 방지 |
+| 맵핑 주기 | `Rtabmap/DetectionRate 3` | ★ 2026-08-12: 맵 스레드 부하 40% 감소 |
+| Point Cloud 밀도 | `Grid/DepthDecimation 4` | 라이브 맵 경량 (최종 메쉬는 offline TSDF) |
+
+### Mesh — `scripts/utils/export_ply.sh` + `src/auto_mobility/mesh/mesh_open3d.py`
+| 단계 | 값 | 비고 |
+| :--- | :--- | :--- |
+| PLY 추출 | `--decimation 1 --max_range 5` | **풀해상도** — 기본 4는 1/16 밀도 |
+| 복원 | Poisson `--depth 8` | 폐곡면 보완 |
+| 해상도 | `--voxel 0.005` | 5mm |
+| 경량화 | `simplify 0.5` | Isaac Sim 로딩 성능 확보 |
 
 ---
 
-### 📡 ROS 2 토픽 및 파이프라인 명세 (`config/topics.yaml`)
+## ✨ 특징
 
-| 토픽 분류 | 토픽 이름 | 데이터 타입 | 비고 / 주파수 |
-| :--- | :--- | :--- | :--- |
-| **Raw RGB** | `/camera/camera/color/image_raw` | `sensor_msgs/msg/Image` | RGB8, **30 Hz** |
-| **Raw Depth** | `/camera/camera/depth/image_rect_raw` | `sensor_msgs/msg/Image` | Z16 16UC1, **30 Hz** |
-| **Raw IMU** | `/camera/camera/imu` | `sensor_msgs/msg/Imu` | Accel+Gyro 통합, **200.4 Hz** |
-| **Filtered IMU** | `/camera/camera/imu/filtered` | `sensor_msgs/msg/Imu` | Madgwick 필터 Orientation 포함, **200.0 Hz** |
-| **Camera Info** | `/camera/camera/color/camera_info` | `sensor_msgs/msg/CameraInfo` | 렌즈 내부 캘리브레이션 정보 |
-| **Visual-Inertial Odom**| `/rtabmap/odom` | `nav_msgs/msg/Odometry` | IMU 융합 visual odometry, **~5 Hz** |
+1. **IMU 융합 Visual SLAM** — D435i IMU(200Hz)를 Madgwick 필터로 처리해 맵 수평 유지 및 추적 안정화
+2. **WSL2 최적화** — FastDDS SHM + CUDA(Open3D) 활용, 640x480에서 안정적인 30FPS 확보
+3. **자동 품질 검증** — DB → Point Cloud → Mesh 3단계 무결성 검사 + 촬영 품질 모니터링(`capture_guard`)
 
 ---
 
-### 🗺️ 3D Visual-Inertial SLAM 파라미터 최적화 (`src/auto_mobility/launch/launch_common.py`)
+## 📚 문서
 
-> **단일 소스 관리**: `rtab_live` / `rtab_bag` launch는 `RTABMAP_ARGS`를 공유합니다. 튜닝은 `src/auto_mobility/launch/launch_common.py` 한 곳에서만 관리됩니다.
-
-* **IMU 중력 가속도 수평 정렬 (`Optimizer/GravityProvided true`)**:
-  * Madgwick 필터의 IMU 자세 추정치를 사용해 3D 포인트 클라우드 맵의 수평을 자동 유지(Pitch/Roll 드리프트 차단).
-* **IMU 자세 초기 추정치 활용 (`Odom/PoseGuessMode 1`)**:
-  * 급격한 카메라 회전이나 흰 벽 등 텍스처 부재 구간 통과 시 IMU 자세를 초기 Guess로 활용해 추적 손실(Odometry Lost)을 예방.
-* **시간 동기화 허용 오차 (`approx_sync_max_interval`)**: `0.15` (150ms)
-  * 센서 간 타임스탬프 미세 오차 수용.
-* **특징점 검출 및 추적 안정화** (`Vis/MaxFeatures 1500`, `Vis/MinInliers 8`, `Vis/CornerMinQuality 0.01`, `Vis/CornerGridSize 30`)
-  * 특징점 탐색 품질을 고도화하여 오도메트리 추적 유지력 증대.
-* **병렬 검출 멀티스레딩** (`Vis/CornerNbThreads 8`, `OdomF2M/MaxFrames 5`)
-  * 특징점 검출을 VM vCPU 수(8)로 병렬화하고 로컬 맵 버퍼를 관리하여 실시간성 확보.
-* **CPU 분산 및 키프레임 전략** (`Rtabmap/DetectionRate 5`, `RGBD/LinearUpdate 0.2`, `RGBD/AngularUpdate 0.2`)
-  * 맵핑 루프를 5Hz로 제어해 odometry 컴퓨팅 자원을 확보하고 불필요한 키프레임 낭비 방지.
-
----
-
-## ✨ 4. 파이프라인의 핵심 차별점
-
-1. **하드웨어 기반 IMU + Visual SLAM 센서 융합**:
-   * RealSense D435i 물리 Motion Module(200Hz) 데이터를 `imu_filter_madgwick`으로 처리하여 지도의 중력 수평축 및 추적 초기값으로 직접 활용.
-2. **VMware 가상화 맞춤 대역폭 & 멀티스레딩 설계**:
-   * FastDDS Shared Memory(SHM) 및 vCPU 8 스레드 병렬화를 적용하여 80% 이상의 CPU 효율과 안정적인 30 FPS 카메라 수집 달성.
-3. **Open3D 기반 Digital Twin 3D Mesh 복원**:
-   * RTAB-Map spatial DB(`.db`)의 Point Cloud에서 Poisson Surface Reconstruction과 품질 검증 장치를 거쳐 Digital Twin 3D 모델(`.obj`)을 자동 복원.
+| 문서 | 내용 |
+| :--- | :--- |
+| [docs/guide.md](docs/guide.md) | 실행 명령어 및 단계별 사용법 |
+| [docs/cur-setting.md](docs/cur-setting.md) | 현재 적용된 설정 상세 명세 |
+| [docs/benchmark.md](docs/benchmark.md) | 하드웨어 실측 벤치마크 보고서 |

@@ -1,0 +1,236 @@
+Panels:
+  - Class: rviz_common/Displays
+    Help Height: 70
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Status1
+        - /PointCloud2 (RTAB-Map Map)1
+        - /PointCloud2 (Live Frame)1
+        - /Odometry1
+        - /Map Path1
+        - /TF1
+      Splitter Ratio: 0.5
+    Tree Height: 70
+  - Class: rviz_common/Selection
+    Name: Selection
+  - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
+    Name: Views
+    Splitter Ratio: 0.5
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: RGB8
+      Decay Time: 0
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: PointCloud2 (RTAB-Map Map)
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.012
+      Style: Flat Squares
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 0
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /rtabmap/cloud_map
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: true
+    - Alpha: 0.8
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: RGB8
+      Decay Time: 0
+      Enabled: false
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: PointCloud2 (Live Frame)
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.01
+      Style: Points
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /rtabmap/voxel_cloud
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: true
+    - Alpha: 1
+      Angle Tolerance: 0.1
+      Class: rviz_default_plugins/Odometry
+      Color: 57; 255; 20
+      Covariance:
+        Orientation:
+          Alpha: 0.5
+          Color: 255; 255; 127
+          Value: false
+        Position:
+          Alpha: 0.3
+          Color: 204; 51; 204
+          Value: false
+        Value: false
+      Enabled: false
+      Head Diameter: 0.04
+      Head Length: 0.1
+      Keep: 100
+      Length: 0.3
+      Name: Odometry
+      Position Tolerance: 0.1
+      Radius: 0.03
+      Shaft Diameter: 0.04
+      Shaft Length: 0.1
+      Shape:
+        Alpha: 1
+        Axes Length: 0.2
+        Axes Radius: 0.01
+        Color: 57; 255; 20
+        Head Length: 0.05
+        Head Radius: 0.02
+        Shaft Length: 0.15
+        Shaft Radius: 0.01
+        Value: Arrow
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /rtabmap/odom
+      Value: true
+    - Alpha: 1
+      Buffer Length: 1000
+      Class: rviz_default_plugins/Path
+      Color: 0; 255; 0
+      Enabled: false
+      Head Diameter: 0.04
+      Head Length: 0.1
+      Length: 0.3
+      Line Style: Lines
+      Line Width: 0.03
+      Name: Map Path
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Style: None
+      Radius: 0.03
+      Shaft Diameter: 0.04
+      Shaft Length: 0.1
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /rtabmap/mapPath
+      Value: false
+    - Class: rviz_default_plugins/TF
+      Enabled: false
+      Frame Timeout: 15
+      Frames:
+        All Enabled: false
+        camera_link:
+          Value: false
+        camera_color_optical_frame:
+          Value: true
+        camera_depth_optical_frame:
+          Value: false
+        map:
+          Value: false
+        odom:
+          Value: false
+      Marker Scale: 0.3
+      Name: TF
+      Show Arrows: false
+      Show Axes: true
+      Show Names: false
+      Update Interval: 0
+      Value: false
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 3.33
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.06
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.01
+      Pitch: 0.035
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz)
+      Yaw: 3.07
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 934
+  Hide Left Dock: false
+  Hide Right Dock: false
+  QMainWindow State: 000000ff00000000fd00000001000000000000024600000350fc0200000004fb000000100044006900730070006c00610079007301000001bc000000c7000000c700fffffffb0000001200530065006c0065006300740069006f006e01000002890000005c0000005c00fffffffb0000000a0056006900650077007301000002eb000000a0000000a000ffffff000004ec0000035000000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Selection:
+    collapsed: false
+  Views:
+    collapsed: false
+  Width: 1848
+  X: 70
+  Y: 27
