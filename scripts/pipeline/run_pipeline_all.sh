@@ -39,7 +39,7 @@ while [[ $# -gt 0 ]]; do
             echo " 예시  : $0 (실시간 캡처부터 Mesh(TSDF) 및 Isaac Sim 검증까지 전체 실행)"
             echo " 예시  : $0 --db=my_room.db --skip-capture (기존 DB로 TSDF Mesh 및 Isaac Sim 실행)"
             echo " 예시  : $0 --skip-isaac (촬영 후 TSDF Mesh만 생성, 시뮬레이션 제외)"
-            echo " 예시  : $0 --remote-camera (Windows 네이티브 카메라 토픽 수신, 압축 토픽 기본 사용)"
+            echo " 예시  : $0 --remote-camera (Windows 카메라 자동 실행 + 압축 토픽 수신, 종료 시 정리)"
             echo " 💡 Mesh 재구성은 TSDF가 기본(원본 RGB-D + pose → Open3D Tensor TSDF, GPU)"
             echo "    Poisson(PLY) 기반 복원을 원하면 scripts/pipeline/mesh.sh 를 직접 사용"
             echo "=========================================================="
@@ -52,10 +52,103 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# 원격 카메라 모드: WSL에선 드라이버 미구동, 압축 토픽 수신이 기본
+# 원격 카메라 모드: 압축 토픽(JPEG/PNG) 수신 후 WSL에서 초고속 디코딩(republish.py)하여 RTAB-Map 공급 (30fps)
 if [ "$CAMERA_MODE" = "remote" ]; then
-    USE_COMPRESSED="${USE_COMPRESSED:-true}"
+    USE_COMPRESSED=true
 fi
+
+# ---------------------------------------------------------
+# Windows 원격 카메라 자동 실행/종료 헬퍼 (2026-08-14 갱신)
+#   - 실행 방식 자동 감지: WSL interop(cmd.exe) 우선, 불가 시 "신호파일 + Windows watcher" 폴백
+#     (이 환경은 interop 이 EINVAL 로 깨짐 → watcher 방식이 기본 동작 경로)
+#   - 신호파일 방식: WSL이 공유폴더(/mnt/c/ubuntu_shared/camera_request.txt)에 신호를 쓰면
+#     Windows의 camera_guard.ps1 이 감지해 run_camera.bat 을 구동/종료. interop/SSH 불필요.
+#   - 카메라 로그: watcher 가 C:\ubuntu_shared\camera_windows.log 에 기록 → WSL이 요약 출력
+# ---------------------------------------------------------
+WINDOWS_CAM_LOG=""
+WINDOWS_CAM_PID=""
+WIN_LAUNCH_MODE=""
+# 신호파일 방식 경로 (Windows watcher 와 공유)
+WIN_SIGNAL_FILE="$SHARED_DIR/camera_request.txt"
+WIN_CAM_LOG_SHARED="$SHARED_DIR/camera_windows.log"
+
+detect_windows_launcher() {
+    if cmd.exe /c ver >/dev/null 2>&1; then
+        WIN_LAUNCH_MODE="interop"
+        echo "🔌 Windows 카메라 실행 방식: interop (cmd.exe)"
+    else
+        WIN_LAUNCH_MODE="signal"
+        echo "🔌 Windows 카메라 실행 방식: 신호파일 + watcher (interop 미지원 환경)"
+        echo "   - watcher 확인: Windows 시작폴더의 camera_guard.vbs (자동) / C:\\ros2_humble\\camera_guard.ps1"
+        echo "   - 신호 파일: $WIN_SIGNAL_FILE / 로그: $WIN_CAM_LOG_SHARED"
+    fi
+}
+
+start_windows_camera() {
+    if [ "$CAMERA_MODE" != "remote" ]; then
+        return 0
+    fi
+    if [ -z "$WIN_LAUNCH_MODE" ]; then
+        detect_windows_launcher
+    fi
+    case "$WIN_LAUNCH_MODE" in
+        interop)
+            WINDOWS_CAM_LOG="$LOG_DIR/camera_windows_${DB_NAME%.db}.log"
+            echo "🪟 Windows 카메라 자동 실행 (run_camera.bat) → 로그: $WINDOWS_CAM_LOG"
+            echo "💡 실시간 확인: tail -f \"$WINDOWS_CAM_LOG\""
+            cmd.exe /c "call C:\\ros2_humble\\run_camera.bat" > "$WINDOWS_CAM_LOG" 2>&1 &
+            WINDOWS_CAM_PID=$!
+            ;;
+        signal)
+            WINDOWS_CAM_LOG="$WIN_CAM_LOG_SHARED"
+            echo "🪟 Windows 카메라 시작 신호 전송 → $WIN_SIGNAL_FILE"
+            echo "   (Windows watcher 가 감지해 run_camera.bat 구동, 로그: $WINDOWS_CAM_LOG)"
+            echo "run_camera" > "$WIN_SIGNAL_FILE" 2>/dev/null || {
+                echo "❌ 신호 파일 기록 실패 — /mnt/c/ubuntu_shared 쓰기 권한 확인"
+                exit 1
+            }
+            ;;
+        *)
+            exit 1
+            ;;
+    esac
+    # 토픽 출현 대기 (직접 구독 프로브, 최대 20회)
+    PROBE_TOPIC="$RGB_COMPRESSED_TOPIC"
+    for i in $(seq 1 20); do
+        if python3 "$PROJECT_DIR/scripts/utils/topic_probe.py" "$PROBE_TOPIC" 4 >/dev/null 2>&1; then
+            echo "✅ 카메라 토픽 확인됨 (${i}회 프로브)"
+            return 0
+        fi
+        echo "  ... 카메라 토픽 대기 중 (${i}/20)"
+        sleep 1
+    done
+    echo "❌ [오류] 카메라 토픽이 20초 내 감지되지 않았습니다."
+    if [ "$WIN_LAUNCH_MODE" = "signal" ]; then
+        echo "👉 Windows watcher(camera_guard.ps1) 가 실행 중인지 확인하세요. (시작 폴더 자동실행 / C:\\ros2_humble\\start_camera_guard.vbs)"
+    fi
+    echo "📄 최근 카메라 로그:"
+    tail -n 25 "$WINDOWS_CAM_LOG" 2>/dev/null || true
+    stop_windows_camera
+    exit 1
+}
+
+stop_windows_camera() {
+    case "$WIN_LAUNCH_MODE" in
+        interop)
+            [ -n "$WINDOWS_CAM_PID" ] && kill "$WINDOWS_CAM_PID" 2>/dev/null || true
+            WINDOWS_CAM_PID=""
+            cmd.exe /c "call C:\\ros2_humble\\stop_camera.bat" >/dev/null 2>&1 || true
+            ;;
+        signal)
+            rm -f "$WIN_SIGNAL_FILE" 2>/dev/null || true
+            ;;
+    esac
+}
+
+cleanup() {
+    kill $GUARD_PID 2>/dev/null || true
+    stop_windows_camera
+}
 
 TARGET_DB_PATH="$DB_DIR/$DB_NAME"
 TARGET_PLY_PATH="$POINTCLOUD_DIR/${DB_NAME%.db}_cloud.ply"
@@ -129,20 +222,29 @@ else
     echo ""
     echo "=========================================================="
     echo " 🎥 [STEP 1] RTAB-Map SLAM 실시간 데이터 수집 시작"
-    echo " 💡 촬영을 마치려면 터미널에서 Ctrl+C 를 누르세요."
-    echo " 📊 촬영 품질 모니터링(capture_guard)이 병렬 실행됩니다."
     echo "=========================================================="
-    
-    # 카메라 센서 토픽 발행 여부 사전 체크
-    if ! ros2 topic list | grep -q "$RGB_TOPIC"; then
-        echo "❌ [오류] RealSense 카메라 토픽이 감지되지 않습니다!"
+
+    # 사전 정리 트랩: Ctrl+C/종료 시 신호 파일·Windows 카메라 프로세스 확실히 정리
+    # (기존엔 카메라 시작 후에 트랩을 걸어, 대기 중 Ctrl+C 시 신호 파일이 남는 버그가 있었음)
+    trap "cleanup; exit 130" INT TERM
+    trap "cleanup" EXIT
+
+    # 카메라 토픽 체크: 직접 구독 프로브 사용 (ros2 CLI 데몬이 이 환경에서 hang 하는 문제 회피)
+    PROBE_TOPIC="$RGB_TOPIC"
+    [ "$CAMERA_MODE" = "remote" ] && PROBE_TOPIC="$RGB_COMPRESSED_TOPIC"
+    echo "🔍 카메라 토픽 확인 중: $PROBE_TOPIC ..."
+    if ! python3 "$PROJECT_DIR/scripts/utils/topic_probe.py" "$PROBE_TOPIC" 5 >/dev/null 2>&1; then
         if [ "$CAMERA_MODE" = "remote" ]; then
-            echo "👉 [Windows]에서 카메라 노드(네임스페이스 /camera)와 압축 republish를 먼저 실행해주세요."
+            # Windows 카메라 자동 실행 후 재확인 (실패 시 내부에서 로그 출력 + exit)
+            start_windows_camera
         else
+            echo "❌ [오류] RealSense 카메라 토픽이 감지되지 않습니다!"
             echo "👉 [터미널 1]에서 먼저 카메라를 구동해주세요:"
             echo "   ros2 launch auto_mobility camera.launch.py"
+            exit 1
         fi
-        exit 1
+    else
+        echo "✅ 카메라 토픽 수신 확인됨"
     fi
 
     # 촬영 품질 모니터링 가드를 백그라운드로 기동 (종료 시 .md 보고서 + .json 요약 저장)
@@ -153,25 +255,36 @@ else
         --report "${CAPTURE_GUARD_BASE}.md" \
         --json "${CAPTURE_GUARD_BASE}.json" &
     GUARD_PID=$!
-    trap "kill $GUARD_PID 2>/dev/null || true" EXIT INT TERM
+
+    echo "💡 촬영을 마치려면 터미널에서 Ctrl+C 를 누르세요."
 
     # RTAB-Map Visual SLAM 실시간 데이터 수집 (종료 시 바로 DB 생성)
     RTAB_LIVE_ARGS=("database_path:=$TARGET_DB_PATH")
     if [ "$CAMERA_MODE" = "remote" ]; then
-        # Windows 원격 카메라: 네트워크 대역폭 절감을 위해 압축 토픽을 로컬에서 복원
-        echo "🌐 원격 카메라 모드 → use_compressed:=$USE_COMPRESSED"
+        echo "🌐 원격 카메라 모드 → use_compressed:=$USE_COMPRESSED, publish_camera_tf:=true"
         RTAB_LIVE_ARGS+=("use_compressed:=$USE_COMPRESSED")
     fi
+
+    # ros2 launch 실행 중에는 SIGINT를 launch 노드들이 받아 클린 커밋하도록 함
+    trap "stop_windows_camera" INT TERM
     ros2 launch auto_mobility rtab_live.launch.py "${RTAB_LIVE_ARGS[@]}" || true
 
-    # 촬영 종료 → 모니터 종료 & 보고서 확인
+    # 촬영 종료 → 모니터 & Windows 카메라 정리
     kill $GUARD_PID 2>/dev/null || true
     wait $GUARD_PID 2>/dev/null || true
-    trap - EXIT INT TERM
+    stop_windows_camera
+    trap "cleanup; exit 130" INT TERM
     echo ""
     echo "📄 촬영 품질 보고서: ${CAPTURE_GUARD_BASE}.md"
     if [ -f "${CAPTURE_GUARD_BASE}.md" ]; then
         grep -E "시작|종료|Odom 시계열|평균 CPU" "${CAPTURE_GUARD_BASE}.md" | head -5
+    fi
+
+    # Windows 카메라 로그의 WARN/ERROR 요약 (에러 파악용, 별도 터미널 대체)
+    if [ -n "$WINDOWS_CAM_LOG" ] && [ -f "$WINDOWS_CAM_LOG" ]; then
+        echo ""
+        echo "📋 Windows 카메라 로그 요약 (WARN/ERROR): $WINDOWS_CAM_LOG"
+        grep -iE "WARN|ERROR|fail|drop|unable|cannot" "$WINDOWS_CAM_LOG" | tail -15 || true
     fi
 fi
 

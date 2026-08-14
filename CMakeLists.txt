@@ -40,6 +40,7 @@ install(
     scripts/utils/fix_imu_permissions.sh
     src/auto_mobility/nodes/republish.py
     src/auto_mobility/nodes/cloud_throttle.py
+    src/auto_mobility/nodes/camera_tf_pub.py
     src/auto_mobility/mesh/mesh_open3d.py
     src/auto_mobility/mesh/reconstruct_tsdf.py
     src/auto_mobility/mesh/view_mesh.py

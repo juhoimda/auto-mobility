@@ -36,11 +36,18 @@ class CloudThrottle(Node):
         max_rate = max(1.0, self.get_parameter('max_rate').get_parameter_value().double_value)
 
         self.latest = None
+        from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+        reliable_qos = QoSProfile(
+            depth=5,
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         self.sub = self.create_subscription(
             PointCloud2, in_topic, self.cb, qos_profile_sensor_data
         )
         self.pub = self.create_publisher(
-            PointCloud2, out_topic, qos_profile_sensor_data
+            PointCloud2, out_topic, reliable_qos
         )
         interval = 1.0 / max_rate
         self.timer = self.create_timer(interval, self.publish_latest)
@@ -61,11 +68,18 @@ def main(args=None):
     node = CloudThrottle()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        if rclpy.ok():
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
 
 
 if __name__ == '__main__':

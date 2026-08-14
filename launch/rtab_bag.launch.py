@@ -11,6 +11,8 @@ from auto_mobility.launch.launch_common import (
     get_rtabmap_base_args,
     create_republish_node,
     create_imu_filter_node,
+    create_cloud_throttle_node,
+    create_point_cloud_node,
 )
 from auto_mobility.config import CAMERA_DEPTH_TOPIC, CAMERA_DEPTH_COMPRESSED_TOPIC
 
@@ -53,6 +55,8 @@ def generate_launch_description():
         depth_compressed_topic=LaunchConfiguration('depth_compressed_topic')
     )
     imu_filter_node = create_imu_filter_node(use_sim_time=True)
+    cloud_throttle_node = create_cloud_throttle_node(use_sim_time=True, max_rate=2.0)
+    point_cloud_node = create_point_cloud_node(use_sim_time=True)
 
     rtabmap_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -81,5 +85,7 @@ def generate_launch_description():
         use_imu_arg,
         republish_compressed_node,
         imu_filter_node,
+        cloud_throttle_node,
+        point_cloud_node,
         rtabmap_launch
     ])

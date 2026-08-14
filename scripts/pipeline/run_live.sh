@@ -12,7 +12,8 @@ if [ "$CAMERA_MODE" = "remote" ]; then
     USE_COMPRESSED="${2:-true}"
 else
     # 카메라 드라이버 노드가 실행 중이지 않으면 자동으로 백그라운드 구동
-    if ! ros2 topic list 2>/dev/null | grep -q "$RGB_TOPIC"; then
+    # (직접 구독 프로브 사용 — ros2 CLI 데몬 hang 문제 회피)
+    if ! python3 "$PROJECT_DIR/scripts/utils/topic_probe.py" "$RGB_TOPIC" 5 >/dev/null 2>&1; then
         echo "📷 [자동 구동] RealSense 카메라 노드가 감지되지 않아 camera.launch.py를 백그라운드로 구동합니다..."
         ros2 launch auto_mobility camera.launch.py > /tmp/camera_launch.log 2>&1 &
         CAM_PID=$!

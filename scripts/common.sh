@@ -93,6 +93,25 @@ export CAMERA_MODE
 USE_COMPRESSED="${USE_COMPRESSED:-false}"
 export USE_COMPRESSED
 
+# ROS 2 도메인 ID 기본값 (Windows 카메라 env_ros2.bat 의 42 와 일치)
+# 미설정 시 42 로 자동 설정 → Windows/WSL 양쪽 같은 도메인에서 토픽 수신 가능
+ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-42}"
+export ROS_DOMAIN_ID
+
+# ── DDS 미들웨어: CycloneDDS 고정 (2026-08-14) ──
+# FastDDS는 WSL2에서 SHM/Data-Sharing(무복사)이 rclpy(Python) ↔ rclcpp(C++) 간
+# 불안정하여 rtabmap(C++) 노드가 republish(Python)의 이미지를 수신하지 못하는 문제 발생.
+# CycloneDDS(설치: ros-humble-rmw-cyclonedds-cpp)는 SHM에 의존하지 않아 안정적.
+# Windows 쪽 env_ros2.bat 도 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp 로 맞춰야 양방향 통신 유지.
+if [ -z "${RMW_IMPLEMENTATION:-}" ]; then
+    RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+fi
+export RMW_IMPLEMENTATION
+# CycloneDDS 설정 파일 (Windows와의 정적 피어 포함). 없으면 기본(멀티캐스트)으로 동작.
+if [ -z "${CYCLONEDDS_URI:-}" ] && [ -f "$PROJECT_DIR/config/dds/cyclonedds_camera.xml" ]; then
+    export CYCLONEDDS_URI="file://$PROJECT_DIR/config/dds/cyclonedds_camera.xml"
+fi
+
 mkdir -p "$BAG_DIR" "$DB_DIR" "$POINTCLOUD_DIR" "$MESH_DIR" "$ISAAC_DIR" "$LOG_DIR" "$RAM_BAG_DIR"
 
 if [ -f "$PROJECT_DIR/install/setup.bash" ]; then
@@ -118,7 +137,8 @@ export PYTHONPATH="$PROJECT_DIR/src:$PROJECT_DIR:$PYTHONPATH"
 # 스크립트 실행 권한 자동 보장 (.py 는 python3 로 호출되므로 exec bit 불필요)
 chmod +x "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR"/*/*.sh 2>/dev/null || true
 
-# FastDDS 공유메모리(SHM) 프로필 자동 적용
+# FastDDS 프로필 자동 적용 (CycloneDDS 전환 이전 잔여 — CycloneDDS는 이 변수를 무시함)
+# CycloneDDS 사용 시 무관하나, 수동으로 FastDDS로 되돌릴 때 참고용으로 유지.
 if [ -f "$PROJECT_DIR/config/dds/fastdds_camera.xml" ]; then
     export FASTRTPS_DEFAULT_PROFILES_FILE="$PROJECT_DIR/config/dds/fastdds_camera.xml"
 fi
@@ -127,6 +147,10 @@ fi
 if [ -z "$DISPLAY" ]; then
     export DISPLAY=:0
 fi
+if [ -z "$XDG_RUNTIME_DIR" ]; then
+    export XDG_RUNTIME_DIR="/tmp/runtime-$USER"
+fi
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
 export QT_X11_NO_MITSHM=1
 # WSLg RViz2 검은 화면 방지 (2026-08-12 실측):
 #  - glxinfo는 D3D12(Intel Arc)로 GPU 가속 동작
