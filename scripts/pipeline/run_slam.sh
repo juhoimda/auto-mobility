@@ -85,7 +85,7 @@ else
     kill -SIGKILL -- -$SLAM_PID 2>/dev/null || pkill -SIGKILL -f "rtabmap" 2>/dev/null || true
     
     # TUM Trajectory 내보내기
-    python3 -c "from auto_mobility.trajectory.io import export_from_db; export_from_db('$DB_PATH', '$OUT_TRAJ')" 2>/dev/null || true
+    python3 -c "from auto_mobility.trajectory.export_trajectory import export_from_db; export_from_db('$DB_PATH', '$OUT_TRAJ')" 2>/dev/null || true
     
     echo "✅ RTAB-Map 완료 -> DB: $DB_PATH | Trajectory: $OUT_TRAJ"
 fi
