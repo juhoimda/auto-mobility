@@ -62,7 +62,7 @@ except ImportError:
     print("Error: open3d, numpy, opencv-python, scipy 필요 (`pip install open3d numpy opencv-python scipy`)")
     sys.exit(1)
 
-from auto_mobility.config import MESH_DIR  # noqa: E402
+from auto_mobility.config import MESH_DIR, POINTCLOUD_DIR  # noqa: E402
 
 
 # ────────────────────────────── 유틸 ──────────────────────────────
@@ -243,6 +243,7 @@ def main():
     parser = argparse.ArgumentParser(description="RTAB-Map DB → Open3D Tensor TSDF → Mesh")
     parser.add_argument("input", help="RTAB-Map DB (.db) 경로")
     parser.add_argument("output", nargs="?", default=None, help="출력 mesh (.obj/.ply). 기본: meshes/<session>_tsdf.obj")
+    parser.add_argument("--pcd-output", default=None, help="출력 pointcloud (.ply). 기본: pointclouds/<session>_tsdf_cloud.ply")
     parser.add_argument("--voxel", type=float, default=0.01, help="voxel 크기 (m, 기본 0.01)")
     parser.add_argument("--trunc-mult", type=float, default=8.0, help="truncation = voxel×N (기본 8)")
     parser.add_argument("--depth-max", type=float, default=4.0, help="최대 depth (m, 기본 4.0)")
@@ -299,7 +300,7 @@ def main():
         vals = f.read().split()
     intrinsics = (float(vals[0]), float(vals[1]), float(vals[2]), float(vals[3]))
 
-    mesh, _ = run_tsdf(frames, poses, workdir, intrinsics, args)
+    mesh, vbg = run_tsdf(frames, poses, workdir, intrinsics, args)
 
     # topology 정리
     mesh.remove_degenerate_triangles()
@@ -309,7 +310,25 @@ def main():
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     o3d.io.write_triangle_mesh(out_path, mesh)
-    print(f"💾 저장: {out_path} ({time.time()-t0:.1f}s)")
+    print(f"💾 Mesh 저장: {out_path} ({time.time()-t0:.1f}s)")
+
+    # TSDF Point Cloud 추출 및 저장
+    pcd_t = vbg.extract_point_cloud(weight_threshold=args.weight_thr)
+    pcd = pcd_t.to_legacy()
+    if args.pcd_output:
+        pcd_path = args.pcd_output
+    else:
+        out_dir = os.path.dirname(os.path.abspath(out_path))
+        base_name = os.path.splitext(os.path.basename(out_path))[0]
+        if "benchmarks" in out_dir:
+            pcd_path = os.path.join(out_dir, f"{base_name.replace('_mesh', '')}_cloud.ply")
+        else:
+            pcd_path = os.path.join(POINTCLOUD_DIR, f"{base}_tsdf_cloud.ply")
+
+    os.makedirs(os.path.dirname(os.path.abspath(pcd_path)), exist_ok=True)
+    o3d.io.write_point_cloud(pcd_path, pcd)
+    print(f"☁️  PointCloud 저장: {pcd_path} ({len(pcd.points):,} points)")
+
     if not args.keep and workdir.startswith("/tmp/"):
         shutil.rmtree(workdir, ignore_errors=True)
     if args.view:

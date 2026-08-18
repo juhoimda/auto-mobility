@@ -39,6 +39,12 @@ mapping = {
     "ALIGNED_DEPTH_COMPRESSED_TOPIC": camera.get("aligned_depth_compressed_topic"),
     "CAMERA_INFO_TOPIC": camera.get("camera_info_topic"),
     "CAMERA_INFO_WINDOWS_TOPIC": camera.get("camera_info_windows_topic"),
+    "INFRA1_TOPIC": camera.get("infra1_topic"),
+    "INFRA1_COMPRESSED_TOPIC": camera.get("infra1_compressed_topic"),
+    "INFRA1_INFO_WINDOWS_TOPIC": camera.get("infra1_camera_info_windows_topic"),
+    "INFRA2_TOPIC": camera.get("infra2_topic"),
+    "INFRA2_COMPRESSED_TOPIC": camera.get("infra2_compressed_topic"),
+    "INFRA2_INFO_WINDOWS_TOPIC": camera.get("infra2_camera_info_windows_topic"),
     "IMU_TOPIC": camera.get("imu_topic"),
     "IMU_FILTERED_TOPIC": camera.get("imu_filtered_topic"),
     "ODOM_TOPIC": rtabmap.get("odom_topic"),
@@ -62,6 +68,12 @@ ALIGNED_DEPTH_TOPIC="${ALIGNED_DEPTH_TOPIC:-/camera/camera/aligned_depth_to_colo
 ALIGNED_DEPTH_COMPRESSED_TOPIC="${ALIGNED_DEPTH_COMPRESSED_TOPIC:-/camera/camera/aligned_depth_to_color/image_raw/compressedDepth}"
 CAMERA_INFO_TOPIC="${CAMERA_INFO_TOPIC:-/camera/camera/color/camera_info}"
 CAMERA_INFO_WINDOWS_TOPIC="${CAMERA_INFO_WINDOWS_TOPIC:-/camera/camera/color/camera_info_windows}"
+INFRA1_TOPIC="${INFRA1_TOPIC:-/camera/camera/infra1/image_rect_raw}"
+INFRA1_COMPRESSED_TOPIC="${INFRA1_COMPRESSED_TOPIC:-/camera/camera/infra1/image_rect_raw/compressed}"
+INFRA1_INFO_WINDOWS_TOPIC="${INFRA1_INFO_WINDOWS_TOPIC:-/camera/camera/infra1/camera_info_windows}"
+INFRA2_TOPIC="${INFRA2_TOPIC:-/camera/camera/infra2/image_rect_raw}"
+INFRA2_COMPRESSED_TOPIC="${INFRA2_COMPRESSED_TOPIC:-/camera/camera/infra2/image_rect_raw/compressed}"
+INFRA2_INFO_WINDOWS_TOPIC="${INFRA2_INFO_WINDOWS_TOPIC:-/camera/camera/infra2/camera_info_windows}"
 IMU_TOPIC="${IMU_TOPIC:-/camera/camera/imu}"
 IMU_FILTERED_TOPIC="${IMU_FILTERED_TOPIC:-/camera/camera/imu/filtered}"
 ODOM_TOPIC="${ODOM_TOPIC:-/rtabmap/odom}"

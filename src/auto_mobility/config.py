@@ -90,6 +90,12 @@ CAMERA_ALIGNED_DEPTH_COMPRESSED_TOPIC = _topic("camera.aligned_depth_compressed_
                                                 "/camera/camera/aligned_depth_to_color/image_raw/compressedDepth")
 CAMERA_INFO_TOPIC              = _topic("camera.camera_info_topic", "/camera/camera/color/camera_info")
 CAMERA_INFO_WINDOWS_TOPIC      = _topic("camera.camera_info_windows_topic", "/camera/camera/color/camera_info_windows")
+CAMERA_INFRA1_TOPIC            = _topic("camera.infra1_topic", "/camera/camera/infra1/image_rect_raw")
+CAMERA_INFRA1_COMPRESSED_TOPIC = _topic("camera.infra1_compressed_topic", "/camera/camera/infra1/image_rect_raw/compressed")
+CAMERA_INFRA1_INFO_WINDOWS_TOPIC = _topic("camera.infra1_camera_info_windows_topic", "/camera/camera/infra1/camera_info_windows")
+CAMERA_INFRA2_TOPIC            = _topic("camera.infra2_topic", "/camera/camera/infra2/image_rect_raw")
+CAMERA_INFRA2_COMPRESSED_TOPIC = _topic("camera.infra2_compressed_topic", "/camera/camera/infra2/image_rect_raw/compressed")
+CAMERA_INFRA2_INFO_WINDOWS_TOPIC = _topic("camera.infra2_camera_info_windows_topic", "/camera/camera/infra2/camera_info_windows")
 CAMERA_IMU_TOPIC               = _topic("camera.imu_topic", "/camera/camera/imu")
 CAMERA_IMU_FILTERED_TOPIC      = _topic("camera.imu_filtered_topic", "/camera/camera/imu/filtered")
 

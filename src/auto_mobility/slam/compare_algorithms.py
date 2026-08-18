@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-from auto_mobility.config import BAG_DIR, DB_DIR, MESH_DIR, TRAJECTORY_DIR, BENCHMARK_DIR
+from auto_mobility.config import BAG_DIR, DB_DIR, MESH_DIR, TRAJECTORY_DIR, BENCHMARK_DIR, PROJECT_DIR
 from auto_mobility.trajectory.io import Trajectory
 from auto_mobility.trajectory.export_trajectory import export_from_db
 
@@ -37,16 +37,25 @@ except ImportError:
 ALGO_PRESETS = {
     "rtab_f2m_opt": {
         "desc": "RTAB-Map Frame-to-Map (Default, OdomF2M 1000, Global Opt)",
+        "type": "rtabmap",
         "opt": 0,
         "tsdf_voxel": 0.01,
     },
     "rtab_f2m_raw": {
         "desc": "RTAB-Map Frame-to-Map (Raw Odometry Pose, No Loop Closure Opt)",
+        "type": "rtabmap",
         "opt": 2,
+        "tsdf_voxel": 0.01,
+    },
+    "orbslam3_rgbd": {
+        "desc": "ORB-SLAM3 RGB-D (Feature-based Visual SLAM)",
+        "type": "orbslam3",
+        "opt": 0,
         "tsdf_voxel": 0.01,
     },
     "rtab_tsdf_fine": {
         "desc": "RTAB-Map Global Opt + Fine TSDF (Voxel 5mm)",
+        "type": "rtabmap",
         "opt": 0,
         "tsdf_voxel": 0.005,
     },
@@ -86,6 +95,19 @@ def evaluate_mesh(mesh_path: str) -> dict:
             "bbox_extent_m": [round(x, 3) for x in extent],
             "is_watertight": watertight,
         }
+def evaluate_pointcloud(pcd_path: str) -> dict:
+    if not os.path.exists(pcd_path) or o3d is None:
+        return {"exists": False}
+    try:
+        pcd = o3d.io.read_point_cloud(pcd_path)
+        num_p = len(pcd.points)
+        return {
+            "exists": True,
+            "valid": num_p > 0,
+            "num_points": num_p,
+            "has_colors": pcd.has_colors(),
+            "has_normals": pcd.has_normals(),
+        }
     except Exception as e:
         return {"exists": True, "valid": False, "error": str(e)}
 
@@ -114,15 +136,19 @@ def run_comparison(bag_input: str, out_dir: str = None, quick: bool = False):
     # 1. Base SLAM Run (rosbag replay -> rtabmap.db)
     base_db_name = f"bench_{bag_name}.db"
     base_db_path = DB_DIR / base_db_name
+    if not base_db_path.exists() and (DB_DIR / f"{bag_name}.db").exists():
+        base_db_path = DB_DIR / f"{bag_name}.db"
+
     print(f"\n▶️ [Step 1] Baseline SLAM Replay Run...")
     if not base_db_path.exists():
         print(f"   Generating DB: {base_db_path} from rosbag...")
         run_bag_script = PROJECT_DIR / "scripts" / "pipeline" / "run_bag.sh"
         # run_bag.sh bag_name
         r = subprocess.run(["bash", str(run_bag_script), bag_name, "--compressed"], capture_output=True, text=True)
+        if not base_db_path.exists() and (DB_DIR / f"{bag_name}.db").exists():
+            base_db_path = DB_DIR / f"{bag_name}.db"
         if not base_db_path.exists():
-            # 혹시 기본 생성된 db가 있는지 확인
-            print("   Warning: Checking if custom DB path was used...")
+            print("   Warning: DB path not found after replay.")
     else:
         print(f"   ✅ Using existing Base DB: {base_db_path}")
 
@@ -143,7 +169,16 @@ def run_comparison(bag_input: str, out_dir: str = None, quick: bool = False):
         mesh_file = out_dir / f"{key}_mesh.obj"
 
         # Trajectory 추출
-        if base_db_path.exists():
+        if cfg.get("type") == "orbslam3":
+            try:
+                from auto_mobility.slam.run_orbslam3_bag import run_orbslam3_on_bag
+                run_orbslam3_on_bag(str(bag_path), str(traj_file))
+                traj = Trajectory.from_tum_file(str(traj_file))
+                t_metrics = traj.compute_metrics()
+            except Exception as e:
+                print(f"   ⚠️ ORB-SLAM3 trajectory run failed: {e}")
+                t_metrics = {"error": str(e)}
+        elif base_db_path.exists():
             try:
                 export_from_db(str(base_db_path), str(traj_file), opt=cfg["opt"])
                 traj = Trajectory.from_tum_file(str(traj_file))
@@ -155,12 +190,14 @@ def run_comparison(bag_input: str, out_dir: str = None, quick: bool = False):
             t_metrics = {"error": "DB not found"}
 
         # TSDF Reconstruction
+        pcd_file = out_dir / f"{key}_cloud.ply"
         if base_db_path.exists():
-            print(f"   🔨 Reconstructing Mesh via TSDF (voxel={cfg['tsdf_voxel']})...")
+            print(f"   🔨 Reconstructing Mesh & Point Cloud via TSDF (voxel={cfg['tsdf_voxel']})...")
             reconstruct_script = PROJECT_DIR / "src" / "auto_mobility" / "mesh" / "reconstruct_tsdf.py"
             cmd = [
                 sys.executable, str(reconstruct_script),
                 str(base_db_path), str(mesh_file),
+                f"--pcd-output={str(pcd_file)}",
                 f"--voxel={cfg['tsdf_voxel']}",
                 f"--poses-opt={cfg['opt']}",
                 "--no-gpu" if quick else "--voxel=" + str(cfg['tsdf_voxel'])
@@ -172,16 +209,20 @@ def run_comparison(bag_input: str, out_dir: str = None, quick: bool = False):
             res = subprocess.run(cmd, capture_output=True, text=True)
             recon_time = time.time() - t0
             m_metrics = evaluate_mesh(str(mesh_file))
+            p_metrics = evaluate_pointcloud(str(pcd_file))
             m_metrics["reconstruction_time_sec"] = round(recon_time, 2)
         else:
             m_metrics = {"error": "DB not found"}
+            p_metrics = {"error": "DB not found"}
 
         results["algorithms"][key] = {
             "description": cfg["desc"],
             "trajectory_metrics": t_metrics,
+            "pointcloud_metrics": p_metrics,
             "mesh_metrics": m_metrics,
             "artifacts": {
                 "trajectory": str(traj_file) if traj_file.exists() else None,
+                "pointcloud": str(pcd_file) if pcd_file.exists() else None,
                 "mesh": str(mesh_file) if mesh_file.exists() else None,
             }
         }
@@ -198,13 +239,14 @@ def run_comparison(bag_input: str, out_dir: str = None, quick: bool = False):
         f.write(f"- **Date**: {timestamp}\n")
         f.write(f"- **Source Bag**: `{bag_path}`\n\n")
         f.write("## 📈 Comparison Summary Table\n\n")
-        f.write("| Algorithm Preset | Frames | Path Len (m) | Max Jump (m) | Vertices | Triangles | Area (m²) | Tri Density | Watertight |\n")
+        f.write("| Algorithm Preset | Frames | Path Len (m) | Points (PLY) | Vertices (OBJ) | Triangles | Area (m²) | Tri Density | Watertight |\n")
         f.write("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n")
         for k, v in results["algorithms"].items():
             tm = v.get("trajectory_metrics", {})
+            pm = v.get("pointcloud_metrics", {})
             mm = v.get("mesh_metrics", {})
             f.write(f"| **{k}** | {tm.get('num_frames', 'N/A')} | {tm.get('total_path_length_m', 'N/A')} | "
-                    f"{tm.get('max_step_m', 'N/A')} | {mm.get('num_vertices', 'N/A'):,} | {mm.get('num_triangles', 'N/A'):,} | "
+                    f"{pm.get('num_points', 'N/A'):,} | {mm.get('num_vertices', 'N/A'):,} | {mm.get('num_triangles', 'N/A'):,} | "
                     f"{mm.get('surface_area_m2', 'N/A')} | {mm.get('density_tri_per_m2', 'N/A')} | "
                     f"{'✅' if mm.get('is_watertight') else '❌'} |\n")
 

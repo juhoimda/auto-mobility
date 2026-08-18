@@ -111,6 +111,18 @@ fi
 INFO_TOPICS=()
 topic_exists "$CAMERA_INFO_TOPIC" 3 && INFO_TOPICS+=("$CAMERA_INFO_TOPIC")
 topic_exists "$CAMERA_INFO_WINDOWS_TOPIC" 3 && INFO_TOPICS+=("$CAMERA_INFO_WINDOWS_TOPIC")
+topic_exists "$INFRA1_INFO_WINDOWS_TOPIC" 3 && INFO_TOPICS+=("$INFRA1_INFO_WINDOWS_TOPIC")
+topic_exists "$INFRA2_INFO_WINDOWS_TOPIC" 3 && INFO_TOPICS+=("$INFRA2_INFO_WINDOWS_TOPIC")
+
+# Infrared (IR Stereo) 감지 및 추가
+IR_TOPICS=()
+if [ "$FORCE_RAW" = true ]; then
+    topic_exists "$INFRA1_TOPIC" 3 && IR_TOPICS+=("$INFRA1_TOPIC")
+    topic_exists "$INFRA2_TOPIC" 3 && IR_TOPICS+=("$INFRA2_TOPIC")
+else
+    topic_exists "$INFRA1_COMPRESSED_TOPIC" 3 && IR_TOPICS+=("$INFRA1_COMPRESSED_TOPIC")
+    topic_exists "$INFRA2_COMPRESSED_TOPIC" 3 && IR_TOPICS+=("$INFRA2_COMPRESSED_TOPIC")
+fi
 
 # /tf_static: 로컬(realsense2_camera)은 자체 발행하지만, 원격(Windows)은 2026-08-18부터
 # Windows realsense_pub.py 가 직접 static TF 를 발행한다 (TRANSIENT_LOCAL, time=0).
@@ -136,7 +148,7 @@ if [ "$FORCE_RAW" = true ]; then
 else
     RECORD_TOPICS+=("$RGB_COMPRESSED_TOPIC" "$DETECTED_DEPTH_COMPRESSED")
 fi
-RECORD_TOPICS+=("${INFO_TOPICS[@]}" "$IMU_TOPIC")
+RECORD_TOPICS+=("${IR_TOPICS[@]}" "${INFO_TOPICS[@]}" "$IMU_TOPIC")
 [ "$HAS_TF_STATIC" = true ] && RECORD_TOPICS+=(/tf_static)
 
 
