@@ -1,16 +1,4 @@
 <?xml version="1.0" encoding="UTF-8" ?>
-<!--
-  WSL ↔ Windows 카메라 ROS2 통신용 CycloneDDS 설정 (2026-08-14, NAT 모드)
-  ★ WSL2 networkingMode=기본(NAT). Windows/WSL이 별도 네임스페이스 → 포트 충돌 없음.
-  - AllowMulticast=true: WSL 내부(intra-host) 발견용. NAT라 Windows 교차 멀티캐스트는 안 닿음.
-  - Discovery/Peers:
-    * 127.0.0.1      = 로컬
-    * 172.19.144.1   = Windows vEthernet(WSL) = WSL 기본 게이트웨이.
-                        NAT에서 WSL이 Windows 호스트에 닿는 유일한 확실한 경로.
-  ※ Windows 쪽 C:\ros2_humble\cyclonedds.xml 은 NetworkInterfaceAddress=172.19.144.1,
-     Peer=172.19.148.235(WSL eth0) 로 맞춤.
-  ※ IP 변경 시: WSL `ip -4 addr show eth0` / Windows `ipconfig`(vEthernet (WSL)) 갱신.
--->
 <CycloneDDS xmlns="https://cdds.io/config">
     <Domain id="any">
         <General>
@@ -31,5 +19,3 @@
         </Discovery>
     </Domain>
 </CycloneDDS>
-
-
