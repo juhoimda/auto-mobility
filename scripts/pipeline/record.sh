@@ -248,9 +248,15 @@ echo "▶️ 녹화를 시작합니다. 종료하려면 Ctrl+C를 누르세요..
 RECORD_CMD=(ros2 bag record -s "$STORAGE_FORMAT" -o "$TEMP_OUTPUT")
 [ -n "$QOS_OVERRIDE_YAML" ] && RECORD_CMD+=(--qos-profile-overrides-path "$QOS_OVERRIDE_YAML")
 RECORD_CMD+=("${RECORD_TOPICS[@]}")
+
 if [ -n "$DURATION" ]; then
     echo "⏱️  자동 종료: ${DURATION}초 후 녹화를 종료합니다..."
-    timeout -s INT "${DURATION}" "${RECORD_CMD[@]}"
+    "${RECORD_CMD[@]}" &
+    REC_PID=$!
+    sleep "${DURATION}"
+    echo "🛑 [녹화 완료] 시간 도달 (${DURATION}초). 데이터 저장 및 종료 중..."
+    kill -SIGINT $REC_PID 2>/dev/null || true
+    wait $REC_PID 2>/dev/null || true
 else
     "${RECORD_CMD[@]}"
 fi
