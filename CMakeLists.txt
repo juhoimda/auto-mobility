@@ -24,6 +24,7 @@ install(
 install(
   PROGRAMS
     scripts/common.sh
+    scripts/pipeline/capture_safe.sh
     scripts/pipeline/run_bag.sh
     scripts/pipeline/run_live.sh
     scripts/pipeline/record.sh
@@ -49,6 +50,7 @@ install(
     src/auto_mobility/utils/benchmark_hw.py
     src/auto_mobility/utils/inspect_system.py
     src/auto_mobility/utils/validate.py
+    src/auto_mobility/utils/validate_bag.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -14,11 +14,26 @@
 <CycloneDDS xmlns="https://cdds.io/config">
     <Domain id="any">
         <General>
+            <NetworkInterfaceAddress>172.19.148.235</NetworkInterfaceAddress>
             <AllowMulticast>true</AllowMulticast>
+            <!-- 2026-08-18: WSL eth0 MTU=1280 실측.
+                 50KB 메시지가 IP 레벨 단편화(1280 MTU)로 유실됨(~70%).
+                 RTPS FragmentSize 를 MTU 이하(1200B)로 설정해
+                 단일 IP 패킷 datagram 만 사용 → IP 재조립 손실 회피. -->
+            <FragmentSize>1200</FragmentSize>
+
         </General>
+        <!-- 2026-08-18: 대형 best-effort 메시지(JPEG/PNG) 수신 유실 대응
+             Windows→WSL NAT 경로에서 50KB 메시지가 ~70% 유실됨을 실측.
+             소켓 버퍼를 커널 기본값(212KB)보다 크게 확장. -->
+        <Internal>
+            <SocketReceiveBufferSize min="8388608" />
+            <SocketSendBufferSize min="8388608" />
+        </Internal>
         <Discovery>
             <Peers>
                 <Peer Address="127.0.0.1" />
+                <Peer Address="172.19.148.235" />
                 <Peer Address="172.19.144.1" />
             </Peers>
         </Discovery>

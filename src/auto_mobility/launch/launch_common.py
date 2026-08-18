@@ -123,7 +123,6 @@ def get_rtabmap_base_args() -> dict:
         # Synchronization (0.05s: 50ms 이내의 RGB-Depth만 짝지어 오랜 시차 매칭 방지)
         'approx_sync': 'true',
         'approx_sync_max_interval': '0.05',
-        'approx_rgbd_sync': 'true',
         'sync_queue_size': '30',
         'visual_odometry': 'true',
         'rviz': 'true',

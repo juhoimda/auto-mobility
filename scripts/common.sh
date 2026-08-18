@@ -35,6 +35,7 @@ mapping = {
     "ALIGNED_DEPTH_TOPIC": camera.get("aligned_depth_topic"),
     "ALIGNED_DEPTH_COMPRESSED_TOPIC": camera.get("aligned_depth_compressed_topic"),
     "CAMERA_INFO_TOPIC": camera.get("camera_info_topic"),
+    "CAMERA_INFO_WINDOWS_TOPIC": camera.get("camera_info_windows_topic"),
     "IMU_TOPIC": camera.get("imu_topic"),
     "IMU_FILTERED_TOPIC": camera.get("imu_filtered_topic"),
     "ODOM_TOPIC": rtabmap.get("odom_topic"),
@@ -57,6 +58,7 @@ DEPTH_COMPRESSED_TOPIC="${DEPTH_COMPRESSED_TOPIC:-/camera/camera/depth/image_rec
 ALIGNED_DEPTH_TOPIC="${ALIGNED_DEPTH_TOPIC:-/camera/camera/aligned_depth_to_color/image_raw}"
 ALIGNED_DEPTH_COMPRESSED_TOPIC="${ALIGNED_DEPTH_COMPRESSED_TOPIC:-/camera/camera/aligned_depth_to_color/image_raw/compressedDepth}"
 CAMERA_INFO_TOPIC="${CAMERA_INFO_TOPIC:-/camera/camera/color/camera_info}"
+CAMERA_INFO_WINDOWS_TOPIC="${CAMERA_INFO_WINDOWS_TOPIC:-/camera/camera/color/camera_info_windows}"
 IMU_TOPIC="${IMU_TOPIC:-/camera/camera/imu}"
 IMU_FILTERED_TOPIC="${IMU_FILTERED_TOPIC:-/camera/camera/imu/filtered}"
 ODOM_TOPIC="${ODOM_TOPIC:-/rtabmap/odom}"
@@ -113,6 +115,12 @@ if [ -z "${CYCLONEDDS_URI:-}" ] && [ -f "$PROJECT_DIR/config/dds/cyclonedds_came
 fi
 
 mkdir -p "$BAG_DIR" "$DB_DIR" "$POINTCLOUD_DIR" "$MESH_DIR" "$ISAAC_DIR" "$LOG_DIR" "$RAM_BAG_DIR"
+
+# 토픽 존재/수신 확인 (ros2 CLI 데몬 hang 문제 회피 — topic_probe.py 사용)
+# 사용법: topic_exists <topic> [timeout_sec]  → 0=수신 확인 / 1=없음
+topic_exists() {
+    python3 "$PROJECT_DIR/scripts/utils/topic_probe.py" "$1" "${2:-3}" >/dev/null 2>&1
+}
 
 if [ -f "$PROJECT_DIR/install/setup.bash" ]; then
     source "$PROJECT_DIR/install/setup.bash"

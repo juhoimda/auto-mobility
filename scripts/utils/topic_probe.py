@@ -16,6 +16,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image, Imu
+from tf2_msgs.msg import TFMessage
 
 SENSOR_QOS = QoSProfile(
     depth=5,
@@ -27,9 +28,12 @@ SENSOR_QOS = QoSProfile(
 
 def guess_type(topic: str):
     t = topic.lower()
+    if t == "/tf_static" or t == "/tf":
+        return TFMessage
     if t.endswith('/compressed') or t.endswith('/compresseddepth'):
         return CompressedImage
-    if t.endswith('/camera_info'):
+    # camera_info / camera_info_windows 모두 포함 (suffix 가 '_windows' 일 수 있음)
+    if 'camera_info' in t:
         return CameraInfo
     if t.endswith('/imu') or '/imu/' in t:
         return Imu

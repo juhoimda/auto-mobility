@@ -70,6 +70,7 @@ CAMERA_ALIGNED_DEPTH_TOPIC     = _topic("camera.aligned_depth_topic", "/camera/c
 CAMERA_ALIGNED_DEPTH_COMPRESSED_TOPIC = _topic("camera.aligned_depth_compressed_topic",
                                                 "/camera/camera/aligned_depth_to_color/image_raw/compressedDepth")
 CAMERA_INFO_TOPIC              = _topic("camera.camera_info_topic", "/camera/camera/color/camera_info")
+CAMERA_INFO_WINDOWS_TOPIC      = _topic("camera.camera_info_windows_topic", "/camera/camera/color/camera_info_windows")
 CAMERA_IMU_TOPIC               = _topic("camera.imu_topic", "/camera/camera/imu")
 CAMERA_IMU_FILTERED_TOPIC      = _topic("camera.imu_filtered_topic", "/camera/camera/imu/filtered")
 

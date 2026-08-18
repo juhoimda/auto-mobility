@@ -23,6 +23,12 @@ RealSense D435i ──▶ RTAB-Map SLAM ──▶ RGB-D & Pose / PLY ──▶ O
 
 # 4. 기존 DB로 Mesh만 재생성
 ./scripts/pipeline/run_pipeline_all.sh --db=my_room.db --skip-capture --skip-isaac
+
+# 5. RAW 데이터셋 확보 전용 (SLAM/RViz 없이 녹화 + 자동 검증 + 매니페스트)
+./scripts/pipeline/capture_safe.sh my_dataset
+
+# 6. 녹화 후 데이터셋 검증 (메시지 수 / Hz / sync / gap / 매니페스트)
+python3 src/auto_mobility/utils/validate_bag.py ros2_data/bags/my_dataset
 ```
 
 자세한 실행 방법: **[docs/guide.md](docs/guide.md)**
@@ -85,10 +91,10 @@ auto-mobility/
 
 ## ✨ 핵심 특징
 
-1. **IMU 융합 Visual SLAM** — D435i IMU(200Hz)를 Madgwick 필터로 처리해 수평 보정 및 오도메트리 추적 안정화
-2. **WSL2 / Windows 하이브리드 연동** — 신호 기반 자동 카메라 watcher, FastDDS SHM 통신, 초고속 압축 토픽 디코딩(`republish.py`)
+1. **IMU 융합 Visual SLAM** — D435i IMU(400Hz)를 Madgwick 필터로 처리해 수평 보정 및 오도메트리 추적 안정화
+2. **WSL2 / Windows 하이브리드 연동** — 신호 기반 자동 카메라 watcher, CycloneDDS 정적 피어, 압축 토픽 디코딩(`republish.py`) + **원본 타임스탬프 보존**
 3. **GPU 가속 TSDF 3D 재구성** — Open3D Tensor TSDF Voxel Grid로 고밀도 실내 공간 3D Mesh(`.obj`) 생성
-4. **자동 품질 검증 및 안전 장치** — DB 무결성 검증(`validate.py`), 촬영 품질 모니터링(`capture_guard`), RAM 디스크(`/dev/shm`) 우선 녹화 및 SSD 자동 이관
+4. **자동 품질 검증 및 안전 장치** — DB 무결성 검증(`validate.py`), 촬영 품질 모니터링(`capture_guard`, sync/gap 포함), **녹화 데이터셋 자동 검증 + 매니페스트**(`validate_bag.py`), RAM 디스크(`/dev/shm`) 우선 녹화 및 SSD 자동 이관
 
 ---
 

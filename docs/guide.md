@@ -64,6 +64,11 @@ python3 scripts/utils/topic_probe.py /camera/camera/color/image_raw/compressed 5
 python3 scripts/utils/check_camera_params.py
 ```
 
+> ⚠️ **타임스탬프 아키텍처 (2026-08-14)**
+> - Windows `realsense_pub.py` v2: 캡처/인코딩 스레드 분리 + **프레임 하드웨어 타임스탬프**를 epoch 로 변환해 발행 (RGB/Depth 동일 frameset).
+> - WSL `republish.py` v4: 원본 stamp + WSL↔Windows **clock offset 추정값**으로 재발행 → 상대 타이밍이 캡처 시점 그대로 보존.
+> - RTAB-Map DB/rosbag 의 timestamp 는 이제 캡처 시각 기반이다.
+
 ---
 
 ## 🗺️ 3. 실시간 Visual-Inertial SLAM
@@ -95,6 +100,13 @@ ros2 launch auto_mobility rtab_live.launch.py database_path:=./ros2_data/databas
 ./scripts/pipeline/record.sh [BAG_NAME] [--compressed | --raw]
 # 예시: ./scripts/pipeline/record.sh hall_walk --compressed
 
+# [녹화 후 자동 검증] 메시지 수 / Hz / sync delta / gap / 매니페스트 생성
+python3 src/auto_mobility/utils/validate_bag.py ros2_data/bags/hall_walk --out ros2_data/bags/hall_walk/dataset_manifest.json
+
+# [CAPTURE-SAFE] raw dataset 확보 전용 (RViz/SLAM 없이 녹화 + capture_guard 진단)
+./scripts/pipeline/capture_safe.sh [BAG_NAME] [--compressed | --raw]
+# 예시: ./scripts/pipeline/capture_safe.sh hallway_session --compressed
+
 # [재생] 녹화된 Bag 재생
 ./scripts/pipeline/play.sh [BAG_NAME] [RATE]
 # 예시: ./scripts/pipeline/play.sh hall_walk 1.0
@@ -106,9 +118,15 @@ ros2 launch auto_mobility rtab_live.launch.py database_path:=./ros2_data/databas
 
 * **인자 설명**:
   * `BAG_NAME`: 녹화/재생할 Bag 디렉터리 이름
-  * `--compressed`: 압축 토픽 위주 녹화/처리 (대역폭 및 I/O 절약)
-  * `--raw`: 무압축 Raw 토픽 녹화/처리
+  * `--compressed`: 압축 토픽 위주 녹화/처리 (대역폭 및 I/O 절약) — RGB JPEG + Depth PNG(lossless)
+  * `--raw`: 무압축 Raw 토픽 녹화/처리 (RGB/Depth bit-exact, 대역폭 큼)
+  * `--no-validate`: 녹화 후 자동 검증 건너뜀
   * `RATE`: 재생 속도 (배속, 예: `0.5`, `1.0`, `2.0`)
+
+> 💡 record.sh 는 `camera_info_windows`(Windows 원본 CameraInfo)도 함께 기록하므로,
+> Windows 카메라 없이 오프라인 재생(run_bag.sh) 시에도 republish.py 가 올바른
+> intrinsics 를 사용할 수 있다. (2026-08-14: 표준 토픽만 기록하던 방식은 replay 시
+> 기본 intrinsics(fx=385) 폴백 → 기하 왜곡 잠재 버그였음)
 
 ---
 
@@ -166,6 +184,9 @@ python3 src/auto_mobility/utils/benchmark_hw.py
 
 # [세션 사후 분석] 생성된 SLAM DB 궤적, 키프레임, 루프클로저 통계 시각화
 python3 src/auto_mobility/monitor/analyze_session.py --db ros2_data/databases/my_room.db
+
+# [데이터셋 검증] 녹화된 bag 메시지 수 / Hz / sync / gap / 단조성 + 매니페스트
+python3 src/auto_mobility/utils/validate_bag.py ros2_data/bags/my_bag --out ros2_data/bags/my_bag/dataset_manifest.json
 
 # [단위/통합 테스트] 테스트 스위트 실행 및 코드 커버리지 리포트
 ./scripts/utils/run_tests.sh

@@ -261,7 +261,7 @@ else
     # RTAB-Map Visual SLAM 실시간 데이터 수집 (종료 시 바로 DB 생성)
     RTAB_LIVE_ARGS=("database_path:=$TARGET_DB_PATH")
     if [ "$CAMERA_MODE" = "remote" ]; then
-        echo "🌐 원격 카메라 모드 → use_compressed:=$USE_COMPRESSED, publish_camera_tf:=true"
+        echo "🌐 원격 카메라 모드 → use_compressed:=$USE_COMPRESSED"
         RTAB_LIVE_ARGS+=("use_compressed:=$USE_COMPRESSED")
     fi
 
