@@ -20,6 +20,8 @@ lib/
 cmake-build-*/
 CMakeCache.txt
 CMakeFiles/
+third_party/ORB_SLAM3/
+
 
 # ROS / ROS2 build, data and log artifacts
 install/
