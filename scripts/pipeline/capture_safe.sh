@@ -1,16 +1,22 @@
 #!/bin/bash
 # ============================================================
-# capture_safe.sh — 안전한 raw 데이터셋 녹화 전용 모드 (tmp.md §67)
+# capture_safe.sh — 안전한 raw 데이터셋 녹화 전용 모드
+#
+# 파이프라인 내 역할: SENSOR → WSL INGRESS → IMMUTABLE RAW DATASET
 #
 #   D435i(Windows) → Windows publisher → DDS → WSL
 #       ├─ rosbag recorder (압축 토픽: RGB JPEG + Depth PNG lossless)
 #       └─ capture_guard (경량 진단, RViz/SLAM 없음)
 #
-# SLAM/TSDF/RViz 와 무관하게 immutable raw dataset 을 확보하는 것이 목적.
+# SLAM/TSDF/RViz 부하와 완전히 분리하여 immutable raw dataset을 확보한다.
+# SLAM이 크래시되어도 rosbag은 정상 기록된다.
+#
 # 사용법:
 #   ./scripts/pipeline/capture_safe.sh [BAG_NAME] [--raw | --compressed]
-#     --raw: 무압축 토픽 기록 (대역폭 큼, RGB/Depth bit-exact)
+#     --raw:        무압축 토픽 기록 (대역폭 큼, RGB/Depth bit-exact)
+#     --compressed: 압축 토픽 기록 (기본값)
 # ============================================================
+
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../common.sh"

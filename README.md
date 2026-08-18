@@ -27,9 +27,10 @@ RealSense D435i ──▶ RTAB-Map SLAM ──▶ RGB-D & Pose / PLY ──▶ O
 # 5. RAW 데이터셋 확보 전용 (SLAM/RViz 없이 녹화 + 자동 검증 + 매니페스트)
 ./scripts/pipeline/capture_safe.sh my_dataset
 
-# 6. 녹화 후 데이터셋 검증 (메시지 수 / Hz / sync / gap / 매니페스트)
-python3 src/auto_mobility/utils/validate_bag.py ros2_data/bags/my_dataset
+# 6. 동일 rosbag 기반 알고리즘 궤적 & TSDF Mesh 비교 벤치마크
+./scripts/pipeline/compare.sh my_dataset --quick
 ```
+
 
 자세한 실행 방법: **[docs/guide.md](docs/guide.md)**
 

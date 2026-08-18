@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-analyze_session.py - 촬영 세션 통합 분석 요약 생성 (2026-08-12 신규)
+analyze_session.py — 촬영 세션 통합 분석 요약 생성
 
-촬영 완료 후 파이프라인 로그 + capture_guard JSON + RTAB-Map DB 를 파싱해
-세션 단위 구조화 요약(session_<ts>.summary.json)을 만든다.
+파이프라인 내 역할: Post-processing diagnostics (run_pipeline_all.sh 마지막 단계)
+  - Input : DB, 파이프라인 로그, capture_guard JSON
+  - Output: logs/session_<session>.summary.json (구조화 집계, 원문 미포함)
+
+촬영 완료 후 파이프라인 로그 + capture_guard JSON + RTAB-Map DB를 파싱해
+세션 단위 구조화 요약을 만든다.
 
 포함 내용 (모두 컴팩트):
   - VO 품질: quality 분포 / quality=0 횟수 / 최장 연속 끊김 / delay·update time 통계
@@ -13,11 +17,12 @@ analyze_session.py - 촬영 세션 통합 분석 요약 생성 (2026-08-12 신�
   - 환경 스냅샷: 버전(rtabmap/realsense/ROS/open3d/CUDA)·CPU·RAM·config 해시
 
 사용법:
-  python3 analyze_session.py --db session.db --log pipeline_xxx.log \
+  python3 analyze_session.py --db session.db --log pipeline_xxx.log \\
       [--guard-json capture_guard_xxx.json] --out session_xxx.summary.json
 
 로그 원문 전체를 저장하지 않고 집계값만 남겨 파일이 비대해지지 않게 한다.
 """
+
 
 import os
 import re

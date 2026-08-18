@@ -30,9 +30,13 @@ for arg in "$@"; do
         --voxel=*)
             VOXEL_ARG="--voxel ${arg#*=}"
             ;;
+        --trajectory=*)
+            TRAJ_ARG="--trajectory ${arg#*=}"
+            ;;
         --recon-method=*)
             RECON_METHOD_ARG="--method ${arg#*=}"
             ;;
+
         rtabmap)
             METHOD="rtabmap"
             ;;
@@ -100,11 +104,12 @@ elif [ "$METHOD" == "tsdf" ]; then
     echo "1️⃣ DB 검증 실행..."
     python3 "$PROJECT_DIR/src/auto_mobility/utils/validate.py" --db "$DB_FILE" || true
     echo "2️⃣ Open3D Tensor TSDF 재구성 실행 (원본 RGB-D + 최적화 pose 적분)..."
-    # TSDF 전용: --depth(Poisson octree)는 무시, --voxel만 전달
-    TSDF_ARGS="$VOXEL_ARG"
+    # TSDF 전용: --depth(Poisson octree)는 무시, --voxel 및 --trajectory 전달
+    TSDF_ARGS="$VOXEL_ARG $TRAJ_ARG"
     # shellcheck disable=SC2086
     python3 "$PROJECT_DIR/src/auto_mobility/mesh/reconstruct_tsdf.py" "$DB_FILE" "$MESH_PATH" $VIEW_FLAG $TSDF_ARGS
     echo "✅ TSDF Mesh 추출 완료: $MESH_PATH"
+
 else
     echo "1️⃣ DB에서 Point Cloud (.ply) 추출 중..."
     "$PIPELINE_DIR/../utils/export_ply.sh" "$(basename "$DB_FILE")" "${BASE_NAME}_cloud.ply"

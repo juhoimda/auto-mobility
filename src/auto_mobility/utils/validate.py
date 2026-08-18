@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 """
-Database, PointCloud, and Mesh Integrity Validator.
-Checks file sizes, SQLite table integrity, vertex density, bounding box scale, and color channels.
+validate.py — DB / PointCloud / Mesh 무결성 검증기
+
+파이프라인 내 역할: Quality Gate (각 단계 출력 검증)
+  - DB 검증:         RTAB-Map .db 파일 크기·SQLite 무결성 확인
+  - PointCloud 검증: PLY 파일 포인트 수·스케일·색상 채널 확인
+  - Mesh 검증:       OBJ/PLY 파일 vertex 수·좌표 스케일·비정형 vertex 확인
+
+run_pipeline_all.sh 의 GATEWAY 1(DB), GATEWAY 2(Mesh) 에서 호출된다.
+검증 실패 시 이후 단계를 차단하여 잘못된 입력이 downstream에 전파되지 않게 한다.
 """
+
 
 import sys
 import os

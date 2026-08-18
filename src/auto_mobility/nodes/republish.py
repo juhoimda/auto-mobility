@@ -40,11 +40,9 @@ from auto_mobility.config import (
     CAMERA_DEPTH_TOPIC,
     CAMERA_DEPTH_COMPRESSED_TOPIC,
     CAMERA_INFO_TOPIC,
+    CAMERA_INFO_WINDOWS_TOPIC,  # Windows 전용 CameraInfo 토픽 (config/topics.yaml 단일 소스)
 )
 
-# Windows realsense_pub.py가 발행하는 내부 전용 CameraInfo 토픽
-# (표준 /camera/camera/color/camera_info와 분리 유지 → 피드백 루프 제거)
-CAMERA_INFO_WINDOWS_TOPIC = '/camera/camera/color/camera_info_windows'
 
 SENSOR_QOS = QoSProfile(
     depth=5,

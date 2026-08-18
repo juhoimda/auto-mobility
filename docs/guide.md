@@ -188,8 +188,16 @@ python3 src/auto_mobility/monitor/analyze_session.py --db ros2_data/databases/my
 # [데이터셋 검증] 녹화된 bag 메시지 수 / Hz / sync / gap / 단조성 + 매니페스트
 python3 src/auto_mobility/utils/validate_bag.py ros2_data/bags/my_bag --out ros2_data/bags/my_bag/dataset_manifest.json
 
+# [표준 궤적(Trajectory) 추출] RTAB-Map DB -> TUM 형식(.txt) 궤적 내보내기
+python3 src/auto_mobility/trajectory/export_trajectory.py ros2_data/databases/my_room.db --opt 0
+
+# [동일 Rosbag 기반 알고리즘 비교 벤치마크]
+./scripts/pipeline/compare.sh [BAG_NAME] [--quick]
+# 예시: ./scripts/pipeline/compare.sh soak_3min --quick
+
 # [단위/통합 테스트] 테스트 스위트 실행 및 코드 커버리지 리포트
 ./scripts/utils/run_tests.sh
 ```
+
 
 

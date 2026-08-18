@@ -2,11 +2,13 @@
 """
 validate_bag.py — 녹화된 rosbag2(MCAP) 데이터셋 자동 검증 + 매니페스트 생성
 
-tmp.md §45-46 구현:
+검증 항목:
   - bag 존재 / 정상 판독 / 필수 토픽 존재 / 메시지 수 / 실제 Hz / zero-frame 토픽
   - CameraInfo 존재 / TF_static 존재 / IMU 존재 / timestamp 단조성 / 최대 gap
   - RGB↔Depth 동기화 delta 통계
-  - 매니페스트: git commit, 환경, 카메라 프로파일, 토픽 맵, config 해시
+
+매니페스트 생성:
+  - git commit, 환경, 카메라 프로파일, 토픽 맵, config 해시
 
 사용법:
   python3 validate_bag.py <bag_dir> [--out manifest.json] [--min-hz 15]

@@ -86,9 +86,9 @@ RELIABLE_QOS = QoSProfile(
 class TopicRateMonitor(Node):
     """모든 모니터링 토픽을 단일 노드에서 초경량 카운팅
 
-    추가 진단 (2026-08-14, tmp.md §36/§18):
-      - 토픽별 최대 프레임 gap (타임스탬프 기반)
-      - RGB↔Depth sync delta (같은 구간 내 최신 stamp 차이)
+    추가 진단 항목:
+      - 토픽별 최대 프레임 gap (타임스탬프 기반): 대규모 timestamp 공백 감지
+      - RGB↔Depth sync delta (같은 구간 내 최신 stamp 차이): 센서 동기화 품질 측정
     """
     def __init__(self, topics):
         super().__init__('capture_guard_monitor')

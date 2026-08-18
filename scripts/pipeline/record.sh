@@ -234,7 +234,7 @@ else
 fi
 rm -f "$QOS_OVERRIDE_YAML"
 
-# 6. 녹화 완료 후 자동 데이터셋 검증 + 매니페스트 생성 (tmp.md §45-46)
+# 6. 녹화 완료 후 자동 데이터셋 검증 + 매니페스트 생성
 if [ "$SKIP_VALIDATE" = false ]; then
     echo ""
     echo "🔍 [데이터셋 검증] ${TEMP_OUTPUT} 검사 중..."

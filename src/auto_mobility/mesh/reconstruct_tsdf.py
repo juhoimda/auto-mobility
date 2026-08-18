@@ -2,16 +2,30 @@
 """
 reconstruct_tsdf.py — RTAB-Map DB → Open3D Tensor TSDF → Mesh
 
-현재 파이프라인의 "누적 Point Cloud → Poisson" 대신, DB에 저장된
-원본 RGB-D 프레임 + 최적화 pose를 그대로 TSDF에 적분해 mesh를 만든다.
-여러 관측을 voxel에서 평균화하므로 단일 뷰 depth 노이즈(1~2cm)가
-표면으로 남지 않는다.
+파이프라인 내 역할: Reconstruction Backend (trajectory consumer)
+  Input : RTAB-Map DB (.db)
+            - 원본 RGB-D 프레임 (DB 내 PNG 저장)
+            - 카메라 intrinsics (calibration blob)
+            - 전역 최적화 pose (rtabmap-export --poses_camera --opt 0)
+  Output: OBJ/PLY mesh
+
+이 모듈은 /rtabmap/cloud_map을 사용하지 않는다.
+Depth + 최적화 pose를 TSDF에 직접 적분해 mesh를 생성하므로
+RTAB-Map의 PointCloud 생성 방식에 종속되지 않는다.
 
 동작 흐름:
-  1) extract_db_rgbd (C++ 헬퍼) → RGB-D 프레임 + intrinsics
-  2) rtabmap-export --poses_camera --opt {0|2} → 최적화 pose (map→depth_optical)
-  3) pose와 프레임을 node id로 매칭
-  4) Open3D Tensor VoxelBlockGrid (CUDA) 적분 → Marching Cubes → OBJ
+  1) extract_db_rgbd (C++ 헬퍼) → RGB-D 프레임 + intrinsics 추출
+  2) rtabmap-export --poses_camera --opt {0|2} → 최적화 pose 추출
+       --opt 0: 전역 pose graph 최적화 (기본, production)
+       --opt 2: DB 저장 pose (비교·디버그용)
+  3) pose와 프레임을 node_id로 1:1 매칭 (exact match)
+       node_id 없는 프레임은 skip (tracking loss 구간 자동 제외)
+  4) Open3D Tensor VoxelBlockGrid (CUDA/CPU) 적분 → Marching Cubes → OBJ
+
+Pose association 정책: exact match (node_id 기준)
+  rtabmap-export가 node_id별 pose를 제공하고 DB도 node_id로 프레임을 저장하므로
+  보간(interpolation)이나 nearest-timestamp 방식 없이 정확히 일대일 대응한다.
+  tolerance 없음 → timestamp 불일치로 인한 ghosting/이중 벽 원천 차단.
 
 사용법:
   python3 reconstruct_tsdf.py <session.db> <output.obj>
@@ -24,6 +38,7 @@ reconstruct_tsdf.py — RTAB-Map DB → Open3D Tensor TSDF → Mesh
   - 저장된 color는 depth 평면에 정렬됨 (depth 유효 마스크 전폭 커버 확인)
   - intrinsics: calibration blob의 depth 모델 (fx≈606, 640x480)
 """
+
 
 import sys
 import os
@@ -234,6 +249,8 @@ def main():
     parser.add_argument("--depth-min", type=float, default=0.3, help="최소 depth (m, 기본 0.3)")
     parser.add_argument("--poses-opt", type=int, default=0, choices=[0, 2],
                         help="rtabmap-export --opt: 0=전역 최적화(파이프라인과 동일), 2=DB 저장 pose")
+    parser.add_argument("--trajectory", default=None,
+                        help="외부 TUM Trajectory 파일 경로 (.txt). 지정 시 DB 내부 pose 대신 이 궤적을 사용하여 TSDF 적분.")
     parser.add_argument("--weight-thr", type=float, default=1.5, help="표면 추출 weight 임계값 (기본 1.5, 2026-08-12 조정: 기존 3.0은 sparse 적분 시 표면 4배 축소 유발)")
     parser.add_argument("--block-count", type=int, default=50000, help="voxel block hash map 용량")
     parser.add_argument("--no-color", action="store_true", help="geometry 전용 (컬러 통합 생략)")
@@ -260,13 +277,21 @@ def main():
 
     t0 = time.time()
     frames_txt = extract_frames(db_path, workdir, build_script)
-    poses_file = export_poses(db_path, workdir, args.poses_opt)
-    poses = load_poses(poses_file)
-    if poses_file.startswith(os.path.dirname(db_path)):
-        try:
-            os.unlink(poses_file)  # rtabmap-export가 DB 디렉터리에 남긴 임시 pose 파일 정리
-        except OSError:
-            pass
+
+    if args.trajectory and os.path.exists(args.trajectory):
+        print(f"📍 외부 Trajectory 파일 사용: {args.trajectory}")
+        from auto_mobility.trajectory.io import Trajectory
+        traj = Trajectory.from_tum_file(args.trajectory)
+        poses = traj.to_pose_matrix_dict()
+    else:
+        poses_file = export_poses(db_path, workdir, args.poses_opt)
+        poses = load_poses(poses_file)
+        if poses_file.startswith(os.path.dirname(db_path)):
+            try:
+                os.unlink(poses_file)  # rtabmap-export가 DB 디렉터리에 남긴 임시 pose 파일 정리
+            except OSError:
+                pass
+
     frames = load_frames(frames_txt)
     print(f"🎞️  프레임 {len(frames)} / pose {len(poses)}")
 

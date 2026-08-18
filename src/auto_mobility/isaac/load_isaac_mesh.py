@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """
-Isaac Sim Standalone Mesh Loader Script
-Load 3D Mesh (.obj, .ply, .usd, .usda) generated from Open3D into Isaac Sim stage.
-Applies lighting, ground plane, and physical collision boundaries (Triangle Mesh Collider with Fallback).
+load_isaac_mesh.py — NVIDIA Isaac Sim 디지털 트윈 Mesh 로더
+
+파이프라인 내 역할: Downstream Consumer (최종 출력 소비)
+  - Input:  OBJ/PLY/USD/USDA mesh (reconstruct_tsdf.py 또는 mesh_open3d.py 출력)
+  - Action: Isaac Sim Stage에 Mesh 로드 + 조명 + 지면 + 물리 충돌 경계 적용
+  - Note:   Mesh 로드 실패(파일 없음·크기 0)는 Isaac Sim 진입 전에 barrier가 차단한다.
+
+Isaac Sim 요구사항 때문에 센서 캡처 또는 SLAM 아키텍처를 변경하지 않는다.
+검증된 derived artifact(mesh + coordinate metadata)만 여기서 소비한다.
 """
+
 
 import sys
 import os

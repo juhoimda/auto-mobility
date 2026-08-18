@@ -1,7 +1,26 @@
 #!/bin/bash
-# End-to-End Real-to-Sim Pipeline Orchestrator with Integrity Barriers
-# Step 1: Real-time Camera Capture + RTAB-Map SLAM -> rtabmap.db & PointCloud
-# Step 2: Open3D Mesh Reconstruction (.obj) -> Isaac Sim Digital Twin Ingestion
+# ============================================================
+# run_pipeline_all.sh — End-to-End Real-to-Sim 파이프라인 오케스트레이터
+#
+# 파이프라인 흐름:
+#   STEP 1: D435i → Windows publisher → DDS → WSL
+#           → RTAB-Map Visual SLAM (rtab_live.launch.py)
+#           → databases/<session>.db
+#
+#   GATEWAY 1: DB 무결성 검증 (validate.py)
+#
+#   STEP 2-1: databases/<session>.db
+#             → Open3D Tensor TSDF reconstruction (reconstruct_tsdf.py)
+#             → meshes/<session>_tsdf.obj
+#
+#   GATEWAY 2: Mesh 무결성 검증 (validate.py)
+#
+#   STEP 2-2: meshes/<session>_tsdf.obj
+#             → Isaac Sim 디지털 트윈 로드 (isaac.sh → load_isaac_mesh.py)
+#
+# 주의: RTAB-Map DB는 derived artifact이며 raw dataset(bags/)이 source of truth다.
+#   Mesh reconstruction에는 /rtabmap/cloud_map이 아닌 DB 내 원본 RGB-D + 최적화 pose를 사용.
+# ============================================================
 
 PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$PIPELINE_DIR/../common.sh"

@@ -12,12 +12,15 @@ BAG_DIR="$DATA_DIR/bags"
 DB_DIR="$DATA_DIR/databases"
 POINTCLOUD_DIR="$DATA_DIR/pointclouds"
 MESH_DIR="$DATA_DIR/meshes"
+TRAJECTORY_DIR="$DATA_DIR/trajectories"
+BENCHMARK_DIR="$DATA_DIR/benchmarks"
 ISAAC_DIR="$DATA_DIR/isaac_sim"
 LOG_DIR="$DATA_DIR/logs"
 SHARED_DIR="/mnt/c/ubuntu_shared"
 
 RAM_BAG_DIR="/dev/shm/ros2_bags"
 STORAGE_FORMAT="mcap"
+
 
 # config/topics.yaml 를 단일 소스로 토픽명 로드 (기존 환경변수 오버라이드 유지)
 if [ -f "$PROJECT_DIR/config/topics.yaml" ]; then
@@ -114,7 +117,8 @@ if [ -z "${CYCLONEDDS_URI:-}" ] && [ -f "$PROJECT_DIR/config/dds/cyclonedds_came
     export CYCLONEDDS_URI="file://$PROJECT_DIR/config/dds/cyclonedds_camera.xml"
 fi
 
-mkdir -p "$BAG_DIR" "$DB_DIR" "$POINTCLOUD_DIR" "$MESH_DIR" "$ISAAC_DIR" "$LOG_DIR" "$RAM_BAG_DIR"
+mkdir -p "$BAG_DIR" "$DB_DIR" "$POINTCLOUD_DIR" "$MESH_DIR" "$TRAJECTORY_DIR" "$BENCHMARK_DIR" "$ISAAC_DIR" "$LOG_DIR" "$RAM_BAG_DIR"
+
 
 # 토픽 존재/수신 확인 (ros2 CLI 데몬 hang 문제 회피 — topic_probe.py 사용)
 # 사용법: topic_exists <topic> [timeout_sec]  → 0=수신 확인 / 1=없음
