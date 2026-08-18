@@ -3,7 +3,9 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.substitutions import LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
+
 from auto_mobility.launch.launch_common import (
     RTABMAP_ARGS,
     ODOM_ARGS,
@@ -49,6 +51,15 @@ def generate_launch_description():
         description='Name of raw depth topic'
     )
 
+    # Windows 원격 카메라 또는 Bag 재생 시 static TF 보장 (camera_link -> optical frames)
+    camera_tf_pub_node = Node(
+        package='auto_mobility',
+        executable='camera_tf_pub.py',
+        name='camera_tf_publisher_bag',
+        output='screen',
+        parameters=[{'use_sim_time': True}],
+    )
+
     # 공통 노드 생성 (Bag 환경: use_sim_time=True)
     republish_compressed_node = create_republish_node(
         use_sim_time=True,
@@ -83,9 +94,11 @@ def generate_launch_description():
         depth_compressed_topic_arg,
         depth_topic_arg,
         use_imu_arg,
+        camera_tf_pub_node,
         republish_compressed_node,
         imu_filter_node,
         cloud_throttle_node,
         point_cloud_node,
         rtabmap_launch
     ])
+

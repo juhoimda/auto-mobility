@@ -1,129 +1,110 @@
 #!/bin/bash
+# mesh.sh — DB/Rosbag으로부터 3D Point Cloud(.ply) 및 3D Surface Mesh(.obj)를 생성
 
 PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$PIPELINE_DIR/../common.sh"
 export PYTHONWARNINGS="ignore"
 
-POSITIONAL_ARGS=()
+SLAM_TYPE="rtab"
+VOXEL="0.02"
 VIEW_FLAG=""
-FORCE_FLAG=""
-METHOD="open3d"
-DEPTH_ARG=""
-VOXEL_ARG=""
-RECON_METHOD_ARG=""
+INPUT_NAME=""
+CUSTOM_OUT=""
 
-# 파라미터 파싱
 for arg in "$@"; do
     case $arg in
         --view)
             VIEW_FLAG="--view"
             ;;
-        --force)
-            FORCE_FLAG="--force"
-            ;;
-        --method=*)
-            METHOD="${arg#*=}"
-            ;;
-        --depth=*)
-            DEPTH_ARG="--depth ${arg#*=}"
+        --slam=*)
+            SLAM_TYPE="${arg#*=}"
             ;;
         --voxel=*)
-            VOXEL_ARG="--voxel ${arg#*=}"
+            VOXEL="${arg#*=}"
             ;;
-        --recon-method=*)
-            RECON_METHOD_ARG="--method ${arg#*=}"
+        --fine)
+            VOXEL="0.005"
             ;;
-        rtabmap)
-            METHOD="rtabmap"
+        rtab|rtabmap)
+            SLAM_TYPE="rtab"
             ;;
-        tsdf)
-            METHOD="tsdf"
-            ;;
-        open3d)
-            METHOD="open3d"
+        orb|orbslam|orbslam3)
+            SLAM_TYPE="orb"
             ;;
         -*)
             echo "⚠️ 알 수 없는 옵션: $arg"
             ;;
         *)
-            POSITIONAL_ARGS+=("$arg")
+            if [ -z "$INPUT_NAME" ]; then
+                INPUT_NAME="$arg"
+            elif [ -z "$CUSTOM_OUT" ]; then
+                CUSTOM_OUT="$arg"
+            fi
             ;;
     esac
 done
 
-if [ ${#POSITIONAL_ARGS[@]} -lt 1 ]; then
+if [ -z "$INPUT_NAME" ]; then
     echo "=========================================================="
-    echo " 사용법: $0 DB_NAME [OUTPUT_MESH_NAME] [--view] [--force] [--method open3d|rtabmap|tsdf] [--depth=8] [--voxel=0.01] [--recon-method=poisson|bpa]"
-    echo " 예시  : $0 my_room_db.db my_room_mesh.obj --view --depth=9"
-    echo " 예시  : $0 my_room_db.db my_room_tsdf.obj --method=tsdf --voxel=0.01"
+    echo " 사용법: $0 DATASET_NAME [--slam=rtab|orb] [--voxel=0.01|0.005|--fine] [--view]"
+    echo " 예시 (기본 RTAB-Map 10mm)    : $0 my_dataset --view"
+    echo " 예시 (ORB-SLAM3 궤적 적용)   : $0 my_dataset --slam=orb --view"
+    echo " 예시 (5mm 초고정밀 메쉬)     : $0 my_dataset --fine --view"
     echo "=========================================================="
     exit 1
 fi
 
-DB_INPUT="${POSITIONAL_ARGS[0]}"
-OUTPUT_MESH_ARG="${POSITIONAL_ARGS[1]}"
+BASE_NAME="$(basename "$INPUT_NAME" .db)"
 
-# .db 확장자 처리
-if [[ "$DB_INPUT" != *.db ]]; then
-    DB_FILE="$DB_DIR/$DB_INPUT.db"
-    BASE_NAME="$DB_INPUT"
-else
-    DB_FILE="$DB_DIR/$DB_INPUT"
-    BASE_NAME="${DB_INPUT%.db}"
-fi
-
-OUTPUT_MESH_NAME="${OUTPUT_MESH_ARG:-${BASE_NAME}_mesh.obj}"
-
-PLY_PATH="$POINTCLOUD_DIR/${BASE_NAME}_cloud.ply"
-MESH_PATH="$MESH_DIR/$OUTPUT_MESH_NAME"
-
+# 1. DB 확인 또는 자동 SLAM 생성
+DB_FILE="$DB_DIR/${BASE_NAME}.db"
 if [ ! -f "$DB_FILE" ]; then
-    echo "❌ 오류: DB 파일이 존재하지 않습니다 -> $DB_FILE"
-    echo "💡 팁: $DB_DIR 디렉터리에 .db 파일이 있는지 확인하세요."
-    exit 1
+    echo "⚙️ DB 파일이 없어 SLAM을 자동 실행합니다..."
+    "$PIPELINE_DIR/run_slam.sh" "$BASE_NAME" --slam=rtab
 fi
 
-echo "=========================================================="
-echo " 🚀 Digital Twin 3D Mesh 파이프라인 시작"
-echo " 📁 입력 DB   : $DB_FILE"
-echo " 🛠️ 방식      : $METHOD"
-echo " 💾 출력 Mesh : $MESH_PATH"
-echo "=========================================================="
-
-if [ "$METHOD" == "rtabmap" ]; then
-    echo "1️⃣ DB 검증 실행..."
-    python3 "$PROJECT_DIR/src/auto_mobility/utils/validate.py" --db "$DB_FILE" || true
-    echo "2️⃣ RTAB-Map 자체 텍스처 Mesh 추출 실행..."
-    rtabmap-export --mesh --texture --output "$MESH_PATH" "$DB_FILE"
-    echo "✅ RTAB-Map Mesh 추출 완료: $MESH_PATH"
-elif [ "$METHOD" == "tsdf" ]; then
-    echo "1️⃣ DB 검증 실행..."
-    python3 "$PROJECT_DIR/src/auto_mobility/utils/validate.py" --db "$DB_FILE" || true
-    echo "2️⃣ Open3D Tensor TSDF 재구성 실행 (원본 RGB-D + 최적화 pose 적분)..."
-    # TSDF 전용: --depth(Poisson octree)는 무시, --voxel만 전달
-    TSDF_ARGS="$VOXEL_ARG"
-    # shellcheck disable=SC2086
-    python3 "$PROJECT_DIR/src/auto_mobility/mesh/reconstruct_tsdf.py" "$DB_FILE" "$MESH_PATH" $VIEW_FLAG $TSDF_ARGS
-    echo "✅ TSDF Mesh 추출 완료: $MESH_PATH"
-else
-    echo "1️⃣ DB에서 Point Cloud (.ply) 추출 중..."
-    "$PIPELINE_DIR/../utils/export_ply.sh" "$(basename "$DB_FILE")" "${BASE_NAME}_cloud.ply"
-
-    echo ""
-    echo "🔍 [자동 품질 검증] Point Cloud & DB 헬스 체크 실행 중..."
-    if ! python3 "$PROJECT_DIR/src/auto_mobility/utils/validate.py" --db "$DB_FILE" --ply "$PLY_PATH"; then
-        echo ""
-        if [ "$FORCE_FLAG" == "--force" ]; then
-            echo "⚠️  [주의] 데이터 품질 경고가 발생했으나 --force 옵션으로 계속 진행합니다."
-        else
-            echo "❌ [자동 중단] 품질 검증 기준 미달로 Mesh 생성을 중단합니다."
-            echo "💡 팁: 경고를 무시하고 강제로 생성하려면 '--force' 옵션을 붙여주세요."
-            echo "      예시: $0 $1 --force"
-            exit 1
-        fi
+# 2. ORB-SLAM3 궤적 여부 확인
+TRAJ_ARG=""
+SUFFIX="_tsdf"
+if [ "$SLAM_TYPE" == "orb" ] || [ "$SLAM_TYPE" == "orbslam" ] || [ "$SLAM_TYPE" == "orbslam3" ]; then
+    ORB_TRAJ="$TRAJECTORY_DIR/orbslam3_${BASE_NAME}_trajectory.txt"
+    if [ ! -f "$ORB_TRAJ" ]; then
+        echo "⚙️ ORB-SLAM3 궤적이 없어 궤적 추출을 먼저 실행합니다..."
+        "$PIPELINE_DIR/run_slam.sh" "$BASE_NAME" --slam=orb
     fi
+    TRAJ_ARG="--trajectory=$ORB_TRAJ"
+    SUFFIX="_orbslam"
+fi
 
-    echo ""
-    echo "2️⃣ Open3D 기반 3D Mesh 고속 복원 및 정제 중..."
-    python3 "$PROJECT_DIR/src/auto_mobility/mesh/mesh_open3d.py" "$PLY_PATH" "$MESH_PATH" $VIEW_FLAG $DEPTH_ARG $VOXEL_ARG $RECON_METHOD_ARG
+if [ "$VOXEL" == "0.005" ]; then
+    SUFFIX="${SUFFIX}_fine"
+fi
+
+OUT_MESH="${CUSTOM_OUT:-$MESH_DIR/${BASE_NAME}${SUFFIX}.obj}"
+OUT_PCD="$POINTCLOUD_DIR/${BASE_NAME}${SUFFIX}_cloud.ply"
+
+echo "=========================================================="
+echo " 🔨 3D 복원 시작 (TSDF Voxel: ${VOXEL}m)"
+echo " 📁 입력 DB   : $DB_FILE"
+echo " 🛠️ SLAM 엔진 : $SLAM_TYPE"
+echo " ☁️ 점군 출력 : $OUT_PCD"
+echo " 💾 메쉬 출력 : $OUT_MESH"
+echo "=========================================================="
+
+python3 "$PROJECT_DIR/src/auto_mobility/mesh/reconstruct_tsdf.py" \
+    "$DB_FILE" "$OUT_MESH" \
+    --pcd-output="$OUT_PCD" \
+    --voxel="$VOXEL" \
+    $TRAJ_ARG
+
+if [ $? -eq 0 ]; then
+    echo "=========================================================="
+    echo " ✅ 3D 복원 완료!"
+    echo " ☁️ 점군 확인: ./scripts/utils/view_pointcloud.sh $(basename "$OUT_PCD")"
+    echo " 💾 메쉬 확인: ./scripts/utils/view_mesh.sh $(basename "$OUT_MESH")"
+    echo "=========================================================="
+    
+    if [ -n "$VIEW_FLAG" ]; then
+        "$PROJECT_DIR/scripts/utils/view_mesh.sh" "$OUT_MESH"
+    fi
 fi

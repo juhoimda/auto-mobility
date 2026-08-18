@@ -8,6 +8,14 @@ camera:
   aligned_depth_topic: "/camera/camera/aligned_depth_to_color/image_raw"
   aligned_depth_compressed_topic: "/camera/camera/aligned_depth_to_color/image_raw/compressedDepth"
   camera_info_topic: "/camera/camera/color/camera_info"
+  # Windows 네이티브 realsense_pub.py 가 직접 발행하는 원본 CameraInfo (republish.py가 구독)
+  camera_info_windows_topic: "/camera/camera/color/camera_info_windows"
+  infra1_topic: "/camera/camera/infra1/image_rect_raw"
+  infra1_compressed_topic: "/camera/camera/infra1/image_rect_raw/compressed"
+  infra1_camera_info_windows_topic: "/camera/camera/infra1/camera_info_windows"
+  infra2_topic: "/camera/camera/infra2/image_rect_raw"
+  infra2_compressed_topic: "/camera/camera/infra2/image_rect_raw/compressed"
+  infra2_camera_info_windows_topic: "/camera/camera/infra2/camera_info_windows"
   imu_topic: "/camera/camera/imu"
   imu_filtered_topic: "/camera/camera/imu/filtered"
 

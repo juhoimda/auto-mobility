@@ -12,12 +12,15 @@ BAG_DIR="$DATA_DIR/bags"
 DB_DIR="$DATA_DIR/databases"
 POINTCLOUD_DIR="$DATA_DIR/pointclouds"
 MESH_DIR="$DATA_DIR/meshes"
+TRAJECTORY_DIR="$DATA_DIR/trajectories"
+BENCHMARK_DIR="$DATA_DIR/benchmarks"
 ISAAC_DIR="$DATA_DIR/isaac_sim"
 LOG_DIR="$DATA_DIR/logs"
 SHARED_DIR="/mnt/c/ubuntu_shared"
 
 RAM_BAG_DIR="/dev/shm/ros2_bags"
 STORAGE_FORMAT="mcap"
+
 
 # config/topics.yaml 를 단일 소스로 토픽명 로드 (기존 환경변수 오버라이드 유지)
 if [ -f "$PROJECT_DIR/config/topics.yaml" ]; then
@@ -35,6 +38,13 @@ mapping = {
     "ALIGNED_DEPTH_TOPIC": camera.get("aligned_depth_topic"),
     "ALIGNED_DEPTH_COMPRESSED_TOPIC": camera.get("aligned_depth_compressed_topic"),
     "CAMERA_INFO_TOPIC": camera.get("camera_info_topic"),
+    "CAMERA_INFO_WINDOWS_TOPIC": camera.get("camera_info_windows_topic"),
+    "INFRA1_TOPIC": camera.get("infra1_topic"),
+    "INFRA1_COMPRESSED_TOPIC": camera.get("infra1_compressed_topic"),
+    "INFRA1_INFO_WINDOWS_TOPIC": camera.get("infra1_camera_info_windows_topic"),
+    "INFRA2_TOPIC": camera.get("infra2_topic"),
+    "INFRA2_COMPRESSED_TOPIC": camera.get("infra2_compressed_topic"),
+    "INFRA2_INFO_WINDOWS_TOPIC": camera.get("infra2_camera_info_windows_topic"),
     "IMU_TOPIC": camera.get("imu_topic"),
     "IMU_FILTERED_TOPIC": camera.get("imu_filtered_topic"),
     "ODOM_TOPIC": rtabmap.get("odom_topic"),
@@ -57,6 +67,13 @@ DEPTH_COMPRESSED_TOPIC="${DEPTH_COMPRESSED_TOPIC:-/camera/camera/depth/image_rec
 ALIGNED_DEPTH_TOPIC="${ALIGNED_DEPTH_TOPIC:-/camera/camera/aligned_depth_to_color/image_raw}"
 ALIGNED_DEPTH_COMPRESSED_TOPIC="${ALIGNED_DEPTH_COMPRESSED_TOPIC:-/camera/camera/aligned_depth_to_color/image_raw/compressedDepth}"
 CAMERA_INFO_TOPIC="${CAMERA_INFO_TOPIC:-/camera/camera/color/camera_info}"
+CAMERA_INFO_WINDOWS_TOPIC="${CAMERA_INFO_WINDOWS_TOPIC:-/camera/camera/color/camera_info_windows}"
+INFRA1_TOPIC="${INFRA1_TOPIC:-/camera/camera/infra1/image_rect_raw}"
+INFRA1_COMPRESSED_TOPIC="${INFRA1_COMPRESSED_TOPIC:-/camera/camera/infra1/image_rect_raw/compressed}"
+INFRA1_INFO_WINDOWS_TOPIC="${INFRA1_INFO_WINDOWS_TOPIC:-/camera/camera/infra1/camera_info_windows}"
+INFRA2_TOPIC="${INFRA2_TOPIC:-/camera/camera/infra2/image_rect_raw}"
+INFRA2_COMPRESSED_TOPIC="${INFRA2_COMPRESSED_TOPIC:-/camera/camera/infra2/image_rect_raw/compressed}"
+INFRA2_INFO_WINDOWS_TOPIC="${INFRA2_INFO_WINDOWS_TOPIC:-/camera/camera/infra2/camera_info_windows}"
 IMU_TOPIC="${IMU_TOPIC:-/camera/camera/imu}"
 IMU_FILTERED_TOPIC="${IMU_FILTERED_TOPIC:-/camera/camera/imu/filtered}"
 ODOM_TOPIC="${ODOM_TOPIC:-/rtabmap/odom}"
@@ -84,14 +101,15 @@ PYEOF
 fi
 USB_3_MIN_SPEED_MBPS="${USB_3_MIN_SPEED_MBPS:-5000}"
 
-# 카메라 구동 위치 (2026-08-13 추가)
+# 카메라 구동 위치 (기본값: remote - Windows 네이티브 RealSense D435i 스트림 수신)
+#   remote: Windows 네이티브에서 발행하는 토픽을 수신 (기본)
 #   local : WSL USB 패스스루(usbipd) — WSL에서 camera.launch.py 로 직접 구동
-#   remote: Windows 네이티브에서 발행하는 토픽을 수신 — WSL에서는 드라이버 미구동
-CAMERA_MODE="${CAMERA_MODE:-local}"
+CAMERA_MODE="${CAMERA_MODE:-remote}"
 export CAMERA_MODE
-# 원격 카메라 시 압축 토픽 기본 사용 (로컬은 raw 그대로)
-USE_COMPRESSED="${USE_COMPRESSED:-false}"
+# 원격 카메라 시 압축 토픽 기본 사용 (로컬은 raw 선택 가능)
+USE_COMPRESSED="${USE_COMPRESSED:-true}"
 export USE_COMPRESSED
+
 
 # ROS 2 도메인 ID 기본값 (Windows 카메라 env_ros2.bat 의 42 와 일치)
 # 미설정 시 42 로 자동 설정 → Windows/WSL 양쪽 같은 도메인에서 토픽 수신 가능
@@ -112,7 +130,14 @@ if [ -z "${CYCLONEDDS_URI:-}" ] && [ -f "$PROJECT_DIR/config/dds/cyclonedds_came
     export CYCLONEDDS_URI="file://$PROJECT_DIR/config/dds/cyclonedds_camera.xml"
 fi
 
-mkdir -p "$BAG_DIR" "$DB_DIR" "$POINTCLOUD_DIR" "$MESH_DIR" "$ISAAC_DIR" "$LOG_DIR" "$RAM_BAG_DIR"
+mkdir -p "$BAG_DIR" "$DB_DIR" "$POINTCLOUD_DIR" "$MESH_DIR" "$TRAJECTORY_DIR" "$BENCHMARK_DIR" "$ISAAC_DIR" "$LOG_DIR" "$RAM_BAG_DIR"
+
+
+# 토픽 존재/수신 확인 (ros2 CLI 데몬 hang 문제 회피 — topic_probe.py 사용)
+# 사용법: topic_exists <topic> [timeout_sec]  → 0=수신 확인 / 1=없음
+topic_exists() {
+    python3 "$PROJECT_DIR/scripts/utils/topic_probe.py" "$1" "${2:-3}" >/dev/null 2>&1
+}
 
 if [ -f "$PROJECT_DIR/install/setup.bash" ]; then
     source "$PROJECT_DIR/install/setup.bash"

@@ -22,8 +22,11 @@ from sensor_msgs.msg import Image, CompressedImage, CameraInfo, Imu
 from nav_msgs.msg import Odometry
 from auto_mobility.config import (
     CAMERA_RGB_TOPIC,
+    CAMERA_RGB_COMPRESSED_TOPIC,
     CAMERA_DEPTH_TOPIC,
+    CAMERA_DEPTH_COMPRESSED_TOPIC,
     CAMERA_INFO_TOPIC,
+    CAMERA_INFO_WINDOWS_TOPIC,
     CAMERA_IMU_TOPIC,
     ODOM_TOPIC,
     LOG_DIR,
@@ -43,6 +46,16 @@ MONITOR_TOPICS = [
     (CAMERA_INFO_TOPIC,  15.0, "Info"),
     (CAMERA_IMU_TOPIC,  100.0, "IMU"),
     (ODOM_TOPIC,          3.0, "Odom"),
+]
+
+# 원격(Windows 카메라) 모드에서는 raw 토픽 대신 압축 토픽을 감시한다.
+# republish.py 가 없으면 raw 토픽이 발행되지 않기 때문 (capture-safe 모드).
+REMOTE_MONITOR_TOPICS = [
+    (CAMERA_RGB_COMPRESSED_TOPIC,   15.0, "RGB"),
+    (CAMERA_DEPTH_COMPRESSED_TOPIC, 15.0, "Depth"),
+    (CAMERA_INFO_WINDOWS_TOPIC,     15.0, "Info"),
+    (CAMERA_IMU_TOPIC,             100.0, "IMU"),
+    (ODOM_TOPIC,                     3.0, "Odom"),
 ]
 
 GUARD_PROCS = [
@@ -71,27 +84,56 @@ RELIABLE_QOS = QoSProfile(
 
 
 class TopicRateMonitor(Node):
-    """모든 모니터링 토픽을 단일 노드에서 초경량 카운팅"""
+    """모든 모니터링 토픽을 단일 노드에서 초경량 카운팅
+
+    추가 진단 항목:
+      - 토픽별 최대 프레임 gap (타임스탬프 기반): 대규모 timestamp 공백 감지
+      - RGB↔Depth sync delta (같은 구간 내 최신 stamp 차이): 센서 동기화 품질 측정
+    """
     def __init__(self, topics):
         super().__init__('capture_guard_monitor')
         self._counts = {t[0]: 0 for t in topics}
         self._lock = threading.Lock()
+        self._last_stamp = {}
+        self._max_gap = {t[0]: 0.0 for t in topics}
+        self._rgb_topic = None
+        self._depth_topic = None
+        for t, _, label in topics:
+            if label == "RGB":
+                self._rgb_topic = t
+            if label == "Depth":
+                self._depth_topic = t
 
         for topic, _, label in topics:
-            qos = SENSOR_QOS
-            msg_type = Image
-            if 'info' in topic:
+            if 'camera_info' in topic:
                 msg_type = CameraInfo
+                qos = RELIABLE_QOS
             elif 'imu' in topic:
                 msg_type = Imu
+                qos = SENSOR_QOS
             elif 'odom' in topic:
                 msg_type = Odometry
+                qos = SENSOR_QOS
+            elif 'compressed' in topic.lower() or 'compresseddepth' in topic.lower():
+                msg_type = CompressedImage
+                qos = RELIABLE_QOS
+            else:
+                msg_type = Image
                 qos = SENSOR_QOS
 
             def make_cb(t_name):
                 def _cb(msg):
                     with self._lock:
                         self._counts[t_name] += 1
+                        stamp = getattr(getattr(msg, 'header', None), 'stamp', None)
+                        if stamp is not None and stamp.sec > 0:
+                            sec = stamp.sec + stamp.nanosec * 1e-9
+                            prev = self._last_stamp.get(t_name)
+                            if prev is not None:
+                                gap = sec - prev
+                                if 0 < gap < 60.0:
+                                    self._max_gap[t_name] = max(self._max_gap[t_name], gap)
+                            self._last_stamp[t_name] = sec
                 return _cb
 
             self.create_subscription(msg_type, topic, make_cb(topic), qos)
@@ -99,10 +141,21 @@ class TopicRateMonitor(Node):
     def get_and_reset(self, dt: float) -> dict:
         with self._lock:
             rates = {}
+            gaps = {}
             for t, count in self._counts.items():
                 rates[t] = count / dt if dt > 0 else 0.0
                 self._counts[t] = 0
-            return rates
+                gaps[t] = self._max_gap.get(t, 0.0)
+                self._max_gap[t] = 0.0
+
+            # RGB↔Depth sync delta (최신 stamp 차이, 1 interval 1샘플)
+            sync_delta = None
+            if self._rgb_topic and self._depth_topic:
+                rgb_ts = self._last_stamp.get(self._rgb_topic)
+                depth_ts = self._last_stamp.get(self._depth_topic)
+                if rgb_ts and depth_ts:
+                    sync_delta = abs(rgb_ts - depth_ts)
+            return rates, gaps, sync_delta
 
 
 def get_proc_cpu_ram(proc_names):
@@ -146,9 +199,9 @@ def get_usb_status():
     return "미감지"
 
 
-def build_md(samples, usb, duration):
+def build_md(samples, usb, duration, monitor_topics):
     """Markdown 보고서 생성"""
-    topic_cols = [label for _, _, label in MONITOR_TOPICS]
+    topic_cols = [label for _, _, label in monitor_topics]
     step = max(1, len(samples) // 20)
     rows = samples[::step]
 
@@ -166,16 +219,31 @@ def build_md(samples, usb, duration):
 |---|{'---|' * len(topic_cols)}---|---|
 """
     for s in rows:
-        rates_str = ' | '.join(f"{s['rates'].get(t[0], 0.0):.1f}" for t in MONITOR_TOPICS)
+        rates_str = ' | '.join(f"{s['rates'].get(t[0], 0.0):.1f}" for t in monitor_topics)
         md += f"| {s['elapsed']:.1f} | {rates_str} | {s['cpu_total']:.1f} | {s['ram_mb']:.0f} |\n"
 
     avg_rates = {}
-    for t, min_hz, label in MONITOR_TOPICS:
+    for t, min_hz, label in monitor_topics:
         vals = [s['rates'].get(t, 0.0) for s in samples]
         avg_rates[label] = (sum(vals) / len(vals)) if vals else 0.0
 
     avg_cpu = sum(s['cpu_total'] for s in samples) / len(samples) if samples else 0.0
     avg_ram = sum(s['ram_mb'] for s in samples) / len(samples) if samples else 0.0
+
+    # 최대 프레임 gap (토픽별)
+    max_gaps = {}
+    for t, _, label in monitor_topics:
+        max_gaps[label] = max((s['max_gaps'].get(t, 0.0) for s in samples), default=0.0)
+
+    # RGB↔Depth sync delta 통계
+    deltas = [s['sync_delta'] for s in samples if s.get('sync_delta')]
+    sync_summary = "N/A (RGB/Depth 수신 없음)"
+    if deltas:
+        d = sorted(deltas)
+        n = len(d)
+        sync_summary = (f"mean {sum(d) / n * 1000:.1f}ms | "
+                        f"p95 {d[int(n * 0.95) - 1] * 1000:.1f}ms | "
+                        f"max {d[-1] * 1000:.1f}ms")
 
     md += f"""
 ---
@@ -185,10 +253,15 @@ def build_md(samples, usb, duration):
 | 항목 | 측정값 | 상태 |
 |---|---|---|
 """
-    for t, min_hz, label in MONITOR_TOPICS:
+    for t, min_hz, label in monitor_topics:
         hz = avg_rates[label]
         status = "✅ 정상" if hz >= min_hz * 0.8 else "⚠️ 저하"
         md += f"| **{label} 평균 Hz** | {hz:.1f} Hz (기준: {min_hz:.0f} Hz) | {status} |\n"
+
+    md += f"""| **RGB↔Depth sync delta** | {sync_summary} | - |
+"""
+    for label, gap in max_gaps.items():
+        md += f"| **{label} 최대 프레임 gap** | {gap * 1000:.0f} ms | {'✅' if gap < 0.5 else '⚠️'} |\n"
 
     md += f"""| **평균 CPU 사용률** | {avg_cpu:.1f} % | - |
 | **평균 RAM 사용량** | {avg_ram:.0f} MB | - |
@@ -203,14 +276,18 @@ def main():
     parser.add_argument('--headless', action='store_true')
     parser.add_argument('--report', type=str, default=None)
     parser.add_argument('--json', type=str, default=None)
+    parser.add_argument('--remote', action='store_true',
+                        help='원격(Windows 카메라) 모드: raw 대신 압축 토픽 감시')
     args = parser.parse_args()
+
+    monitor_topics = REMOTE_MONITOR_TOPICS if args.remote else MONITOR_TOPICS
 
     try:
         rclpy.init()
     except Exception:
         pass
 
-    monitor_node = TopicRateMonitor(MONITOR_TOPICS)
+    monitor_node = TopicRateMonitor(monitor_topics)
     executor = rclpy.executors.SingleThreadedExecutor()
     executor.add_node(monitor_node)
 
@@ -238,20 +315,22 @@ def main():
             dt = now - t_last
             t_last = now
 
-            rates = monitor_node.get_and_reset(dt)
+            rates, gaps, sync_delta = monitor_node.get_and_reset(dt)
             proc_cpu, ram_mb = get_proc_cpu_ram(GUARD_PROCS)
             cpu_total = sum(proc_cpu.values())
 
             sample = {
                 "elapsed": now - t_start,
                 "rates": rates,
+                "max_gaps": gaps,
+                "sync_delta": sync_delta,
                 "cpu_total": cpu_total,
                 "ram_mb": ram_mb,
             }
             samples.append(sample)
 
             if not args.headless:
-                rates_disp = " | ".join(f"{label}: {rates.get(t, 0.0):.1f}Hz" for t, _, label in MONITOR_TOPICS)
+                rates_disp = " | ".join(f"{label}: {rates.get(t, 0.0):.1f}Hz" for t, _, label in monitor_topics)
                 print(f"[capture_guard] {rates_disp} | CPU: {cpu_total:.1f}% | RAM: {ram_mb:.0f}MB")
     except (KeyboardInterrupt, SystemExit):
         pass
@@ -272,7 +351,7 @@ def main():
             if args.report:
                 os.makedirs(os.path.dirname(os.path.abspath(args.report)), exist_ok=True)
                 with open(args.report, "w", encoding="utf-8") as f:
-                    f.write(build_md(samples, usb, duration))
+                    f.write(build_md(samples, usb, duration, monitor_topics))
                 print(f"📄 보고서 저장: {args.report}")
 
             if args.json:

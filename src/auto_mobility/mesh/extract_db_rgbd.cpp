@@ -98,12 +98,15 @@ int main(int argc, char** argv)
     {
         sqlite3_stmt* stmt = 0;
         sqlite3_prepare_v2(db,
-            "SELECT id, image, depth FROM Data WHERE depth IS NOT NULL ORDER BY id", -1, &stmt, 0);
+            "SELECT Data.id, COALESCE(Node.stamp, 0.0), Data.image, Data.depth "
+            "FROM Data LEFT JOIN Node ON Data.id = Node.id "
+            "WHERE Data.depth IS NOT NULL ORDER BY Data.id", -1, &stmt, 0);
         while (sqlite3_step(stmt) == SQLITE_ROW)
         {
             int id = sqlite3_column_int(stmt, 0);
-            cv::Mat imgBlob = readBlob(db, stmt, 1);
-            cv::Mat depthBlob = readBlob(db, stmt, 2);
+            double stamp = sqlite3_column_double(stmt, 1);
+            cv::Mat imgBlob = readBlob(db, stmt, 2);
+            cv::Mat depthBlob = readBlob(db, stmt, 3);
             ++seq;
             char nameBuf[64];
             snprintf(nameBuf, sizeof(nameBuf), "%06d", seq);
@@ -139,9 +142,11 @@ int main(int argc, char** argv)
                 colorFile = "none";
             }
 
-            // pose는 rtabmap-export --poses_camera 로 별도 취득 (node id로 매칭)
-            framesOut << seq << " " << id
-                      << " color/" << nameBuf << ".jpg depth/" << nameBuf << ".png\n";
+            // frames.txt: seq id stamp color_rel depth_rel
+            char lineBuf[256];
+            snprintf(lineBuf, sizeof(lineBuf), "%d %d %.6f color/%s.jpg depth/%s.png\n",
+                     seq, id, stamp, nameBuf);
+            framesOut << lineBuf;
         }
         sqlite3_finalize(stmt);
     }

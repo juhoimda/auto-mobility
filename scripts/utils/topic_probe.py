@@ -16,10 +16,11 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image, Imu
+from tf2_msgs.msg import TFMessage
 
-SENSOR_QOS = QoSProfile(
+RELIABLE_QOS = QoSProfile(
     depth=5,
-    reliability=ReliabilityPolicy.BEST_EFFORT,
+    reliability=ReliabilityPolicy.RELIABLE,
     history=HistoryPolicy.KEEP_LAST,
     durability=DurabilityPolicy.VOLATILE,
 )
@@ -27,9 +28,12 @@ SENSOR_QOS = QoSProfile(
 
 def guess_type(topic: str):
     t = topic.lower()
+    if t == "/tf_static" or t == "/tf":
+        return TFMessage
     if t.endswith('/compressed') or t.endswith('/compresseddepth'):
         return CompressedImage
-    if t.endswith('/camera_info'):
+    # camera_info / camera_info_windows 모두 포함 (suffix 가 '_windows' 일 수 있음)
+    if 'camera_info' in t:
         return CameraInfo
     if t.endswith('/imu') or '/imu/' in t:
         return Imu
@@ -56,8 +60,10 @@ def main():
     def cb(msg):
         got[0] = True
 
+    msg_cls = guess_type(topic)
     try:
-        node.create_subscription(guess_type(topic), topic, cb, SENSOR_QOS)
+        # Windows publisher (RELIABLE) 호환 구독
+        node.create_subscription(msg_cls, topic, cb, RELIABLE_QOS)
     except Exception:
         try:
             node.destroy_node()
@@ -66,6 +72,8 @@ def main():
         if rclpy.ok():
             rclpy.shutdown()
         return 1
+
+
 
     t0 = time.time()
     try:

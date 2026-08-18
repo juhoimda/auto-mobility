@@ -25,7 +25,6 @@ class TestSlamBenchmarkConsistency(unittest.TestCase):
         cmd = build_camera_cmd("640x480x30", "SENSOR_DATA")
         self.assertIn("depth_module.depth_profile:=640x480x30", cmd)
         self.assertIn("rgb_camera.color_profile:=640x480x30", cmd)
-        self.assertIn("color_qos:=SENSOR_DATA", cmd)
         self.assertIn("align_depth.enable:=false", cmd)
         # production 단일 소스의 필터/에미터 설정이 벤치마크에도 반영
         self.assertIn("spatial_filter.enable:=true", cmd)
@@ -33,6 +32,11 @@ class TestSlamBenchmarkConsistency(unittest.TestCase):
         # bool 은 rtabmap/camera CLI 파싱과 일치하도록 소문자로 렌더링
         self.assertNotIn("align_depth.enable:=False", cmd)
         self.assertNotIn("enable_sync:=True", cmd)
+        # ⚠️ 2026-08-14: QoS 파라미터(color_qos 등)는 realsense2_camera 4.58.3에서
+        # FPS 급락(30->10Hz)을 유발해 config.py FORBIDDEN_CAMERA_PARAMS 로 금지됨.
+        # 벤치마크도 production 규칙을 따르며 해당 키를 절대 주입하지 않는다.
+        for forbidden in ("color_qos", "color_info_qos", "depth_qos", "depth_info_qos"):
+            self.assertNotIn(f"{forbidden}:=", cmd, f"{forbidden} 은 금지 파라미터")
 
     def test_coerce_param(self):
         self.assertIs(_coerce_param("true"), True)

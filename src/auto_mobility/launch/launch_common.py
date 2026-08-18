@@ -1,13 +1,36 @@
 # RTAB-Map 파라미터 단일 소스 (rtab_live / rtab_bag launch 공용)
 # 튜닝 시 이 파일만 수정하면 live/bag 양쪽에 동일하게 적용된다.
 #
-# [하드웨어 / 환경] (2026-08-12 WSL2 기준 갱신)
-# - WSL2, Intel Core Ultra 7 265H / 32GB RAM / /dev/shm 16GB
-# - RealSense D435i @ USB 3.2 패스스루 (usbipd 5.3.0)
-# - 카메라: 640x480@30 (WSL2 USB 패스스루에서 848x480 이상은 프레임 손상 → 640x480 고정)
+# ── 하드웨어 / 환경 기준 (2026-08-12 WSL2 실측) ──────────────────────
+# - WSL2 Ubuntu 22.04, Intel Core Ultra 7 265H / 32GB RAM
+# - RealSense D435i, 640x480@30fps
+# - CycloneDDS (rmw_cyclonedds_cpp), ROS_DOMAIN_ID=42
 # - 촬영 중 RViz ON (cloud_map_lite 2Hz 중계) → odom 실측 7~11Hz
 #
+# ── RTAB-Map 내부 역할 분해 ──────────────────────────────────────────
+# 이 파이프라인에서 RTAB-Map(0.23.7)은 아래 역할을 단일 프로세스 내에서 담당한다:
+#   [odometry]    rgbd_odometry 노드: RGB-D Frame-to-Map Visual Odometry
+#                   → /rtabmap/odom 발행 (nav_msgs/Odometry)
+#                   → odom→camera_link TF 발행
+#   [SLAM]        rtabmap 노드: loop closure + pose graph 최적화
+#                   → map→odom TF 발행 (global correction)
+#                   → /rtabmap/mapData 발행
+#   [PointCloud]  Grid 파라미터로 3D 점군 생성 (시각화·파이프라인 내부용)
+#                   → /rtabmap/cloud_map 발행 (시각화 전용, reconstruction source 아님)
+#
+# ── TF publish 소유권 ────────────────────────────────────────────────
+# - camera_link → camera_*_optical_frame: realsense2_camera 노드 (로컬 모드)
+#                                         또는 camera_tf_pub.py (원격 모드 only)
+# - odom → camera_link: rgbd_odometry 노드 (RTAB-Map 내부)
+# - map → odom:         rtabmap 노드 (RTAB-Map 내부, loop closure 보정)
+#
+# ── Reconstruction source ────────────────────────────────────────────
+# /rtabmap/cloud_map은 시각화 전용이며 mesh의 source로 사용하지 않는다.
+# Reconstruction은 reconstruct_tsdf.py가 RTAB-Map DB에서 추출한
+# 원본 RGB-D 프레임 + 최적화 pose를 직접 소비한다.
+#
 # ⚠️ RTAB-Map 0.23.7 기준 유효 키만 사용 (2026-08-11 검증 완료).
+
 
 import os
 from launch_ros.actions import Node
@@ -52,30 +75,47 @@ RTABMAP_PARAMS = {
     # [5] 키프레임 전략: 10cm / 5.7도 마다 (안정적인 스캐닝 노드 연속성)
     'RGBD/LinearUpdate': '0.10',
     'RGBD/AngularUpdate': '0.10',
-    # [6] Point Cloud 품질 & 노이즈 (선명하고 촘촘한 라이브 포인트클라우드)
+    # [6] Point Cloud 품질 & 노이즈 — 시각화용 라이브 포인트클라우드 설정
+    # /rtabmap/cloud_map은 RViz 시각화 전용이며 mesh reconstruction의 source가 아니다.
+    # Reconstruction은 DB에 저장된 원본 RGB-D 프레임과 최적화 pose를 직접 사용한다.
     'Grid/3D': 'true',
-    'Grid/DepthDecimation': '2',      # 선명하고 촘촘한 3D 포인트 클라우드 표시 (2)
+    'Grid/DepthDecimation': '2',      # 라이브 포인트 클라우드 해상도 (decimation=2)
     'Grid/RangeMin': '0.3',
     'Grid/RangeMax': '4.0',           # Vis/MaxDepth(4.0)와 일치
     'Grid/NoiseFilteringRadius': '0.05',
     'Grid/NoiseFilteringMinNeighbors': '5',
-    'Grid/RayTracing': 'false',       # 2D 점유격자용 — 구독자 없음 (기존 true)
+    'Grid/RayTracing': 'false',       # 2D 점유격자 전용 — 구독자 없음. 비활성화.
 }
+
 
 # ⚠️ ODOM_ARGS: rgbd_odometry 노드 전용 파라미터 (2026-08-11 확인)
 # rtabmap 메인 노드는 Odom/*, OdomF2M/* 키를 ROS2 파라미터로 선언하지 않아
 # rtabmap_args로 전달하면 ParameterNotDeclaredException → SIGABRT 크래시 발생.
 # rtabmap.launch.py의 odom_args 인자로 전달해야 rgbd_odometry에서 정상 적용된다.
+#
+# ── 오도메트리 계층 역할 ──────────────────────────────────────────────
+# rgbd_odometry (local odometry):
+#   - 연속적·저지연 pose 추정 (odom→camera_link TF)
+#   - frame drop이나 tracking loss 시 연속성이 깨질 수 있음
+#   - /rtabmap/odom 으로 발행 (reconstruct_tsdf.py의 pose source는 DB 내 최적화 pose)
+#
+# rtabmap SLAM (global optimization):
+#   - loop closure + pose graph 최적화로 drift 보정
+#   - map→odom TF 보정값 발행 (global consistent trajectory)
+#   - DB에 저장된 pose가 offline reconstruction(reconstruct_tsdf.py)의 기준이 됨
+#
+# Reconstruction에는 rtabmap-export --opt 0으로 추출한 전역 최적화 pose를 사용한다.
 ODOM_PARAMS = {
     'Odom/Strategy': '0',             # Frame-to-Map Visual Odometry
     'Odom/GuessMotion': 'false',      # 모션 과추정으로 인한 점프/떨림 방지 (안정적인 PnP 추적)
     'Odom/ResetCountdown': '1',       # 연속 실패 시 빠른 자동 복구
     'OdomF2M/MaxSize': '1000',        # ★ 2026-08-11 벤치 1위 — 기본 2000은 odom 17Hz 급락
     'Odom/KeyFrameThr': '0.3',        # 안정적인 키프레임 임계값
-    'Odom/FilteringStrategy': '0',    # 불안정한 IMU 필터링 대신 순수 정밀 Visual PnP 추적
-    'Odom/GravitySigma': '0',         # 오도메트리 내부 IMU 중력 적분 비활성화 (정지 시 표류/녹색선 일정한 전진 원천 차단)
+    'Odom/FilteringStrategy': '0',    # IMU 필터링 없이 순수 Visual PnP 추적 (IMU 노이즈 영향 차단)
+    'Odom/GravitySigma': '0',         # odometry 내부 IMU 중력 적분 비활성화 (정지 시 표류 차단)
     'Odom/AlignWithGround': 'false',  # 지면 정렬 모션 강제 비활성화
 }
+
 
 # RTABMAP_ARGS: rtabmap.launch.py의 rtabmap_args 인자에 넘겨줄 커맨드라인 렌더링 문자열
 RTABMAP_ARGS = ' '.join([f'--{k} {v}' for k, v in RTABMAP_PARAMS.items()])
@@ -123,7 +163,6 @@ def get_rtabmap_base_args() -> dict:
         # Synchronization (0.05s: 50ms 이내의 RGB-Depth만 짝지어 오랜 시차 매칭 방지)
         'approx_sync': 'true',
         'approx_sync_max_interval': '0.05',
-        'approx_rgbd_sync': 'true',
         'sync_queue_size': '30',
         'visual_odometry': 'true',
         'rviz': 'true',

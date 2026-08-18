@@ -3,6 +3,12 @@
 [1단계: 센서 데이터 수집/취급 최적화 전용]
 Hardware-adaptive DDS, QoS, Resolution, FPS, and Compression Benchmark Script
 for RealSense D435i Camera & ROS 2 Pipeline.
+
+⚠️ LEGACY / LOCAL-ONLY (2026-08-14):
+  - WSL 로컬 realsense2_camera 노드를 직접 구동하는 usbipd 시대 벤치마크.
+  - 원격(Windows 카메라) 모드에서는 실행하지 말 것 (토픽 충돌).
+  - rgb_qos/depth_qos 파라미터는 production(config.py)에서 금지된 키 —
+    본 벤치마크 내부 실험용으로만 사용.
 """
 
 import os
@@ -137,7 +143,7 @@ def run_single_test(rmw, use_shm, res_w, res_h, fps, qos, is_compressed, sample_
         "-p", "enable_accel:=true",
         "-p", "enable_gyro:=true",
         "-p", "unite_imu_method:=1",
-        "-p", "rgb_camera.auto_exposure_priority:=false",
+        # rgb_camera.auto_exposure_priority 는 4.58.3 에서 선언되지 않은 무효 키 (config.py INVALID_CAMERA_PARAMS)
         "-p", f"rgb_qos:={qos}",
         "-p", f"depth_qos:={qos}",
         "-p", f"pointcloud.qos:={qos}",

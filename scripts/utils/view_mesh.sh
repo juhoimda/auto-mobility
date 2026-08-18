@@ -1,5 +1,5 @@
 #!/bin/bash
-# 3D Mesh Viewer Launcher Script
+# 3D Surface Mesh Viewer Launcher Script (.obj / .stl)
 
 PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$PIPELINE_DIR/../common.sh"
@@ -8,21 +8,22 @@ source "$PIPELINE_DIR/../common.sh"
 # "Failed to initialize GLEW"로 창이 안 뜨는 문제 → X11 백엔드로 강제 폴백
 if [ -d /mnt/wslg ]; then
     export WAYLAND_DISPLAY=
+    export DISPLAY="${DISPLAY:-:0}"
 fi
 
-if [ -z "$1" ]; then
+if [ -z "$1" ] || [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
     echo "=========================================================="
     echo " 사용법: $0 MESH_FILE_NAME [--wireframe] [--no-backface]"
-    echo " 예시  : $0 my_room_mesh.obj"
-    echo " 예시  : $0 $MESH_DIR/my_room_mesh.obj --wireframe"
+    echo " 예시  : $0 my_dataset_tsdf.obj"
+    echo " 예시  : $0 $MESH_DIR/my_dataset_mesh.obj --wireframe"
     echo "=========================================================="
-    exit 1
+    exit 0
 fi
 
 MESH_INPUT="$1"
 shift
 
-# 경로 판별 (절대경로/파일명/상대경로)
+# 경로 판별 (절대경로/파일명/meshes 디렉터리 탐색)
 if [[ "$MESH_INPUT" == /* ]]; then
     MESH_FILE="$MESH_INPUT"
 elif [ -f "$MESH_DIR/$MESH_INPUT" ]; then

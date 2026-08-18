@@ -394,18 +394,18 @@ def _build_odom_args(params: dict) -> str:
 def build_camera_cmd(profile: str, qos: str, align_depth: bool = False) -> list:
     """config.CAMERA_PARAMS(production 단일 소스) 기준 카메라 노드 커맨드 생성.
 
-    벤치마크가 바꾸는 해상도 프로파일/QoS 만 동적 오버라이드한다.
+    벤치마크가 바꾸는 해상도 프로파일 만 동적 오버라이드한다.
     (production 설정인 필터/에미터/동기화를 포함해 실환경과 정합되도록 함)
+
+    ⚠️ 2026-08-14: color_qos/depth_qos 등 QoS 파라미터는 제거.
+       realsense2_camera 4.58.3 실측상 스트림 FPS 를 30->~10fps 로 급락시켜
+       config.py FORBIDDEN_CAMERA_PARAMS 로 금지됨 (벤치마크도 동일 금지).
     """
     params = dict(CAMERA_PARAMS)
     params.update({
         "depth_module.depth_profile": profile,
         "rgb_camera.color_profile": profile,
         "align_depth.enable": align_depth,
-        "color_qos": qos,
-        "color_info_qos": qos,
-        "depth_qos": qos,
-        "depth_info_qos": qos,
     })
     cmd = ["ros2", "run", "realsense2_camera", "realsense2_camera_node", "--ros-args"]
     for k, v in params.items():
@@ -1023,6 +1023,11 @@ def main():
     banner("통합 SLAM 파이프라인 벤치마크 (CPU, RAM, Disk I/O 강화판)", BOLD + BLUE)
     print(f"  모드: {'빠른 측정' if args.quick else '정밀 측정'}")
     print(f"  대상 단계: {args.stage if args.stage else '1 → 2 → 3 (전체)'}\n")
+
+    if os.environ.get("CAMERA_MODE", "local") == "remote":
+        warn("CAMERA_MODE=remote: 이 벤치마크는 WSL 로컬 realsense2_camera 노드를 "
+             "직접 구동합니다. 원격(Windows) 카메라와 동시에 구동하면 토픽 충돌이 "
+             "발생할 수 있으므로 로컬 모드에서만 실행하세요.")
 
     sys_info = check_system()
     print(f"  RMW 목록: {', '.join(sys_info['rmws'])}")
