@@ -26,6 +26,7 @@ install(
     scripts/common.sh
     scripts/pipeline/capture_safe.sh
     scripts/pipeline/run_bag.sh
+    scripts/pipeline/run_slam.sh
     scripts/pipeline/run_live.sh
     scripts/pipeline/record.sh
     scripts/pipeline/play.sh

@@ -58,22 +58,17 @@ SLAM/RViz 부하와 완전히 분리하여 **무손실 Raw 센서 데이터(RGB-
 
 수집된 Bag 데이터를 재생하여 카메라 궤적 및 SLAM 데이터베이스를 생성합니다.
 
-### 1) RTAB-Map SLAM 실행
+### 1) RTAB-Map 또는 ORB-SLAM3 단일 명령 실행 (1-명령어)
 ```bash
-# 터미널 1: RTAB-Map SLAM 노드 실행
-./scripts/pipeline/run_bag.sh [DATASET_NAME]
+# RTAB-Map SLAM 실행 및 DB/궤적 생성
+./scripts/pipeline/run_slam.sh [DATASET_NAME] --slam=rtab
 
-# 터미널 2: 데이터셋 재생
-./scripts/pipeline/play.sh [DATASET_NAME] 1.0
+# ORB-SLAM3 실행 및 궤적 생성
+./scripts/pipeline/run_slam.sh [DATASET_NAME] --slam=orb
 ```
-* **출력 결과물**: `ros2_data/databases/[DATASET_NAME].db`
-
-### 2) ORB-SLAM3 실행
-```bash
-# rosbag 재생을 통해 ORB-SLAM3 정밀 궤적 추출
-python3 src/auto_mobility/slam/run_orbslam3_bag.py [DATASET_NAME]
-```
-* **출력 결과물**: `ros2_data/trajectories/orbslam3_[DATASET_NAME]_trajectory.txt`
+* **출력 결과물**: 
+  * RTAB-Map: `ros2_data/databases/[DATASET_NAME].db`, `ros2_data/trajectories/rtab_[DATASET_NAME]_trajectory.txt`
+  * ORB-SLAM3: `ros2_data/trajectories/orbslam3_[DATASET_NAME]_trajectory.txt`
 
 ---
 

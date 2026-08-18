@@ -9,23 +9,27 @@ RealSense D435i ──▶ Multi-SLAM (RTAB / ORB-SLAM3) ──▶ Point Cloud (.
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Quick Start (초간단 핵심 명령어)
 
 ```bash
-# 1. RAW 데이터셋 확보 (RGB-D + Stereo IR + IMU 무손실 녹화 + 자동 검증)
+# 1. RAW 데이터셋 녹화 (RGB-D + Stereo IR + IMU)
 ./scripts/pipeline/capture_safe.sh my_dataset --view
 
-# 2. 다중 SLAM & 3D 복원 알고리즘 일괄 벤치마크 (RTAB-Map vs ORB-SLAM3 vs Fine TSDF)
+# 2. [선택 A] RTAB-Map SLAM 실행 및 메쉬+점군 생성 (1-명령어)
+./scripts/pipeline/mesh.sh my_dataset --view
+
+# 3. [선택 B] ORB-SLAM3 실행 및 메쉬+점군 생성 (1-명령어)
+./scripts/pipeline/mesh.sh my_dataset --slam=orb --view
+
+# 4. [선택 C] 5mm 초고정밀 TSDF 메쉬 생성
+./scripts/pipeline/mesh.sh my_dataset --fine --view
+
+# 5. [선택 D] 모든 알고리즘 한 번에 비교 분석 (리포트 자동 생성)
 python3 src/auto_mobility/slam/compare_algorithms.py my_dataset
 
-# 3. 3D Point Cloud (.ply) 전용 뷰어 확인
-./scripts/utils/view_pointcloud.sh my_dataset_tsdf_cloud.ply --point-size=3
-
-# 4. 3D Surface Mesh (.obj) 전용 뷰어 확인
-./scripts/utils/view_mesh.sh my_dataset_tsdf.obj
-
-# 5. Isaac Sim 디지털 트윈 로드 및 물리 검증
-./scripts/pipeline/isaac.sh ros2_data/meshes/my_dataset_tsdf.obj
+# 6. 생성된 3D 결과물 확인
+./scripts/utils/view_pointcloud.sh my_dataset_tsdf_cloud.ply  # 3D 점군 보기
+./scripts/utils/view_mesh.sh my_dataset_tsdf.obj              # 3D 메쉬 보기
 ```
 
 자세한 단계별 실행 방법: **[docs/guide.md](docs/guide.md)**
