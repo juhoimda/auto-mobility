@@ -18,9 +18,9 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image, Imu
 from tf2_msgs.msg import TFMessage
 
-SENSOR_QOS = QoSProfile(
+RELIABLE_QOS = QoSProfile(
     depth=5,
-    reliability=ReliabilityPolicy.BEST_EFFORT,
+    reliability=ReliabilityPolicy.RELIABLE,
     history=HistoryPolicy.KEEP_LAST,
     durability=DurabilityPolicy.VOLATILE,
 )
@@ -60,8 +60,10 @@ def main():
     def cb(msg):
         got[0] = True
 
+    msg_cls = guess_type(topic)
     try:
-        node.create_subscription(guess_type(topic), topic, cb, SENSOR_QOS)
+        # Windows publisher (RELIABLE) 호환 구독
+        node.create_subscription(msg_cls, topic, cb, RELIABLE_QOS)
     except Exception:
         try:
             node.destroy_node()
@@ -70,6 +72,8 @@ def main():
         if rclpy.ok():
             rclpy.shutdown()
         return 1
+
+
 
     t0 = time.time()
     try:

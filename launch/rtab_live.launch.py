@@ -29,9 +29,10 @@ def generate_launch_description():
 
     use_compressed_arg = DeclareLaunchArgument(
         'use_compressed',
-        default_value='false',
-        description='Whether to subscribe to compressed camera topics and decompress locally (Set true only if camera is running remotely)'
+        default_value='true',
+        description='Whether to subscribe to compressed camera topics and decompress locally (Set true for Windows remote camera mode)'
     )
+
 
     use_imu_arg = DeclareLaunchArgument(
         'use_imu',

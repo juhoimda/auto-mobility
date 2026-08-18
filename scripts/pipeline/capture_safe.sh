@@ -25,11 +25,15 @@ source "$SCRIPT_DIR/../common.sh"
 PIPELINE_DIR="$PROJECT_DIR/scripts/pipeline"
 
 NAME=""
+SHOW_PREVIEW=false
 EXTRA_ARGS=()
 for arg in "$@"; do
     case $arg in
         --raw|--compressed|--no-validate|--duration=*)
             EXTRA_ARGS+=("$arg")
+            ;;
+        --view|--preview)
+            SHOW_PREVIEW=true
             ;;
         *)
             if [ -z "$NAME" ]; then
@@ -40,9 +44,11 @@ for arg in "$@"; do
 done
 NAME=${NAME:-capture_safe_$(date +%Y%m%d_%H%M%S)}
 
+
 # ── Windows 카메라 자동 시작 (원격 모드) ─────────────────────────
 start_windows_camera() {
     [ "$CAMERA_MODE" = "remote" ] || return 0
+    mkdir -p "$SHARED_DIR" 2>/dev/null || true
     WIN_SIGNAL_FILE="$SHARED_DIR/camera_request.txt"
     echo "🪟 Windows 카메라 시작 신호 전송 → $WIN_SIGNAL_FILE"
     echo "run_camera" > "$WIN_SIGNAL_FILE" 2>/dev/null || {
@@ -61,14 +67,17 @@ start_windows_camera() {
     return 1
 }
 
+
 stop_windows_camera() {
     [ "$CAMERA_MODE" = "remote" ] || return 0
     rm -f "$SHARED_DIR/camera_request.txt" 2>/dev/null || true
     echo "🪟 Windows 카메라 종료 신호 전송 완료"
 }
 
+PREVIEW_PID=""
 cleanup() {
     kill $GUARD_PID 2>/dev/null || true
+    kill $PREVIEW_PID 2>/dev/null || true
     wait $GUARD_PID 2>/dev/null || true
     stop_windows_camera
 }
@@ -99,18 +108,26 @@ echo "📊 capture_guard 모니터링 시작 → ${GUARD_BASE}.md"
 python3 "$PROJECT_DIR/src/auto_mobility/monitor/capture_guard.py" $GUARD_ARGS &
 GUARD_PID=$!
 
+# ── 실시간 카메라 시선 뷰어 (옵션: --view) ─────────────────────
+if [ "$SHOW_PREVIEW" = true ]; then
+    echo "👁️  실시간 카메라 프리뷰 창 실행 중..."
+    python3 "$PROJECT_DIR/scripts/utils/view_camera.py" &
+    PREVIEW_PID=$!
+fi
+
 # ── 녹화 (압축 기본: RGB JPEG + Depth PNG lossless) ────────────
 echo ""
 echo "▶️ 녹화를 시작합니다. 종료하려면 Ctrl+C..."
 "$PIPELINE_DIR/record.sh" "$NAME" "${EXTRA_ARGS[@]}"
 
 # ── 정리 및 요약 ────────────────────────────────────────────────
-kill $GUARD_PID 2>/dev/null || true
-wait $GUARD_PID 2>/dev/null || true
-stop_windows_camera
+cleanup
+trap - EXIT INT TERM
+
 echo ""
 echo "=========================================================="
 echo " ✅ CAPTURE-SAFE 완료"
+
 echo " 📦 Bag: $BAG_DIR/$NAME"
 echo " 📊 진단 보고서: ${GUARD_BASE}.md"
 echo " 📋 매니페스트: $BAG_DIR/$NAME/dataset_manifest.json"

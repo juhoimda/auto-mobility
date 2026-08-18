@@ -104,8 +104,10 @@ ros2 launch auto_mobility rtab_live.launch.py database_path:=./ros2_data/databas
 python3 src/auto_mobility/utils/validate_bag.py ros2_data/bags/hall_walk --out ros2_data/bags/hall_walk/dataset_manifest.json
 
 # [CAPTURE-SAFE] raw dataset 확보 전용 (RViz/SLAM 없이 녹화 + capture_guard 진단)
-./scripts/pipeline/capture_safe.sh [BAG_NAME] [--compressed | --raw]
-# 예시: ./scripts/pipeline/capture_safe.sh hallway_session --compressed
+# --view 옵션을 주면 실시간 카메라 시선(RGB+Depth) 뷰어 창이 함께 실행됩니다.
+./scripts/pipeline/capture_safe.sh [BAG_NAME] [--compressed | --raw] [--view]
+# 예시: ./scripts/pipeline/capture_safe.sh hallway_session --compressed --view
+
 
 # [재생] 녹화된 Bag 재생
 ./scripts/pipeline/play.sh [BAG_NAME] [RATE]

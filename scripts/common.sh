@@ -89,14 +89,15 @@ PYEOF
 fi
 USB_3_MIN_SPEED_MBPS="${USB_3_MIN_SPEED_MBPS:-5000}"
 
-# 카메라 구동 위치 (2026-08-13 추가)
+# 카메라 구동 위치 (기본값: remote - Windows 네이티브 RealSense D435i 스트림 수신)
+#   remote: Windows 네이티브에서 발행하는 토픽을 수신 (기본)
 #   local : WSL USB 패스스루(usbipd) — WSL에서 camera.launch.py 로 직접 구동
-#   remote: Windows 네이티브에서 발행하는 토픽을 수신 — WSL에서는 드라이버 미구동
-CAMERA_MODE="${CAMERA_MODE:-local}"
+CAMERA_MODE="${CAMERA_MODE:-remote}"
 export CAMERA_MODE
-# 원격 카메라 시 압축 토픽 기본 사용 (로컬은 raw 그대로)
-USE_COMPRESSED="${USE_COMPRESSED:-false}"
+# 원격 카메라 시 압축 토픽 기본 사용 (로컬은 raw 선택 가능)
+USE_COMPRESSED="${USE_COMPRESSED:-true}"
 export USE_COMPRESSED
+
 
 # ROS 2 도메인 ID 기본값 (Windows 카메라 env_ros2.bat 의 42 와 일치)
 # 미설정 시 42 로 자동 설정 → Windows/WSL 양쪽 같은 도메인에서 토픽 수신 가능

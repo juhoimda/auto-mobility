@@ -53,6 +53,10 @@ else
     FINAL_OUTPUT="$BAG_DIR/$NAME"
 fi
 
+# 동일 이름 재녹화 시 잔여 임시 폴더 사전 정리 (ros2bag 'already exists' 충돌 방지)
+rm -rf "$TEMP_OUTPUT"
+
+
 # 2. 종료 시 자동 이관 처리 (Ctrl+C 등 대응)
 cleanup() {
     if [ -n "$TF_PUB_PID" ]; then
@@ -63,11 +67,13 @@ cleanup() {
         echo ""
         echo "📦 RAM 디스크($TEMP_OUTPUT)에서 영구 저장소($FINAL_OUTPUT)로 이동 중..."
         mkdir -p "$BAG_DIR"
+        rm -rf "$FINAL_OUTPUT"
         mv "$TEMP_OUTPUT" "$FINAL_OUTPUT"
         echo "✅ 이관 완료: $FINAL_OUTPUT"
     fi
 }
 trap cleanup EXIT INT TERM
+
 
 # 3. 토픽 존재 확인 (topic_probe: ros2 CLI 데몬 hang 회피)
 #    원격(Windows 카메라) / 로컬(WSL usbipd) 모드 자동 감지
@@ -83,8 +89,8 @@ if [ "$FORCE_RAW" = false ] && ! topic_exists "$RGB_COMPRESSED_TOPIC" 3; then
     FORCE_RAW=true
 fi
 
-DETECTED_DEPTH=""
-DETECTED_DEPTH_COMPRESSED=""
+DETECTED_DEPTH="${DEPTH_TOPIC}"
+DETECTED_DEPTH_COMPRESSED="${DEPTH_COMPRESSED_TOPIC}"
 if [ "$FORCE_RAW" = true ]; then
     if topic_exists "$DEPTH_TOPIC" 3; then
         DETECTED_DEPTH="$DEPTH_TOPIC"
@@ -98,6 +104,7 @@ else
         DETECTED_DEPTH_COMPRESSED="$ALIGNED_DEPTH_COMPRESSED_TOPIC"
     fi
 fi
+
 
 # CameraInfo: 표준 토픽 + Windows 원본 토픽 모두 존재 시 함께 기록
 # (오프라인 재생 시 republish.py 가 camera_info_windows 를 구독하므로 replay 정합성 확보)
@@ -131,6 +138,8 @@ else
 fi
 RECORD_TOPICS+=("${INFO_TOPICS[@]}" "$IMU_TOPIC")
 [ "$HAS_TF_STATIC" = true ] && RECORD_TOPICS+=(/tf_static)
+
+
 
 # 4. 사전 상태 및 FPS 검사 (제안서 핵심: RGB, Depth, IMU, CameraInfo, TF)
 echo "=========================================="
@@ -208,7 +217,7 @@ if [ "$FORCE_RAW" = false ]; then
     {
         for t in "${RECORD_TOPICS[@]}"; do
             case "$t" in
-                *compressed*|*compressedDepth*|*camera_info_windows*)
+                *compressed*|*compressedDepth*|*camera_info_windows*|*/imu*)
                     echo "\"$t\":"
                     echo "  reliability: RELIABLE"
                     echo "  history: KEEP_LAST"
@@ -216,6 +225,7 @@ if [ "$FORCE_RAW" = false ]; then
                     echo "  durability: VOLATILE"
                     ;;
             esac
+
         done
     } > "$QOS_OVERRIDE_YAML"
     echo "  ⚙️  RELIABLE QoS 적용 토픽: $(grep -c '\"' "$QOS_OVERRIDE_YAML")"
@@ -236,8 +246,11 @@ rm -f "$QOS_OVERRIDE_YAML"
 
 # 6. 녹화 완료 후 자동 데이터셋 검증 + 매니페스트 생성
 if [ "$SKIP_VALIDATE" = false ]; then
+    TARGET_BAG="$FINAL_OUTPUT"
+    [ -d "$TEMP_OUTPUT" ] && TARGET_BAG="$TEMP_OUTPUT"
     echo ""
-    echo "🔍 [데이터셋 검증] ${TEMP_OUTPUT} 검사 중..."
-    python3 "$PROJECT_DIR/src/auto_mobility/utils/validate_bag.py" "$TEMP_OUTPUT" \
-        --out "$TEMP_OUTPUT/dataset_manifest.json" || true
+    echo "🔍 [데이터셋 검증] ${TARGET_BAG} 검사 중..."
+    python3 "$PROJECT_DIR/src/auto_mobility/utils/validate_bag.py" "$TARGET_BAG" \
+        --out "$TARGET_BAG/dataset_manifest.json" || true
 fi
+
