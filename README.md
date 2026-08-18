@@ -1,10 +1,10 @@
 # 📐 Auto-Mobility
 
-RealSense D435i 기반 **Real-to-Sim 파이프라인** — 실제 공간을 촬영해 3D 메시로 복원하고, Isaac Sim에서 디지털 트윈으로 검증합니다.
+RealSense D435i 기반 **Real-to-Sim 파이프라인** — 실제 공간을 촬영해 다중 SLAM(RTAB-Map / ORB-SLAM3)으로 궤적을 추적하고, Open3D GPU TSDF로 고정밀 3D 점군(Point Cloud) 및 표면 메시(Mesh)를 복원하여 Isaac Sim 디지털 트윈으로 검증합니다.
 
-```
-RealSense D435i ──▶ RTAB-Map SLAM ──▶ RGB-D & Pose / PLY ──▶ Open3D TSDF / Poisson ──▶ Isaac Sim
-(RGB+Depth+IMU)      (실시간 맵핑)        (풀해상도 데이터)         (GPU 3D Mesh 복원)       (디지털 트윈)
+```text
+RealSense D435i ──▶ Multi-SLAM (RTAB / ORB-SLAM3) ──▶ Point Cloud (.ply) ──▶ Open3D TSDF (GPU) ──▶ 3D Mesh (.obj) ──▶ Isaac Sim
+(RGB+Depth+IR+IMU)        (Visual / Feature SLAM)           (3D 점군 데이터)       (VoxelBlockGrid)      (디지털 트윈)        (물리 검증)
 ```
 
 ---
@@ -12,27 +12,23 @@ RealSense D435i ──▶ RTAB-Map SLAM ──▶ RGB-D & Pose / PLY ──▶ O
 ## 🚀 Quick Start
 
 ```bash
-# 1. 전체 파이프라인 실행 (촬영 → TSDF Mesh → Isaac Sim 검증)
-./scripts/pipeline/run_pipeline_all.sh
+# 1. RAW 데이터셋 확보 (RGB-D + Stereo IR + IMU 무손실 녹화 + 자동 검증)
+./scripts/pipeline/capture_safe.sh my_dataset --view
 
-# 2. Windows 원격 카메라 자동 구동 모드
-./scripts/pipeline/run_pipeline_all.sh --remote-camera
+# 2. 다중 SLAM & 3D 복원 알고리즘 일괄 벤치마크 (RTAB-Map vs ORB-SLAM3 vs Fine TSDF)
+python3 src/auto_mobility/slam/compare_algorithms.py my_dataset
 
-# 3. Mesh 변환까지만 (Isaac Sim 생략) — 권장
-./scripts/pipeline/run_pipeline_all.sh --skip-isaac
+# 3. 3D Point Cloud (.ply) 전용 뷰어 확인
+./scripts/utils/view_pointcloud.sh my_dataset_tsdf_cloud.ply --point-size=3
 
-# 4. 기존 DB로 Mesh만 재생성
-./scripts/pipeline/run_pipeline_all.sh --db=my_room.db --skip-capture --skip-isaac
+# 4. 3D Surface Mesh (.obj) 전용 뷰어 확인
+./scripts/utils/view_mesh.sh my_dataset_tsdf.obj
 
-# 5. RAW 데이터셋 확보 전용 (SLAM/RViz 없이 녹화 + 자동 검증 + 매니페스트)
-./scripts/pipeline/capture_safe.sh my_dataset
-
-# 6. 동일 rosbag 기반 알고리즘 궤적 & TSDF Mesh 비교 벤치마크
-./scripts/pipeline/compare.sh my_dataset --quick
+# 5. Isaac Sim 디지털 트윈 로드 및 물리 검증
+./scripts/pipeline/isaac.sh ros2_data/meshes/my_dataset_tsdf.obj
 ```
 
-
-자세한 실행 방법: **[docs/guide.md](docs/guide.md)**
+자세한 단계별 실행 방법: **[docs/guide.md](docs/guide.md)**
 
 ---
 
@@ -40,21 +36,31 @@ RealSense D435i ──▶ RTAB-Map SLAM ──▶ RGB-D & Pose / PLY ──▶ O
 
 | 구성요소 | 역할 |
 | :--- | :--- |
-| **RealSense D435i** | RGB(640x480@30) + Depth(Z16) + IMU(200Hz) (로컬 USB 또는 Windows 원격 구동) |
-| **RTAB-Map** | 실시간 Visual-Inertial SLAM → 공간 DB(`.db`) 생성 |
-| **Open3D** | DB의 원본 RGB-D + Pose 기반 Tensor TSDF(GPU) 복원 또는 풀해상도 PLY Poisson 복원 |
-| **Isaac Sim** | 생성된 Mesh(`.obj`)의 물리 충돌 및 USD 씬 로드 검증 |
+| **RealSense D435i** | RGB(640x480@30) + Depth(Z16) + Stereo IR(Infra1/2) + IMU(200Hz) (로컬 USB 또는 Windows 원격 구동) |
+| **RTAB-Map** | 실시간 Visual-Inertial SLAM → 공간 DB(`.db`) 및 전역 포즈 그래프 최적화 |
+| **ORB-SLAM3** | 특징점 기반 고감도 Visual SLAM (RGB-D / Stereo) → 정밀 궤적(`.txt`) 추적 |
+| **Open3D (CUDA TSDF)** | VoxelBlockGrid GPU 가속 기반 고밀도 3D 점군(`.ply`) 및 표면 메쉬(`.obj`) 추출 |
+| **Isaac Sim** | 생성된 Mesh(`.obj`)의 물리 충돌체 검증 및 USD 디지털 트윈 씬 로드 |
 
-### 디렉터리 구조
+### 📁 표준 데이터 아키텍처 (`ros2_data/`)
 
-```
-auto-mobility/
-├── src/auto_mobility/     # Python 모듈 (config / launch / mesh / monitor / nodes / slam / utils)
-├── scripts/               # 셸 실행 도구 (pipeline / utils)
-├── config/                # FastDDS / RViz2 / 토픽 설정
-├── launch/                # ROS2 launch 파일 (camera / rtab_live / rtab_bag)
-├── ros2_data/             # 생성 데이터 (databases / pointclouds / meshes / bags / logs)
-└── docs/                  # 사용자 가이드 및 개발 문서
+```bash
+ros2_data/
+├── bags/                        # 1단계: 원본 센서 스트림 (MCAP 불변 데이터셋)
+│   └── <dataset_name>/
+│       ├── <dataset_name>_0.mcap
+│       └── dataset_manifest.json
+├── databases/                   # 2단계: RTAB-Map SLAM 세션 DB (.db)
+├── trajectories/                # 2단계: 6자유도 카메라 이동 궤적 (TUM .txt)
+├── pointclouds/                 # 3단계: [분석용] 3D 점군 데이터 (PLY)
+│   ├── <dataset_name>_raw_cloud.ply     # Depth 투영 원본 점군 (노이즈/정합 분석용)
+│   └── <dataset_name>_tsdf_cloud.ply    # TSDF 복셀 가중치 필터링 점군
+├── meshes/                      # 4단계: [디지털트윈] 최종 3D 표면 메쉬 (OBJ)
+│   └── <dataset_name>_tsdf.obj          # Open3D GPU TSDF 표면 메쉬
+└── benchmarks/                  # 5단계: 다중 알고리즘 비교 리포트
+    └── bench_<dataset_name>_<date>/
+        ├── benchmark_report.md          # 점군+메쉬+궤적 비교 요약 마크다운
+        └── benchmark_summary.json       # 정량 수치 JSON
 ```
 
 ---
@@ -63,46 +69,25 @@ auto-mobility/
 
 > 모든 설정은 **단일 소스**(`config.py`, `topics.yaml`)로 관리됩니다.
 
-### 카메라 — `src/auto_mobility/config.py` (`CAMERA_PARAMS`)
+### 1. 센서 스트림 — `config/topics.yaml` & `src/auto_mobility/config.py`
 | 설정 | 값 | 비고 |
 | :--- | :--- | :--- |
-| 해상도 / FPS | `640x480@30` | 848x480은 VM에서 depth 드랍 방지 최적치 |
-| IR 에미터 | `emitter_enabled: 1` | 텍스처 부족 벽면 특징점 확보 |
-| Depth 필터 | `spatial + temporal + hole_filling` | 노이즈 제거 |
+| 해상도 / FPS | `640x480@30` | WSL2 및 원격 네트워크 대역폭 최적치 |
+| Stereo IR | `infra1/infra2` Y8 포맷 | 스테레오 매칭 및 저조도/질감 부족 환경 지원 |
+| IMU 필터 | Madgwick (400Hz) | 자세(Roll/Pitch) 수평 보정 |
 
-### SLAM — `src/auto_mobility/launch/launch_common.py` (`RTABMAP_PARAMS`)
-| 설정 | 값 | 비고 |
-| :--- | :--- | :--- |
-| 포즈 추정 | `Vis/EstimationType 1` (PnP) | 벤치마크 1위 |
-| 특징점 | `Vis/MaxFeatures 2000` | 회전 시 키프레임 중첩 확보 |
-| 특징점 품질 | `GFTT/QualityLevel 0.005` | blur/회전 프레임 특징점 누락 방지 |
-| 로컬 맵 크기 | `OdomF2M/MaxSize 1000` | **★ 벤치 1위** — 기본 2000 대비 안정적 실시간 연산 |
-| 키프레임 간격 | `RGBD/LinearUpdate 0.10` | 10cm 마다 키프레임 갱신 |
-| 루프클로저 | `OptimizeFromGraphEnd/NeighborLinkRefining/ProximityBySpace false` | 루프클로저 보정 활성화, 맵 스레드 스톨 방지 |
-| 맵핑 주기 | `Rtabmap/DetectionRate 3` | 맵 스레드 부하 최적화 (3Hz) |
-| Point Cloud 밀도 | `Grid/DepthDecimation 4` | 라이브 맵 경량화 (최종 메쉬는 offline TSDF) |
-
-### 3D Mesh 복원
-| 방식 | 대상 스크립트 | 주요 설정 | 비고 |
+### 2. 3D 점군 및 메쉬 복원
+| 방식 | 대상 스크립트 | 주요 파라미터 | 산출물 |
 | :--- | :--- | :--- | :--- |
-| **TSDF (기본)** | `src/auto_mobility/mesh/reconstruct_tsdf.py` | `--voxel 0.01` | Open3D Tensor GPU 적분, 원본 RGB-D + Pose 통합 |
-| **Poisson (PLY)** | `scripts/utils/export_ply.sh` + `mesh_open3d.py` | `--decimation 1 --max_range 4 --depth 8` | 풀해상도 PLY 추출 기반 폐곡면 표면 복원 |
+| **TSDF (기본)** | `src/auto_mobility/mesh/reconstruct_tsdf.py` | `--voxel 0.01` (10mm)<br>`--voxel 0.005` (5mm Fine) | `pointclouds/*_tsdf_cloud.ply`<br>`meshes/*_tsdf.obj` |
+| **Poisson (PLY)** | `scripts/utils/export_ply.sh` + `mesh_open3d.py` | `--decimation 1 --max_range 4 --depth 8` | `pointclouds/*_raw_cloud.ply`<br>`meshes/*_mesh.obj` |
 
 ---
 
 ## ✨ 핵심 특징
 
-1. **IMU 융합 Visual SLAM** — D435i IMU(400Hz)를 Madgwick 필터로 처리해 수평 보정 및 오도메트리 추적 안정화
-2. **WSL2 / Windows 하이브리드 연동** — 신호 기반 자동 카메라 watcher, CycloneDDS 정적 피어, 압축 토픽 디코딩(`republish.py`) + **원본 타임스탬프 보존**
-3. **GPU 가속 TSDF 3D 재구성** — Open3D Tensor TSDF Voxel Grid로 고밀도 실내 공간 3D Mesh(`.obj`) 생성
-4. **자동 품질 검증 및 안전 장치** — DB 무결성 검증(`validate.py`), 촬영 품질 모니터링(`capture_guard`, sync/gap 포함), **녹화 데이터셋 자동 검증 + 매니페스트**(`validate_bag.py`), RAM 디스크(`/dev/shm`) 우선 녹화 및 SSD 자동 이관
-
----
-
-## 📚 문서
-
-| 문서 | 내용 |
-| :--- | :--- |
-| [docs/guide.md](docs/guide.md) | 전체 실행 명령어 및 단계별 사용법 |
-| [docs/proposal_2026.pdf](docs/proposal_2026.pdf) | 프로젝트 제안서 및 기술 문서 |
-
+1. **Multi-SLAM 백엔드 지원** — RTAB-Map(OdomF2M)과 ORB-SLAM3 C++14 엔진을 모두 지원하여 상황에 맞는 최적 궤적 선택 가능
+2. **효율+효과 통합 데이터 관리** — 원본 Bag부터 SLAM 궤적, 3D 점군(`.ply`), 최종 메쉬(`.obj`)까지 단계별 독립 저장 및 분석
+3. **독립된 3D 뷰어 환경** — 3D 점군 전용 뷰어(`view_pointcloud.sh`)와 메쉬 전용 뷰어(`view_mesh.sh`)로 분리 제공
+4. **GPU 가속 TSDF 재구성** — Open3D Tensor VoxelBlockGrid(CUDA)를 통해 수백만 폴리곤의 고정밀 메쉬를 10초 내외로 고속 복원
+5. **Windows ↔ WSL2 하이브리드 연동** — Windows 측 초경량 퍼블리셔(`realsense_pub.py`)와 WSL2 CycloneDDS/압축 스트림 완벽 연동
