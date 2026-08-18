@@ -4,11 +4,11 @@
         <General>
             <NetworkInterfaceAddress>172.19.148.235</NetworkInterfaceAddress>
             <AllowMulticast>true</AllowMulticast>
-            <FragmentSize>1200</FragmentSize>
+            <FragmentSize>4096B</FragmentSize>
         </General>
         <Internal>
-            <SocketReceiveBufferSize min="8388608" />
-            <SocketSendBufferSize min="8388608" />
+            <SocketReceiveBufferSize min="8388608B" />
+            <SocketSendBufferSize min="8388608B" />
         </Internal>
         <Discovery>
             <Peers>

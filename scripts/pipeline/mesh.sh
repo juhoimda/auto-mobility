@@ -6,7 +6,7 @@ source "$PIPELINE_DIR/../common.sh"
 export PYTHONWARNINGS="ignore"
 
 SLAM_TYPE="rtab"
-VOXEL="0.01"
+VOXEL="0.02"
 VIEW_FLAG=""
 INPUT_NAME=""
 CUSTOM_OUT=""
