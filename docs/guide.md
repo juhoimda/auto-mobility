@@ -1,205 +1,152 @@
-# 🛠️ Auto-Mobility 개발자 및 사용 가이드
+# 🛠️ Auto-Mobility 핵심 워크플로우 가이드
 
-Auto-Mobility (Real-to-Sim) 파이프라인의 핵심 실행 명령어 및 사용 가이드입니다.
+Auto-Mobility (Real-to-Sim) 파이프라인의 **단계별 실행 및 검증 중심 가이드**입니다.  
+안전한 Raw 데이터 수집부터 SLAM 맵핑, 3D Mesh 복원, 시뮬레이터 검증까지 로직 흐름 순서대로 구성되어 있습니다.
 
 ---
 
-## ⚙️ 0. 환경 구축 및 빌드
+## 🧭 파이프라인 전체 흐름도
+
+```text
+[1. 데이터셋 캡처] ──▶ [2. 오프라인 SLAM] ──▶ [3. 3D Mesh 복원] ──▶ [4. Isaac Sim 검증]
+  capture_safe.sh        run_bag.sh + play.sh      mesh.sh (TSDF/Open3D)     isaac.sh
+  (Raw rosbag2 확보)     (DB 및 Odom/맵 생성)      (3D PointCloud & OBJ)     (디지털 트윈 로드)
+```
+
+---
+
+## ⚙️ 0. 필수 환경 초기화
+
+실행 전 워크스페이스와 환경변수를 설정합니다.
 
 ```bash
-# 1. ROS2 및 프로젝트 워크스페이스 빌드
-colcon build --symlink-install
+# 1. ROS 2 환경 및 워크스페이스 로드
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 
-# 2. Python 경로 및 ROS_DOMAIN_ID 설정 (기본값: 42)
+# 2. Python 모듈 및 CycloneDDS 도메인 설정 (기본값: 42)
 export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
 export ROS_DOMAIN_ID=42
 ```
 
 ---
 
-## 🔄 1. 전체 파이프라인 원스톱 실행 (Real-to-Sim)
+## 📹 1단계: 안전한 Raw 데이터셋 수집 (Capture-Safe)
 
-실시간 센서 수집(또는 원격 수집), RTAB-Map SLAM, DB 무결성 검증, 3D Mesh 복원(Open3D TSDF), Isaac Sim 검증까지 한 번에 실행합니다.
+SLAM/RViz 부하와 완전히 분리하여 **무손실 Raw 센서 데이터(RGB-D + IMU + TF)**를 안전하게 기록합니다.
 
 ```bash
-# [전체 파이프라인] 기본 실행 (실시간 수집 -> SLAM -> TSDF Mesh -> Isaac Sim)
-./scripts/pipeline/run_pipeline_all.sh
+# [기본 실행] 실시간 카메라 프리뷰 창과 함께 캡처
+./scripts/pipeline/capture_safe.sh [DATASET_NAME] --view
 
-# [옵션 활용 예시]
-./scripts/pipeline/run_pipeline_all.sh --remote-camera           # Windows 원격 카메라 자동 구동 + 압축 토픽 수신
-./scripts/pipeline/run_pipeline_all.sh --skip-isaac               # Mesh 변환까지만 수행 (Isaac Sim 생략)
-./scripts/pipeline/run_pipeline_all.sh --db=my_room.db --skip-capture --skip-isaac  # 기존 DB로 TSDF Mesh만 생성
+# [예시] my_dataset 이름으로 녹화 (기본: RGB JPEG + Depth 16bit PNG lossless)
+./scripts/pipeline/capture_safe.sh my_dataset --view
+
+# [초경량 뷰어] CPU 부하를 극소화하고 RGB 화각만 확인할 때
+./scripts/pipeline/capture_safe.sh my_dataset --rgb-only
 ```
 
-* **CLI 옵션 설명**:
-  * `--db=DB_NAME.db`: 저장/사용할 SLAM DB 파일명 (기본값: `session_날짜시간.db`)
-  * `--skip-capture`: 카메라 실시간 수집을 건너뛰고 기존 DB 파일 재사용
-  * `--skip-isaac`: Isaac Sim 물리/시각 검증 단계를 건너뜀
-  * `--remote-camera`: Windows 네이티브 RealSense 실행 + 압축 토픽(JPEG/PNG) 수신 및 초고속 디코딩(republish) 모드
+* **종료 방법**: 터미널에서 `Ctrl+C`를 누르면 자동 데이터 검증 및 SSD 이관이 진행됩니다.
+* **출력 결과물**:
+  * **Rosbag2**: `ros2_data/bags/[DATASET_NAME]`
+  * **데이터셋 매니페스트**: `ros2_data/bags/[DATASET_NAME]/dataset_manifest.json`
+  * **수신 품질 보고서**: `ros2_data/logs/capture_safe_[DATASET_NAME].md`
 
 ---
 
-## 📸 2. 카메라 수집 및 센서 검증
+## 🗺️ 2단계: 오프라인 RTAB-Map SLAM & Odom/Map 생성
 
-### 2.1 로컬 실행 (WSL 직접 연결 / USB)
+1단계에서 확보한 Bag 데이터를 재생하여 Visual-Inertial Odometry를 추정하고 3D 지도를 빌드합니다.
+
+### 1) 터미널 1: RTAB-Map SLAM 노드 대기 실행
 ```bash
-# RealSense D435i 노드 실행 (RGB-D 640x480@30 + IMU 200Hz + Madgwick Filter)
-ros2 launch auto_mobility camera.launch.py
-
-# 센서 토픽 수신 상태 및 Hz 확인
-ros2 topic echo /camera/camera/imu --once
-ros2 topic hz /camera/camera/color/image_raw /camera/camera/depth/image_rect_raw /camera/camera/imu
+./scripts/pipeline/run_bag.sh [DATASET_NAME]
 ```
 
-### 2.2 원격 카메라 모드 (Windows 네이티브)
+### 2) 터미널 2: 데이터셋 재생
 ```bash
-# Windows 환경에서 C:\ros2_humble\run_camera.bat 실행 중인 경우
-# 압축 토픽 수신 확인
-ros2 topic hz /camera/camera/color/image_raw/compressed /camera/camera/depth/image_rect_raw/compressedDepth /camera/camera/imu
-
-# 토픽 수신 프로브 도구
-python3 scripts/utils/topic_probe.py /camera/camera/color/image_raw/compressed 5
-python3 scripts/utils/check_camera_params.py
+# 기본 1.0배속 재생 (정밀 루프 클로저가 필요할 경우 0.5배속 권장)
+./scripts/pipeline/play.sh [DATASET_NAME] 1.0
 ```
 
-> ⚠️ **타임스탬프 아키텍처 (2026-08-14)**
-> - Windows `realsense_pub.py` v2: 캡처/인코딩 스레드 분리 + **프레임 하드웨어 타임스탬프**를 epoch 로 변환해 발행 (RGB/Depth 동일 frameset).
-> - WSL `republish.py` v4: 원본 stamp + WSL↔Windows **clock offset 추정값**으로 재발행 → 상대 타이밍이 캡처 시점 그대로 보존.
-> - RTAB-Map DB/rosbag 의 timestamp 는 이제 캡처 시각 기반이다.
+### 3) 실시간 Odom 및 PointCloud 토픽 모니터링 (선택)
+```bash
+# 실시간 로봇/카메라 위치 궤적 추정 확인
+ros2 topic echo /rtabmap/odom
+
+# 생성 중인 3D 포인트클라우드 토픽 수신율 확인
+ros2 topic hz /rtabmap/cloud_map
+
+# RViz2 3D 시각화 실행 (필요 시)
+rviz2
+```
+
+* **완료 방법**: 재생이 끝나면 터미널 1에서 `Ctrl+C`를 눌러 DB를 디스크에 안전하게 저장합니다.
+* **출력 결과물**:
+  * **SLAM 데이터베이스**: `ros2_data/databases/[DATASET_NAME].db`
 
 ---
 
-## 🗺️ 3. 실시간 Visual-Inertial SLAM
+## 🧊 3단계: 3D Pointcloud & Mesh 재구성 및 시각화
+
+생성된 `.db` 파일로부터 고밀도 3D 형상(PointCloud / Mesh)을 추출하고 Open3D 뷰어로 검토합니다.
 
 ```bash
-# [원스톱] Live SLAM 실행 (카메라 미실행 시 자동 백그라운드 구동 + RViz2 시각화)
-./scripts/pipeline/run_live.sh [DB_NAME] [USE_COMPRESSED]
-# 예시: ./scripts/pipeline/run_live.sh my_office false
+# [방법 A: Open3D TSDF 고정밀 복원 (추천 ⭐)] 원본 RGB-D + 최적화 Pose 적분
+./scripts/pipeline/mesh.sh [DATASET_NAME].db --method=tsdf --voxel=0.01 --view
 
-# [원격 카메라 환경 Live SLAM]
-CAMERA_MODE=remote ./scripts/pipeline/run_live.sh my_office true
+# [방법 B: Open3D Poisson 표면 복원] PointCloud 추출 후 메쉬 생성
+./scripts/pipeline/mesh.sh [DATASET_NAME].db --method=open3d --depth=8 --view
 
-# [수동 실행] 개별 노드 수동 구동
-ros2 launch auto_mobility camera.launch.py
-ros2 launch auto_mobility rtab_live.launch.py database_path:=./ros2_data/databases/my_office.db use_compressed:=false
+# [방법 C: RTAB-Map 자체 텍스처 메쉬 추출]
+./scripts/pipeline/mesh.sh [DATASET_NAME].db --method=rtabmap
 ```
 
-* **인자 설명**:
-  * `DB_NAME`: 저장할 DB 이름 (확장자 제외, 기본값: `live_날짜시간`)
-  * `USE_COMPRESSED`: 압축 토픽 사용 여부 (`true` / `false`, 기본값: 로컬 `false`, 원격 `true`)
-  * `database_path`: RTAB-Map DB 파일 저장 경로
+* **출력 결과물**:
+  * **3D PointCloud**: `ros2_data/pointclouds/[DATASET_NAME]_cloud.ply`
+  * **3D Mesh 모델**: `ros2_data/meshes/[DATASET_NAME]_tsdf.obj` (또는 `_mesh.obj`)
+
+### 💡 RTAB-Map 전용 GUI 분석 뷰어
+```bash
+rtabmap-databaseViewer ~/auto-mobility/ros2_data/databases/[DATASET_NAME].db
+```
+* 전체 3D 궤적, 키프레임, 루프 클로저 링크, Depth 포인트클라우드를 3D 화면에서 상세 분석할 수 있습니다.
 
 ---
 
-## 🎬 4. ROS2 Bag 녹화, 재생 및 오프라인 SLAM
+## 🤖 4단계: Isaac Sim 디지털 트윈 검증
+
+재구성된 3D Mesh를 NVIDIA Isaac Sim 환경으로 불러와 물리 충돌체 및 시각적 적합성을 검증합니다.
 
 ```bash
-# [녹화] MCAP 포맷 저장 (RAM 디스크 /dev/shm 우선 기록 후 SSD 자동 이관)
-./scripts/pipeline/record.sh [BAG_NAME] [--compressed | --raw]
-# 예시: ./scripts/pipeline/record.sh hall_walk --compressed
+# 생성된 TSDF Mesh를 Isaac Sim에 로드
+./scripts/pipeline/isaac.sh ros2_data/meshes/[DATASET_NAME]_tsdf.obj
 
-# [녹화 후 자동 검증] 메시지 수 / Hz / sync delta / gap / 매니페스트 생성
-python3 src/auto_mobility/utils/validate_bag.py ros2_data/bags/hall_walk --out ros2_data/bags/hall_walk/dataset_manifest.json
-
-# [CAPTURE-SAFE] raw dataset 확보 전용 (RViz/SLAM 없이 녹화 + capture_guard 진단)
-# --view 옵션을 주면 실시간 카메라 시선(RGB+Depth) 뷰어 창이 함께 실행됩니다.
-./scripts/pipeline/capture_safe.sh [BAG_NAME] [--compressed | --raw] [--view]
-# 예시: ./scripts/pipeline/capture_safe.sh hallway_session --compressed --view
-
-
-# [재생] 녹화된 Bag 재생
-./scripts/pipeline/play.sh [BAG_NAME] [RATE]
-# 예시: ./scripts/pipeline/play.sh hall_walk 1.0
-
-# [오프라인 SLAM] Bag 재생 기반 맵핑 및 DB 생성 (Depth 토픽 자동 감지)
-./scripts/pipeline/run_bag.sh [BAG_NAME] [--compressed | --raw]
-# 예시: ./scripts/pipeline/run_bag.sh hall_walk --compressed
-```
-
-* **인자 설명**:
-  * `BAG_NAME`: 녹화/재생할 Bag 디렉터리 이름
-  * `--compressed`: 압축 토픽 위주 녹화/처리 (대역폭 및 I/O 절약) — RGB JPEG + Depth PNG(lossless)
-  * `--raw`: 무압축 Raw 토픽 녹화/처리 (RGB/Depth bit-exact, 대역폭 큼)
-  * `--no-validate`: 녹화 후 자동 검증 건너뜀
-  * `RATE`: 재생 속도 (배속, 예: `0.5`, `1.0`, `2.0`)
-
-> 💡 record.sh 는 `camera_info_windows`(Windows 원본 CameraInfo)도 함께 기록하므로,
-> Windows 카메라 없이 오프라인 재생(run_bag.sh) 시에도 republish.py 가 올바른
-> intrinsics 를 사용할 수 있다. (2026-08-14: 표준 토픽만 기록하던 방식은 replay 시
-> 기본 intrinsics(fx=385) 폴백 → 기하 왜곡 잠재 버그였음)
-
----
-
-## 🧊 5. 3D Mesh 복원 & Isaac Sim 연동
-
-### 5.1 3D Mesh 재구성 (`mesh.sh`)
-```bash
-# [TSDF 방식 (권장)] Open3D Tensor TSDF 재구성 (GPU 가속, 원본 RGB-D + Pose 적분)
-./scripts/pipeline/mesh.sh my_room.db my_room_tsdf.obj --method=tsdf --voxel=0.01 --view
-
-# [Open3D Poisson 방식] 풀해상도 PLY 추출 -> Poisson 표면 복원
-./scripts/pipeline/mesh.sh my_room.db my_room_poisson.obj --method=open3d --depth=8 --view
-
-# [RTAB-Map 자체 메시 추출]
-./scripts/pipeline/mesh.sh my_room.db my_room_rtab.obj --method=rtabmap
-
-# [단독 PLY 추출] DB -> 풀해상도 Point Cloud(.ply) 추출
-./scripts/utils/export_ply.sh my_room.db my_room_cloud.ply
-```
-
-* **인자 설명**:
-  * `--method=tsdf|open3d|rtabmap`: Mesh 생성 알고리즘 선택 (기본값: `open3d`, `run_pipeline_all.sh`에서는 `tsdf` 기본)
-  * `--voxel=VOXEL_SIZE`: TSDF / Voxel 다운샘플링 복셀 크기 (m 단위, 예: `0.005`, `0.01`)
-  * `--depth=OCTREE_DEPTH`: Poisson 복원 옥트리 깊이 (기본값: `8`)
-  * `--recon-method=poisson|bpa`: Open3D 복원 방식 (`poisson` 또는 `bpa`)
-  * `--view`: Mesh 생성 완료 후 3D 뷰어 자동 실행
-  * `--force`: DB/Point Cloud 품질 경고 검사를 무시하고 생성 강제 진행
-
-### 5.2 3D Mesh 단독 뷰어 & Isaac Sim 검증
-```bash
-# [Mesh 뷰어] Open3D 기반 3D 모델 시각화
-./scripts/utils/view_mesh.sh [MESH_FILE] [--wireframe] [--no-backface]
-# 예시: ./scripts/utils/view_mesh.sh ros2_data/meshes/my_room_tsdf.obj
-
-# [Isaac Sim 연동] 생성된 Mesh 로드 및 물리 충돌/USD 검증
-./scripts/pipeline/isaac.sh [MESH_PATH] [--headless] [--no-physics] [--scale SCALE]
-# 예시: ./scripts/pipeline/isaac.sh ros2_data/meshes/my_room_tsdf.obj --scale 1.0
+# 물리 시뮬레이션 없이 시각적 검증만 수행할 때
+./scripts/pipeline/isaac.sh ros2_data/meshes/[DATASET_NAME]_tsdf.obj --no-physics
 ```
 
 ---
 
-## 📊 6. 시스템 진단, 벤치마크 & 품질 분석
+## ⚡ 부록: 기타 유용한 실행 모드
 
+### 1. 실시간 Live SLAM (촬영과 동시에 즉시 매핑)
+데이터셋 녹화 과정을 거치지 않고 실시간으로 지도를 생성할 때 사용합니다.
 ```bash
-# [시스템 진단] DDS(FastDDS), USB 대역폭, QoS, RAM 디스크, 소켓 버퍼 점검
+# 원격 카메라(Windows) 기준 실시간 Live SLAM 실행
+CAMERA_MODE=remote ./scripts/pipeline/run_live.sh [DB_NAME] true
+```
+
+### 2. 원스톱 전체 파이프라인 (Live 캡처 $\rightarrow$ Isaac Sim 일괄 처리)
+```bash
+./scripts/pipeline/run_pipeline_all.sh --remote-camera
+```
+
+### 3. 시스템 진단 및 데이터셋 무결성 검증
+```bash
+# 시스템 진단 (DDS 통신, USB, QoS 점검)
 ./scripts/utils/check.sh
 
-# [통합 SLAM 벤치마크] Stage 1(카메라) / Stage 2(SLAM) / Stage 3(진단) 성능 측정
-./scripts/utils/benchmark.sh [--quick]
-./scripts/utils/benchmark.sh --stage 1    # 카메라/QoS 조합 측정
-./scripts/utils/benchmark.sh --stage 2    # SLAM 파라미터 최적화 측정
-
-# [하드웨어 I/O & Open3D 벤치마크]
-python3 src/auto_mobility/utils/benchmark_hw.py
-
-# [세션 사후 분석] 생성된 SLAM DB 궤적, 키프레임, 루프클로저 통계 시각화
-python3 src/auto_mobility/monitor/analyze_session.py --db ros2_data/databases/my_room.db
-
-# [데이터셋 검증] 녹화된 bag 메시지 수 / Hz / sync / gap / 단조성 + 매니페스트
-python3 src/auto_mobility/utils/validate_bag.py ros2_data/bags/my_bag --out ros2_data/bags/my_bag/dataset_manifest.json
-
-# [표준 궤적(Trajectory) 추출] RTAB-Map DB -> TUM 형식(.txt) 궤적 내보내기
-python3 src/auto_mobility/trajectory/export_trajectory.py ros2_data/databases/my_room.db --opt 0
-
-# [동일 Rosbag 기반 알고리즘 비교 벤치마크]
-./scripts/pipeline/compare.sh [BAG_NAME] [--quick]
-# 예시: ./scripts/pipeline/compare.sh soak_3min --quick
-
-# [단위/통합 테스트] 테스트 스위트 실행 및 코드 커버리지 리포트
-./scripts/utils/run_tests.sh
+# 개별 Bag 파일 수동 검증 & 매니페스트 생성
+python3 src/auto_mobility/utils/validate_bag.py ros2_data/bags/[DATASET_NAME]
 ```
-
-
-

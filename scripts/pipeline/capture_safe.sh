@@ -26,6 +26,7 @@ PIPELINE_DIR="$PROJECT_DIR/scripts/pipeline"
 
 NAME=""
 SHOW_PREVIEW=false
+VIEW_ARGS=()
 EXTRA_ARGS=()
 for arg in "$@"; do
     case $arg in
@@ -34,6 +35,10 @@ for arg in "$@"; do
             ;;
         --view|--preview)
             SHOW_PREVIEW=true
+            ;;
+        --rgb-only)
+            SHOW_PREVIEW=true
+            VIEW_ARGS+=("--rgb-only")
             ;;
         *)
             if [ -z "$NAME" ]; then
@@ -111,18 +116,16 @@ GUARD_PID=$!
 # ── 실시간 카메라 시선 뷰어 (옵션: --view) ─────────────────────
 if [ "$SHOW_PREVIEW" = true ]; then
     echo "👁️  실시간 카메라 프리뷰 창 실행 중..."
-    python3 "$PROJECT_DIR/scripts/utils/view_camera.py" &
+    python3 "$PROJECT_DIR/scripts/utils/view_camera.py" "${VIEW_ARGS[@]}" &
     PREVIEW_PID=$!
 fi
 
 # ── 녹화 (압축 기본: RGB JPEG + Depth PNG lossless) ────────────
-echo ""
-echo "▶️ 녹화를 시작합니다. 종료하려면 Ctrl+C..."
 "$PIPELINE_DIR/record.sh" "$NAME" "${EXTRA_ARGS[@]}"
 
 # ── 정리 및 요약 ────────────────────────────────────────────────
-cleanup
 trap - EXIT INT TERM
+cleanup
 
 echo ""
 echo "=========================================================="

@@ -261,10 +261,13 @@ def main():
         st = info.get("stats")
         if not st:
             continue
-        if st["hz"] is not None and st["hz"] < args.min_hz:
-            warnings.append(f"{topic}: {st['hz']}Hz < 권장 {args.min_hz}Hz")
-        if st["max_gap_s"] > args.max_gap:
-            warnings.append(f"{topic}: 최대 gap {st['max_gap_s']:.2f}s > {args.max_gap}s")
+        role = classify_topic(topic)
+        topic_min_hz = 0.5 if role == "camera_info" else args.min_hz
+        topic_max_gap = 2.0 if role == "camera_info" else args.max_gap
+        if st["hz"] is not None and st["hz"] < topic_min_hz:
+            warnings.append(f"{topic}: {st['hz']}Hz < 권장 {topic_min_hz}Hz")
+        if st["max_gap_s"] > topic_max_gap:
+            warnings.append(f"{topic}: 최대 gap {st['max_gap_s']:.2f}s > {topic_max_gap}s")
 
     # ── 매니페스트 ──
     commit, dirty = _git_commit()

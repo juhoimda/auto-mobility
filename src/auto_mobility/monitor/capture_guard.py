@@ -100,22 +100,26 @@ class TopicRateMonitor(Node):
         self._depth_topic = None
         for t, _, label in topics:
             if label == "RGB":
-                self._rgb_topic = t[0]
+                self._rgb_topic = t
             if label == "Depth":
-                self._depth_topic = t[0]
+                self._depth_topic = t
 
         for topic, _, label in topics:
-            qos = SENSOR_QOS
             if 'camera_info' in topic:
                 msg_type = CameraInfo
+                qos = RELIABLE_QOS
             elif 'imu' in topic:
                 msg_type = Imu
+                qos = SENSOR_QOS
             elif 'odom' in topic:
                 msg_type = Odometry
-            elif 'compressed' in topic or 'compresseddepth' in topic:
+                qos = SENSOR_QOS
+            elif 'compressed' in topic.lower() or 'compresseddepth' in topic.lower():
                 msg_type = CompressedImage
+                qos = RELIABLE_QOS
             else:
                 msg_type = Image
+                qos = SENSOR_QOS
 
             def make_cb(t_name):
                 def _cb(msg):
