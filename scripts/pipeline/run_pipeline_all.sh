@@ -28,7 +28,7 @@ source "$PIPELINE_DIR/../common.sh"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 export PYTHONWARNINGS="ignore"
 DB_NAME="session_${TIMESTAMP}.db"
-MESH_NAME="session_${TIMESTAMP}_tsdf.obj"
+MESH_NAME="session_${TIMESTAMP}_rtab_tsdf.obj"
 SKIP_CAPTURE=false
 SKIP_ISAAC=false
 
@@ -37,7 +37,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --db=*)
             DB_NAME="${1#*=}"
-            MESH_NAME="${DB_NAME%.db}_tsdf.obj"
+            MESH_NAME="${DB_NAME%.db}_rtab_tsdf.obj"
             shift
             ;;
         --skip-capture)

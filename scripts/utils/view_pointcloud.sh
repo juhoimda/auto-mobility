@@ -14,9 +14,9 @@ fi
 if [ -z "$1" ] || [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
     echo "=========================================================="
     echo " 사용법: $0 POINTCLOUD_FILE [--point-size=N] [--show-normals] [--voxel=N]"
-    echo " 예시  : $0 my_dataset_tsdf_cloud.ply"
+    echo " 예시  : $0 my_dataset_rtab_tsdf_cloud.ply"
     echo " 예시  : $0 $POINTCLOUD_DIR/my_dataset_raw_cloud.ply --point-size=4"
-    echo " 예시  : $0 my_dataset_tsdf_cloud.ply --voxel=0.02"
+    echo " 예시  : $0 my_dataset_rtab_tsdf_cloud.ply --voxel=0.02"
     echo "=========================================================="
     exit 0
 fi

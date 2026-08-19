@@ -202,8 +202,8 @@ def run_tsdf(frames, poses, workdir, intrinsics, voxel_size, args):
 def main():
     parser = argparse.ArgumentParser(description="RTAB-Map DB / ORB-SLAM3 → Open3D TSDF → Mesh (.obj) & PCD (.ply)")
     parser.add_argument("input", help="RTAB-Map DB (.db) 경로")
-    parser.add_argument("output", nargs="?", default=None, help="출력 mesh (.obj). 기본: meshes/<session>_tsdf.obj")
-    parser.add_argument("--pcd-output", default=None, help="출력 pointcloud (.ply). 기본: pointclouds/<session>_tsdf_cloud.ply")
+    parser.add_argument("output", nargs="?", default=None, help="출력 mesh (.obj). 기본: meshes/<session>_rtab_tsdf.obj")
+    parser.add_argument("--pcd-output", default=None, help="출력 pointcloud (.ply). 기본: pointclouds/<session>_rtab_tsdf_cloud.ply")
     parser.add_argument("--voxel", type=float, default=0.02, help="voxel 크기 (m, 기본 0.02)")
     parser.add_argument("--trunc-mult", type=float, default=5.0, help="truncation = voxel×N (기본 5.0)")
     parser.add_argument("--depth-max", type=float, default=4.0, help="최대 depth (m, 기본 4.0)")
@@ -228,7 +228,7 @@ def main():
 
     base = os.path.splitext(os.path.basename(db_path))[0]
     if args.output is None:
-        out_path = os.path.join(MESH_DIR, f"{base}_tsdf.obj")
+        out_path = os.path.join(MESH_DIR, f"{base}_rtab_tsdf.obj")
     else:
         out_path = args.output
 
@@ -299,7 +299,7 @@ def main():
         if "benchmarks" in out_dir:
             pcd_path = os.path.join(out_dir, f"{base_name.replace('_mesh', '')}_cloud.ply")
         else:
-            pcd_path = os.path.join(POINTCLOUD_DIR, f"{base}_tsdf_cloud.ply")
+            pcd_path = os.path.join(POINTCLOUD_DIR, f"{base}_rtab_tsdf_cloud.ply")
 
     os.makedirs(os.path.dirname(os.path.abspath(pcd_path)), exist_ok=True)
     o3d.io.write_point_cloud(pcd_path, pcd)

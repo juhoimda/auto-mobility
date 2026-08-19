@@ -14,8 +14,8 @@ fi
 if [ -z "$1" ] || [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
     echo "=========================================================="
     echo " 사용법: $0 MESH_FILE_NAME [--wireframe] [--no-backface]"
-    echo " 예시  : $0 my_dataset_tsdf.obj"
-    echo " 예시  : $0 $MESH_DIR/my_dataset_mesh.obj --wireframe"
+    echo " 예시  : $0 my_dataset_rtab_tsdf.obj"
+    echo " 예시  : $0 $MESH_DIR/my_dataset_rtab_tsdf.obj --wireframe"
     echo "=========================================================="
     exit 0
 fi

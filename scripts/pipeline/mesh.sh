@@ -65,7 +65,7 @@ fi
 
 # 2. ORB-SLAM3 궤적 여부 확인
 TRAJ_ARG=""
-SUFFIX="_tsdf"
+SUFFIX="_rtab_tsdf"
 if [ "$SLAM_TYPE" == "orb" ] || [ "$SLAM_TYPE" == "orbslam" ] || [ "$SLAM_TYPE" == "orbslam3" ]; then
     ORB_TRAJ="$TRAJECTORY_DIR/orbslam3_${BASE_NAME}_trajectory.txt"
     if [ ! -f "$ORB_TRAJ" ]; then
@@ -73,7 +73,7 @@ if [ "$SLAM_TYPE" == "orb" ] || [ "$SLAM_TYPE" == "orbslam" ] || [ "$SLAM_TYPE" 
         "$PIPELINE_DIR/run_slam.sh" "$BASE_NAME" --slam=orb
     fi
     TRAJ_ARG="--trajectory=$ORB_TRAJ"
-    SUFFIX="_orbslam"
+    SUFFIX="_orbslam_tsdf"
 fi
 
 if [ "$VOXEL" == "0.005" ]; then
