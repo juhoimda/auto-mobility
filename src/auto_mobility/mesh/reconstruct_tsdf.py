@@ -61,6 +61,58 @@ def _fast_inv_se3(T: np.ndarray) -> np.ndarray:
     return inv_T
 
 
+def _bytes_per_block(no_color: bool, block_resolution: int = 16) -> int:
+    """VoxelBlockGrid가 블록당 선할당하는 바이트 수.
+    - tsdf(float32) + weight(float32) = 8B/voxel
+    - + color(float32 x3) = 20B/voxel
+    """
+    voxel_bytes = 8 if no_color else 20
+    return block_resolution ** 3 * voxel_bytes
+
+
+def _estimate_block_count(
+    poses: Dict[int, np.ndarray],
+    voxel_size: float,
+    depth_max: float,
+    no_color: bool = False,
+    block_resolution: int = 16,
+    safety_factor: float = 2.0,
+    min_blocks: int = 8192,
+    memory_budget_gb: float = 8.0,
+) -> int:
+    """궤적 범위(장면 규모)를 기반으로 VoxelBlockGrid의 block_count를 추정한다.
+
+    block_count는 TSDF 품질 파라미터가 아니라 해시맵/속성 버퍼의 **용량 상한**이다.
+    Open3D는 block_count만큼 메모리를 선할당하므로, 장면 규모에 비해 과도하게 크면
+    OOM이 발생하고, 실제 활성 블록 수보다 작으면 블록이 방출되어 품질이 떨어진다.
+
+    추정 방식:
+      1) 궤적 bounding box를 depth_max(레이 최대 도달 거리)만큼 확장한 부피를
+         블록 부피(voxel_size * block_resolution)^3 로 나눠 필요한 블록 수 계산
+      2) safety_factor 배 여유 적용
+      3) memory_budget_gb 한도를 넘지 않도록 상한(모자이크 방지)
+    """
+    positions = []
+    for T in poses.values():
+        if T is not None and getattr(T, "shape", None) == (4, 4):
+            positions.append(T[:3, 3])
+    if not positions:
+        return min_blocks
+
+    pos = np.asarray(positions, dtype=np.float64)
+    lo = pos.min(axis=0) - depth_max
+    hi = pos.max(axis=0) + depth_max
+    ext = np.maximum(hi - lo, voxel_size * block_resolution)
+
+    block_size = voxel_size * block_resolution
+    n_blocks = int(np.ceil(ext[0] / block_size) * np.ceil(ext[1] / block_size) * np.ceil(ext[2] / block_size))
+    n_blocks = int(n_blocks * safety_factor)
+
+    max_by_mem = int(memory_budget_gb * 1e9 / _bytes_per_block(no_color, block_resolution))
+    n_blocks = min(n_blocks, max_by_mem)
+    return max(min_blocks, n_blocks)
+
+
 import queue
 import concurrent.futures
 
@@ -112,7 +164,7 @@ def reconstruct(
     depth_max: float = 4.0,
     depth_min: float = 0.3,
     weight_thr: float = 1.5,
-    block_count: int = 100000,
+    block_count: int = 0,
     no_color: bool = False,
     no_gpu: bool = False,
     max_pose_gap_ms: float = 500.0,
@@ -152,7 +204,13 @@ def reconstruct(
         [0.0, 0.0, 1.0]
     ], dtype=np.float64))
 
-    bc = max(block_count, 500000)
+    bc = int(block_count) if block_count and block_count > 0 else _estimate_block_count(
+        poses, voxel_size, depth_max, no_color=no_color
+    )
+    if block_count and block_count > 0:
+        print(f"🧮 VoxelBlockGrid block_count (명시) = {bc:,} (~{bc * _bytes_per_block(no_color) / 1e9:.1f} GB)")
+    else:
+        print(f"🧮 VoxelBlockGrid block_count (자동 추정) = {bc:,} (~{bc * _bytes_per_block(no_color) / 1e9:.1f} GB)")
     if no_color:
         vbg = o3d.t.geometry.VoxelBlockGrid(
             attr_names=('tsdf', 'weight'),
@@ -378,7 +436,7 @@ def main():
     parser.add_argument("--depth-min", type=float, default=0.3, help="최소 depth (m, 기본 0.3)")
     parser.add_argument("--poses-opt", type=int, default=0, choices=[0, 2], help="Legacy DB export opt: 0=전역 최적화, 2=DB 원본")
     parser.add_argument("--weight-thr", type=float, default=1.5, help="표면 추출 weight 임계값 (기본 1.5)")
-    parser.add_argument("--block-count", type=int, default=500000, help="Voxel block hash map 크기")
+    parser.add_argument("--block-count", type=int, default=0, help="Voxel block 해시맵 크기 (0=자동 추정, 양수=명시 지정)")
     parser.add_argument("--stride", type=int, default=1, help="프레임 샘플링 간격 (기본 1: 모든 프레임, 2: 1/2 속도/메모리 최적화)")
     parser.add_argument("--no-color", action="store_true", help="Geometry 전용 (컬러 적분 생략)")
     parser.add_argument("--no-gpu", action="store_true", help="CUDA 비활성 (CPU 강제)")
