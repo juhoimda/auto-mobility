@@ -53,8 +53,8 @@ class TestReconstructTsdfParsers(unittest.TestCase):
         finally:
             os.unlink(path)
         self.assertEqual(frames, [
-            (1, 1, "color/000001.jpg", "depth/000001.png"),
-            (2, 4, "color/000002.jpg", "depth/000002.png"),
+            (1, 1, 0.0, "color/000001.jpg", "depth/000001.png"),
+            (2, 4, 0.0, "color/000002.jpg", "depth/000002.png"),
         ])
 
     def test_cuda_available_no_crash(self):
