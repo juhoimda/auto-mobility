@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-compare_algorithms.py — 동일 rosbag 기반 SLAM / Odometry 및 Mesh 재구성 비교 벤치마크 도구
+compare_algorithms.py — 동일 Dataset 기반 Multi-SLAM 및 Reconstruction 기하 품질 종합 비교 벤치마크
 
-기능:
-  1) 동일 rosbag에 대해 여러 Odometry / SLAM 파라미터 백엔드 실행
-  2) 각 실행 결과로부터 표준 TUM Trajectory (.txt) 및 Mesh (.obj) 생성
-  3) Trajectory 지표 (프레임 수, 총 경로 길이, 최대 스텝, 속도 점프 등) 및
-     Mesh 품질 지표 (Vertices, Triangles, 표면적, 밀도, Bounding Box 크기 등) 비교 요약 리포트(JSON/Markdown) 출력
-
-사용법:
-  python3 compare_algorithms.py <bag_name_or_path> [--out-dir ros2_data/benchmarks] [--quick]
+구조화된 실험 계층 (Separation of Concerns):
+  Experiment
+  ├── Dataset (Canonical Frame Dataset)
+  ├── SLAM Backend (RTAB-Map / ORB-SLAM3)
+  ├── Trajectory
+  ├── Reconstruction Backend (Open3D TSDF / Poisson / BPA)
+  ├── Mesh Generation (Voxel resolution variation)
+  └── Quantitative Geometry Quality Evaluation (Hold-out Sensor Consistency)
 """
 
 import os
@@ -20,99 +20,72 @@ import argparse
 import subprocess
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, List, Any
 import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-from auto_mobility.config import BAG_DIR, DB_DIR, MESH_DIR, TRAJECTORY_DIR, BENCHMARK_DIR, PROJECT_DIR
+from auto_mobility.config import BAG_DIR, DB_DIR, MESH_DIR, TRAJECTORY_DIR, BENCHMARK_DIR, FRAME_DIR, PROJECT_DIR
+from auto_mobility.dataset.extract_frames import extract_dataset_from_bag
+from auto_mobility.dataset.frame_dataset import FrameDataset
 from auto_mobility.trajectory.io import Trajectory
 from auto_mobility.trajectory.export_trajectory import export_from_db
+from auto_mobility.mesh.reconstruct_tsdf import reconstruct
+from auto_mobility.mesh.mesh_open3d import generate_mesh
+from auto_mobility.evaluation.evaluator import evaluate_reconstruction
+from auto_mobility.evaluation.compare_results import rank_candidates
+from auto_mobility.evaluation.split import create_holdout_split, save_split_json
 
-try:
-    import open3d as o3d
-except ImportError:
-    o3d = None
-
-
-# 비교할 SLAM/Odom 파라미터 프리셋 정의
-ALGO_PRESETS = {
-    "rtab_f2m_opt": {
-        "desc": "RTAB-Map Frame-to-Map (Default, OdomF2M 1000, Global Opt)",
-        "type": "rtabmap",
-        "opt": 0,
-        "tsdf_voxel": 0.01,
+# 체계적으로 분리된 후보 실험 정의
+EXPERIMENT_PRESETS = {
+    # 1. SLAM Backend Variations (동일 10mm TSDF 복원)
+    "slam_rtab_global_opt": {
+        "desc": "RTAB-Map Visual SLAM (Global Loop Closure Optimization) + 10mm TSDF",
+        "slam": {"type": "rtabmap", "opt": 0},
+        "reconstruction": {"method": "tsdf", "voxel_size": 0.01},
+        "mesh": {"type": "tsdf_iso"}
     },
-    "rtab_f2m_raw": {
-        "desc": "RTAB-Map Frame-to-Map (Raw Odometry Pose, No Loop Closure Opt)",
-        "type": "rtabmap",
-        "opt": 2,
-        "tsdf_voxel": 0.01,
+    "slam_rtab_raw_odom": {
+        "desc": "RTAB-Map Raw Odometry (No Loop Closure Optimization) + 10mm TSDF",
+        "slam": {"type": "rtabmap", "opt": 2},
+        "reconstruction": {"method": "tsdf", "voxel_size": 0.01},
+        "mesh": {"type": "tsdf_iso"}
     },
-    "orbslam3_rgbd": {
-        "desc": "ORB-SLAM3 RGB-D (Feature-based Visual SLAM)",
-        "type": "orbslam3",
-        "opt": 0,
-        "tsdf_voxel": 0.01,
+    "slam_orbslam3_rgbd": {
+        "desc": "ORB-SLAM3 RGB-D Visual SLAM + 10mm TSDF",
+        "slam": {"type": "orbslam3", "opt": 0},
+        "reconstruction": {"method": "tsdf", "voxel_size": 0.01},
+        "mesh": {"type": "tsdf_iso"}
     },
-    "rtab_tsdf_fine": {
-        "desc": "RTAB-Map Global Opt + Fine TSDF (Voxel 5mm)",
-        "type": "rtabmap",
-        "opt": 0,
-        "tsdf_voxel": 0.005,
+    # 2. Reconstruction Parameter Variations (동일 RTAB SLAM 기준)
+    "recon_tsdf_5mm_fine": {
+        "desc": "RTAB-Map SLAM + 5mm High-Resolution TSDF",
+        "slam": {"type": "rtabmap", "opt": 0},
+        "reconstruction": {"method": "tsdf", "voxel_size": 0.005},
+        "mesh": {"type": "tsdf_iso"}
     },
+    "recon_tsdf_20mm_fast": {
+        "desc": "RTAB-Map SLAM + 20mm Fast TSDF",
+        "slam": {"type": "rtabmap", "opt": 0},
+        "reconstruction": {"method": "tsdf", "voxel_size": 0.02},
+        "mesh": {"type": "tsdf_iso"}
+    },
+    # 3. Mesh Backend Variations (Point Cloud -> Poisson / BPA)
+    "mesh_poisson_depth8": {
+        "desc": "RTAB-Map Point Cloud + Poisson Surface Reconstruction (Depth=8)",
+        "slam": {"type": "rtabmap", "opt": 0},
+        "reconstruction": {"method": "poisson", "depth": 8, "voxel_size": 0.02},
+        "mesh": {"type": "poisson"}
+    },
+    "mesh_bpa": {
+        "desc": "RTAB-Map Point Cloud + Ball Pivoting Algorithm (BPA)",
+        "slam": {"type": "rtabmap", "opt": 0},
+        "reconstruction": {"method": "bpa", "voxel_size": 0.02},
+        "mesh": {"type": "bpa"}
+    }
 }
 
 
-def evaluate_mesh(mesh_path: str) -> dict:
-    if not os.path.exists(mesh_path) or o3d is None:
-        return {"exists": False}
-
-    try:
-        mesh = o3d.io.read_triangle_mesh(mesh_path)
-        num_v = len(mesh.vertices)
-        num_t = len(mesh.triangles)
-        if num_v == 0 or num_t == 0:
-            return {"exists": True, "valid": False, "num_vertices": 0, "num_triangles": 0}
-
-        bbox = mesh.get_axis_aligned_bounding_box()
-        extent = bbox.get_extent().tolist()
-        try:
-            area = float(mesh.get_surface_area())
-        except Exception:
-            area = 0.0
-
-        try:
-            watertight = bool(mesh.is_watertight())
-        except Exception:
-            watertight = False
-
-        return {
-            "exists": True,
-            "valid": True,
-            "num_vertices": num_v,
-            "num_triangles": num_t,
-            "surface_area_m2": round(area, 4),
-            "density_tri_per_m2": round(num_t / max(area, 1e-5), 1),
-            "bbox_extent_m": [round(x, 3) for x in extent],
-            "is_watertight": watertight,
-        }
-def evaluate_pointcloud(pcd_path: str) -> dict:
-    if not os.path.exists(pcd_path) or o3d is None:
-        return {"exists": False}
-    try:
-        pcd = o3d.io.read_point_cloud(pcd_path)
-        num_p = len(pcd.points)
-        return {
-            "exists": True,
-            "valid": num_p > 0,
-            "num_points": num_p,
-            "has_colors": pcd.has_colors(),
-            "has_normals": pcd.has_normals(),
-        }
-    except Exception as e:
-        return {"exists": True, "valid": False, "error": str(e)}
-
-
-def run_comparison(bag_input: str, out_dir: str = None, quick: bool = False):
+def run_benchmark(bag_input: str, out_dir: Optional[str] = None, quick: bool = False) -> dict:
     bag_path = Path(bag_input)
     if not bag_path.is_absolute():
         if (BAG_DIR / bag_input).exists():
@@ -124,148 +97,193 @@ def run_comparison(bag_input: str, out_dir: str = None, quick: bool = False):
     bag_name = bag_path.name
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     benchmark_id = f"bench_{bag_name}_{timestamp}"
-    out_dir = Path(out_dir) if out_dir else (BENCHMARK_DIR / benchmark_id)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = Path(out_dir) if out_dir else (BENCHMARK_DIR / benchmark_id)
+    out_path.mkdir(parents=True, exist_ok=True)
 
-    print(f"==========================================================")
-    print(f" 🧪 Auto-Mobility Algorithm Benchmark & Comparison")
+    print("==========================================================")
+    print(f" 🧪 Auto-Mobility Multi-Layer Benchmark & Comparison")
     print(f" 📦 Source Rosbag: {bag_path}")
-    print(f" 📁 Benchmark Out: {out_dir}")
-    print(f"==========================================================")
+    print(f" 📁 Benchmark Out: {out_path}")
+    print("==========================================================")
 
-    # 1. Base SLAM Run (rosbag replay -> rtabmap.db)
-    base_db_name = f"bench_{bag_name}.db"
-    base_db_path = DB_DIR / base_db_name
-    if not base_db_path.exists() and (DB_DIR / f"{bag_name}.db").exists():
-        base_db_path = DB_DIR / f"{bag_name}.db"
-
-    print(f"\n▶️ [Step 1] Baseline SLAM Replay Run...")
-    if not base_db_path.exists():
-        print(f"   Generating DB: {base_db_path} from rosbag...")
-        run_bag_script = PROJECT_DIR / "scripts" / "pipeline" / "run_bag.sh"
-        # run_bag.sh bag_name
-        r = subprocess.run(["bash", str(run_bag_script), bag_name, "--compressed"], capture_output=True, text=True)
-        if not base_db_path.exists() and (DB_DIR / f"{bag_name}.db").exists():
-            base_db_path = DB_DIR / f"{bag_name}.db"
-        if not base_db_path.exists():
-            print("   Warning: DB path not found after replay.")
+    # 1. Canonical Dataset 준비 (모든 알고리즘의 공통 Source of Truth)
+    dataset_dir = FRAME_DIR / bag_name
+    if not dataset_dir.exists() or not (dataset_dir / "frames.csv").exists():
+        print(f"▶️ [Step 1] Rosbag -> Canonical Frame Dataset 자동 추출...")
+        extract_dataset_from_bag(str(bag_path), str(dataset_dir))
     else:
-        print(f"   ✅ Using existing Base DB: {base_db_path}")
+        print(f"▶️ [Step 1] 기존 Canonical Frame Dataset 사용: {dataset_dir}")
 
-    results = {
-        "benchmark_id": benchmark_id,
-        "bag_name": bag_name,
-        "timestamp": timestamp,
-        "algorithms": {}
-    }
+    dataset = FrameDataset(dataset_dir)
 
-    # 2. Iterate Presets and reconstruct meshes & evaluate
-    for key, cfg in ALGO_PRESETS.items():
-        if quick and key == "rtab_tsdf_fine":
-            continue
+    # 공통 Hold-out Split 생성 (동일 데이터셋 내 모든 실험에서 100% 동일한 테스트셋 공유)
+    split_data = create_holdout_split(total_frames=len(dataset), policy="every_nth", nth=5)
+    split_file = out_path / "shared_holdout_split.json"
+    save_split_json(split_data, split_file)
+    print(f"✂️ 공통 Hold-out Split 설정 완료: {split_data['train_count']} train / {split_data['holdout_count']} hold-out frames")
 
-        print(f"\n▶️ [Step 2] Testing Algorithm/Preset: {key} ({cfg['desc']})")
-        traj_file = out_dir / f"{key}_trajectory.txt"
-        mesh_file = out_dir / f"{key}_mesh.obj"
+    # 2. SLAM Backend 실행 및 Trajectory 준비
+    trajectories: Dict[str, str] = {}
 
-        # Trajectory 추출
-        if cfg.get("type") == "orbslam3":
-            try:
-                from auto_mobility.slam.run_orbslam3_bag import run_orbslam3_on_bag
-                run_orbslam3_on_bag(str(bag_path), str(traj_file))
-                traj = Trajectory.from_tum_file(str(traj_file))
-                t_metrics = traj.compute_metrics()
-            except Exception as e:
-                print(f"   ⚠️ ORB-SLAM3 trajectory run failed: {e}")
-                t_metrics = {"error": str(e)}
-        elif base_db_path.exists():
-            try:
-                export_from_db(str(base_db_path), str(traj_file), opt=cfg["opt"])
-                traj = Trajectory.from_tum_file(str(traj_file))
-                t_metrics = traj.compute_metrics()
-            except Exception as e:
-                print(f"   ⚠️ Trajectory export failed for {key}: {e}")
-                t_metrics = {"error": str(e)}
-        else:
-            t_metrics = {"error": "DB not found"}
+    # RTAB-Map
+    rtab_db = DB_DIR / f"{bag_name}.db"
+    rtab_opt_traj = out_path / "rtab_opt_trajectory.txt"
+    rtab_raw_traj = out_path / "rtab_raw_trajectory.txt"
 
-        # TSDF Reconstruction
-        pcd_file = out_dir / f"{key}_cloud.ply"
-        if base_db_path.exists():
-            print(f"   🔨 Reconstructing Mesh & Point Cloud via TSDF (voxel={cfg['tsdf_voxel']})...")
-            reconstruct_script = PROJECT_DIR / "src" / "auto_mobility" / "mesh" / "reconstruct_tsdf.py"
-            cmd = [
-                sys.executable, str(reconstruct_script),
-                str(base_db_path), str(mesh_file),
-                f"--pcd-output={str(pcd_file)}",
-                f"--voxel={cfg['tsdf_voxel']}",
-                f"--poses-opt={cfg['opt']}",
-                "--no-gpu" if quick else "--voxel=" + str(cfg['tsdf_voxel'])
-            ]
-            if traj_file.exists():
-                cmd.append(f"--trajectory={str(traj_file)}")
+    if not rtab_db.exists():
+        print(f"⚙️ RTAB-Map SLAM 실행 중 (DB 생성: {rtab_db})...")
+        run_slam_script = PROJECT_DIR / "scripts" / "pipeline" / "run_slam.sh"
+        subprocess.run(["bash", str(run_slam_script), bag_name, "--slam=rtab"], capture_output=True, text=True)
 
-            t0 = time.time()
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            recon_time = time.time() - t0
-            m_metrics = evaluate_mesh(str(mesh_file))
-            p_metrics = evaluate_pointcloud(str(pcd_file))
-            m_metrics["reconstruction_time_sec"] = round(recon_time, 2)
-        else:
-            m_metrics = {"error": "DB not found"}
-            p_metrics = {"error": "DB not found"}
+    if rtab_db.exists():
+        export_from_db(str(rtab_db), str(rtab_opt_traj), opt=0)
+        export_from_db(str(rtab_db), str(rtab_raw_traj), opt=2)
+        trajectories["rtab_opt"] = str(rtab_opt_traj)
+        trajectories["rtab_raw"] = str(rtab_raw_traj)
 
-        results["algorithms"][key] = {
-            "description": cfg["desc"],
-            "trajectory_metrics": t_metrics,
-            "pointcloud_metrics": p_metrics,
-            "mesh_metrics": m_metrics,
-            "artifacts": {
-                "trajectory": str(traj_file) if traj_file.exists() else None,
-                "pointcloud": str(pcd_file) if pcd_file.exists() else None,
-                "mesh": str(mesh_file) if mesh_file.exists() else None,
-            }
+    # ORB-SLAM3
+    orb_traj = out_path / "orbslam3_trajectory.txt"
+    if not quick:
+        try:
+            from auto_mobility.slam.run_orbslam3_bag import run_orbslam3_on_bag
+            run_orbslam3_on_bag(str(bag_path), str(orb_traj))
+            trajectories["orbslam3"] = str(orb_traj)
+        except Exception as e:
+            print(f"⚠️ ORB-SLAM3 실행 생략: {e}")
+
+    # 3. Preset 실행 및 통합 평가
+    results_list = []
+    eval_summaries = []
+
+    presets_to_run = EXPERIMENT_PRESETS.copy()
+    if quick:
+        presets_to_run = {
+            "slam_rtab_global_opt": EXPERIMENT_PRESETS["slam_rtab_global_opt"],
+            "recon_tsdf_20mm_fast": EXPERIMENT_PRESETS["recon_tsdf_20mm_fast"]
         }
 
-    # 3. Save Summary JSON & Markdown
-    json_path = out_dir / "benchmark_summary.json"
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
+    for key, spec in presets_to_run.items():
+        print(f"\n▶️ [Step 2] 후보 실행 & 평가: {key} ({spec['desc']})")
+        slam_cfg = spec["slam"]
+        recon_cfg = spec["reconstruction"]
 
-    md_path = out_dir / "benchmark_report.md"
-    with open(md_path, 'w', encoding='utf-8') as f:
-        f.write(f"# 📊 Algorithm Benchmark Report: {bag_name}\n\n")
+        # Determine trajectory to use
+        if slam_cfg["type"] == "orbslam3":
+            t_file = trajectories.get("orbslam3")
+        elif slam_cfg.get("opt") == 2:
+            t_file = trajectories.get("rtab_raw")
+        else:
+            t_file = trajectories.get("rtab_opt")
+
+        if not t_file or not os.path.exists(t_file):
+            print(f"   ⚠️ Trajectory 누락으로 {key} 건너뜀")
+            continue
+
+        mesh_file = out_path / f"{key}_mesh.obj"
+        pcd_file = out_path / f"{key}_cloud.ply"
+
+        t0 = time.time()
+        # Reconstruction execution
+        if recon_cfg["method"] == "tsdf":
+            reconstruct(
+                dataset=dataset,
+                trajectory=t_file,
+                voxel_size=recon_cfg["voxel_size"],
+                output_mesh=str(mesh_file),
+                output_pcd=str(pcd_file),
+                train_indices=split_data["train_indices"],
+                no_gpu=quick
+            )
+        elif recon_cfg["method"] in ("poisson", "bpa"):
+            # PointCloud -> Poisson/BPA
+            base_pcd = out_path / "slam_rtab_global_opt_cloud.ply"
+            if not base_pcd.exists():
+                reconstruct(
+                    dataset=dataset, trajectory=t_file, voxel_size=0.02,
+                    output_pcd=str(base_pcd), train_indices=split_data["train_indices"]
+                )
+            generate_mesh(
+                input_ply=str(base_pcd),
+                output_mesh=str(mesh_file),
+                method=recon_cfg["method"],
+                depth=recon_cfg.get("depth", 8),
+                voxel_size=recon_cfg.get("voxel_size", 0.02)
+            )
+        recon_time = time.time() - t0
+
+        # Quantitative Geometry Evaluation
+        if mesh_file.exists():
+            eval_dir = out_path / "evaluations" / key
+            summary = evaluate_reconstruction(
+                dataset_input=dataset,
+                trajectory_input=t_file,
+                mesh_input=str(mesh_file),
+                output_dir=eval_dir,
+                candidate_name=key,
+                split_json=str(split_file),
+                runtime_sec=recon_time
+            )
+            summary["experiment_spec"] = spec
+            eval_summaries.append(summary)
+
+    # 4. Multi-Candidate Automatic Ranking
+    ranked_candidates = rank_candidates(eval_summaries)
+
+    benchmark_report = {
+        "benchmark_id": benchmark_id,
+        "bag_name": bag_name,
+        "evaluated_at": timestamp,
+        "ranked_results": ranked_candidates
+    }
+
+    # Save summary JSON
+    sum_json = out_path / "benchmark_summary.json"
+    with open(sum_json, "w", encoding="utf-8") as f:
+        json.dump(benchmark_report, f, indent=2, ensure_ascii=False)
+
+    # Markdown Report Generation
+    md_file = out_path / "benchmark_report.md"
+    with open(md_file, "w", encoding="utf-8") as f:
+        f.write(f"# 🏆 Multi-Layer Benchmark Report: `{bag_name}`\n\n")
         f.write(f"- **Benchmark ID**: `{benchmark_id}`\n")
         f.write(f"- **Date**: {timestamp}\n")
-        f.write(f"- **Source Bag**: `{bag_path}`\n\n")
-        f.write("## 📈 Comparison Summary Table\n\n")
-        f.write("| Algorithm Preset | Frames | Path Len (m) | Points (PLY) | Vertices (OBJ) | Triangles | Area (m²) | Tri Density | Watertight |\n")
-        f.write("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n")
-        for k, v in results["algorithms"].items():
-            tm = v.get("trajectory_metrics", {})
-            pm = v.get("pointcloud_metrics", {})
-            mm = v.get("mesh_metrics", {})
-            f.write(f"| **{k}** | {tm.get('num_frames', 'N/A')} | {tm.get('total_path_length_m', 'N/A')} | "
-                    f"{pm.get('num_points', 'N/A'):,} | {mm.get('num_vertices', 'N/A'):,} | {mm.get('num_triangles', 'N/A'):,} | "
-                    f"{mm.get('surface_area_m2', 'N/A')} | {mm.get('density_tri_per_m2', 'N/A')} | "
-                    f"{'✅' if mm.get('is_watertight') else '❌'} |\n")
+        f.write(f"- **Source Rosbag**: `{bag_path}`\n\n")
+        f.write("## 🥇 Overall Ranked Candidates\n\n")
+        f.write("| Rank | Candidate Preset | Composite Score | Depth MAE | Depth P95 | Sensor Coverage | Within 20mm | Runtime |\n")
+        f.write("| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |\n")
+        for r in ranked_candidates:
+            raw = r["raw_metrics"]
+            mae = f"{raw['depth_mae_mm']} mm" if raw['depth_mae_mm'] is not None else "N/A"
+            p95 = f"{raw['depth_p95_mm']} mm" if raw['depth_p95_mm'] is not None else "N/A"
+            cov = f"{raw['depth_coverage_ratio']*100:.1f}%" if raw['depth_coverage_ratio'] is not None else "N/A"
+            w20 = f"{raw['within_20mm_ratio']*100:.1f}%" if raw['within_20mm_ratio'] is not None else "N/A"
+            f.write(f"| **#{r['rank']}** | **{r['candidate_name']}** | **{r['composite_score']:.1f}** | {mae} | {p95} | {cov} | {w20} | {raw['runtime_sec']}s |\n")
+
+        f.write("\n## 🔬 Detailed Experiment Specifications\n\n")
+        for s in eval_summaries:
+            spec = s.get("experiment_spec", {})
+            f.write(f"### `{s['candidate_name']}`\n")
+            f.write(f"- **Description**: {spec.get('desc')}\n")
+            f.write(f"- **SLAM Backend**: `{spec.get('slam')}`\n")
+            f.write(f"- **Reconstruction**: `{spec.get('reconstruction')}`\n")
+            f.write(f"- **Mesh Representation**: `{spec.get('mesh')}`\n\n")
 
     print("\n==========================================================")
-    print(f" 🎉 Benchmark Completed!")
-    print(f" 📄 Summary JSON: {json_path}")
-    print(f" 📑 Markdown Report: {md_path}")
+    print(f" 🎉 Benchmark All Done!")
+    print(f" 📄 Summary JSON: {sum_json}")
+    print(f" 📑 Markdown    : {md_file}")
     print("==========================================================")
-    print("\n" + md_path.read_text(encoding='utf-8'))
+    return benchmark_report
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compare SLAM & Mesh algorithms on same rosbag")
+    parser = argparse.ArgumentParser(description="Multi-SLAM and Reconstruction Benchmark Tool")
     parser.add_argument("bag", help="Rosbag name or path")
-    parser.add_argument("--out-dir", default=None, help="Output directory for benchmark artifacts")
-    parser.add_argument("--quick", action="store_true", help="Run fast lightweight comparison")
+    parser.add_argument("--out-dir", default=None, help="Benchmark output directory")
+    parser.add_argument("--quick", action="store_true", help="Run fast comparison")
     args = parser.parse_args()
 
-    run_comparison(args.bag, args.out_dir, args.quick)
+    run_benchmark(args.bag, args.out_dir, args.quick)
 
 
 if __name__ == "__main__":

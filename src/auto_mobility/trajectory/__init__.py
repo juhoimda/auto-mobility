@@ -1,4 +1,21 @@
-"""Trajectory interface and IO module."""
-from .io import Trajectory
+"""
+auto_mobility.trajectory
+"""
 
-__all__ = ["Trajectory"]
+from .io import Trajectory
+from .export_trajectory import export_from_db
+from .association import (
+    associate_trajectory_to_frames,
+    save_association_csv,
+    PoseAssociationResult,
+    AssociationSummary,
+)
+
+__all__ = [
+    "Trajectory",
+    "export_from_db",
+    "associate_trajectory_to_frames",
+    "save_association_csv",
+    "PoseAssociationResult",
+    "AssociationSummary",
+]

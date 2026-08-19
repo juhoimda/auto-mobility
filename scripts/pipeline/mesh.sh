@@ -1,12 +1,12 @@
 #!/bin/bash
-# mesh.sh — DB/Rosbag으로부터 3D Point Cloud(.ply) 및 3D Surface Mesh(.obj)를 생성
+# mesh.sh — Canonical Frame Dataset / DB + Trajectory로부터 3D Point Cloud(.ply) 및 3D Surface Mesh(.obj)를 생성
 
 PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$PIPELINE_DIR/../common.sh"
 export PYTHONWARNINGS="ignore"
 
 SLAM_TYPE="rtab"
-VOXEL="0.02"
+VOXEL="0.01"
 VIEW_FLAG=""
 INPUT_NAME=""
 CUSTOM_OUT=""
@@ -56,24 +56,34 @@ fi
 
 BASE_NAME="$(basename "$INPUT_NAME" .db)"
 
-# 1. DB 확인 또는 자동 SLAM 생성
-DB_FILE="$DB_DIR/${BASE_NAME}.db"
-if [ ! -f "$DB_FILE" ]; then
-    echo "⚙️ DB 파일이 없어 SLAM을 자동 실행합니다..."
-    "$PIPELINE_DIR/run_slam.sh" "$BASE_NAME" --slam=rtab
+# 1. Canonical Dataset 확인 및 없으면 자동 생성
+FRAME_PATH="$FRAME_DIR/$BASE_NAME"
+if [ ! -d "$FRAME_PATH" ] || [ ! -f "$FRAME_PATH/frames.csv" ]; then
+    if [ -d "$BAG_DIR/$BASE_NAME" ] || [ -f "$BAG_DIR/$BASE_NAME" ]; then
+        echo "⚙️ Canonical Frame Dataset이 없어 자동 추출합니다..."
+        "$PIPELINE_DIR/prepare_dataset.sh" "$BASE_NAME"
+    fi
 fi
 
-# 2. ORB-SLAM3 궤적 여부 확인
-TRAJ_ARG=""
+# 2. SLAM 및 Trajectory 준비
+TRAJ_FILE=""
 SUFFIX="_rtab_tsdf"
+
 if [ "$SLAM_TYPE" == "orb" ] || [ "$SLAM_TYPE" == "orbslam" ] || [ "$SLAM_TYPE" == "orbslam3" ]; then
-    ORB_TRAJ="$TRAJECTORY_DIR/orbslam3_${BASE_NAME}_trajectory.txt"
-    if [ ! -f "$ORB_TRAJ" ]; then
-        echo "⚙️ ORB-SLAM3 궤적이 없어 궤적 추출을 먼저 실행합니다..."
+    TRAJ_FILE="$TRAJECTORY_DIR/orbslam3_${BASE_NAME}_trajectory.txt"
+    if [ ! -f "$TRAJ_FILE" ]; then
+        echo "⚙️ ORB-SLAM3 궤적이 없어 SLAM을 실행합니다..."
         "$PIPELINE_DIR/run_slam.sh" "$BASE_NAME" --slam=orb
     fi
-    TRAJ_ARG="--trajectory=$ORB_TRAJ"
     SUFFIX="_orbslam_tsdf"
+else
+    # RTAB-Map
+    TRAJ_FILE="$TRAJECTORY_DIR/rtab_${BASE_NAME}_trajectory.txt"
+    DB_FILE="$DB_DIR/${BASE_NAME}.db"
+    if [ ! -f "$TRAJ_FILE" ] && [ ! -f "$DB_FILE" ]; then
+        echo "⚙️ RTAB-Map SLAM 결과가 없어 SLAM을 자동 실행합니다..."
+        "$PIPELINE_DIR/run_slam.sh" "$BASE_NAME" --slam=rtab
+    fi
 fi
 
 if [ "$VOXEL" == "0.005" ]; then
@@ -84,18 +94,33 @@ OUT_MESH="${CUSTOM_OUT:-$MESH_DIR/${BASE_NAME}${SUFFIX}.obj}"
 OUT_PCD="$POINTCLOUD_DIR/${BASE_NAME}${SUFFIX}_cloud.ply"
 
 echo "=========================================================="
-echo " 🔨 3D 복원 시작 (TSDF Voxel: ${VOXEL}m)"
-echo " 📁 입력 DB   : $DB_FILE"
-echo " 🛠️ SLAM 엔진 : $SLAM_TYPE"
-echo " ☁️ 점군 출력 : $OUT_PCD"
-echo " 💾 메쉬 출력 : $OUT_MESH"
+echo " 🔨 3D Reconstruction 복원 시작 (TSDF Voxel: ${VOXEL}m)"
+if [ -d "$FRAME_PATH" ] && [ -f "$FRAME_PATH/frames.csv" ]; then
+    echo " 📂 프레임 입력 : $FRAME_PATH"
+else
+    echo " 📁 DB 파일 입력: $DB_FILE"
+fi
+echo " 📍 궤적 파일   : $TRAJ_FILE"
+echo " 🛠️ SLAM 백엔드 : $SLAM_TYPE"
+echo " ☁️ 점군 출력   : $OUT_PCD"
+echo " 💾 메쉬 출력   : $OUT_MESH"
 echo "=========================================================="
 
-python3 "$PROJECT_DIR/src/auto_mobility/mesh/reconstruct_tsdf.py" \
-    "$DB_FILE" "$OUT_MESH" \
-    --pcd-output="$OUT_PCD" \
-    --voxel="$VOXEL" \
-    $TRAJ_ARG
+if [ -d "$FRAME_PATH" ] && [ -f "$FRAME_PATH/frames.csv" ] && [ -f "$TRAJ_FILE" ]; then
+    python3 "$PROJECT_DIR/src/auto_mobility/mesh/reconstruct_tsdf.py" \
+        --dataset="$FRAME_PATH" \
+        --trajectory="$TRAJ_FILE" \
+        --output="$OUT_MESH" \
+        --pcd-output="$OUT_PCD" \
+        --voxel="$VOXEL"
+else
+    # Legacy DB fallback
+    python3 "$PROJECT_DIR/src/auto_mobility/mesh/reconstruct_tsdf.py" \
+        "$DB_FILE" "$OUT_MESH" \
+        --pcd-output="$OUT_PCD" \
+        --voxel="$VOXEL" \
+        ${TRAJ_FILE:+--trajectory="$TRAJ_FILE"}
+fi
 
 if [ $? -eq 0 ]; then
     echo "=========================================================="
