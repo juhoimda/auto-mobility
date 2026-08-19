@@ -5,10 +5,16 @@ PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$PIPELINE_DIR/../common.sh"
 export PYTHONWARNINGS="ignore"
 
+# HW 과부하 및 셧다운 방지를 위한 CPU 멀티스레드 상한 제한
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-8}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-8}"
+
 SLAM_TYPE="rtab"
 SURFACE_TYPE="tsdf_direct"
 FUSION_TYPE="tsdf"
-VOXEL="0.01"
+VOXEL="0.02"
+STRIDE="2"
 VIEW_FLAG=""
 INPUT_NAME=""
 CUSTOM_OUT=""
@@ -29,6 +35,9 @@ for arg in "$@"; do
             ;;
         --voxel=*)
             VOXEL="${arg#*=}"
+            ;;
+        --stride=*)
+            STRIDE="${arg#*=}"
             ;;
         --fine)
             VOXEL="0.005"
@@ -130,12 +139,14 @@ if [ "$SURFACE_TYPE" == "tsdf_direct" ] || [ "$SURFACE_TYPE" == "tsdf" ]; then
             --trajectory="$TRAJ_FILE" \
             --output="$OUT_MESH" \
             --pcd-output="$OUT_PCD" \
-            --voxel="$VOXEL"
+            --voxel="$VOXEL" \
+            --stride="$STRIDE"
     else
         python3 "$PROJECT_DIR/src/auto_mobility/mesh/reconstruct_tsdf.py" \
             "$DB_FILE" "$OUT_MESH" \
             --pcd-output="$OUT_PCD" \
             --voxel="$VOXEL" \
+            --stride="$STRIDE" \
             ${TRAJ_FILE:+--trajectory="$TRAJ_FILE"}
     fi
 else
@@ -146,7 +157,8 @@ else
             --dataset="$FRAME_PATH" \
             --trajectory="$TRAJ_FILE" \
             --pcd-output="$OUT_PCD" \
-            --voxel="$VOXEL"
+            --voxel="$VOXEL" \
+            --stride="$STRIDE"
     fi
     python3 "$PROJECT_DIR/src/auto_mobility/mesh/mesh_open3d.py" \
         "$OUT_PCD" "$OUT_MESH" \

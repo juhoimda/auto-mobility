@@ -25,7 +25,7 @@ RealSense D435i 데이터 수집부터 3D SLAM, 정밀 3D 표면 메쉬(Mesh) �
 ./scripts/pipeline/run_slam.sh room01 --slam=stella_rgbd # stella_vslam RGB-D
 
 # [Step 3] 3D 표면 메쉬 생성 및 뷰어 자동 실행
-./scripts/pipeline/mesh.sh room01 --surface=tsdf_direct --view # 10mm TSDF 메쉬 (기본)
+./scripts/pipeline/mesh.sh room01 --surface=tsdf_direct --view # 20mm TSDF 메쉬 (기본)
 ```
 
 > 💡 **Tip (자동 프레임 추출)**:  
@@ -42,7 +42,7 @@ RealSense D435i 데이터 수집부터 3D SLAM, 정밀 3D 표면 메쉬(Mesh) �
 ```bash
 ./scripts/pipeline/evaluate.sh room01 ros2_data/meshes/room01_rtab_tsdf.obj
 ```
-* **결과 보고서**: `ros2_data/evaluations/room01/rtab_tsdf_10mm/evaluation_report.md`
+* **결과 보고서**: `ros2_data/evaluations/room01/rtab_tsdf_20mm/evaluation_report.md`
 
 ### 5단계: Multi-Axis 모듈식 벤치마크 및 축별 랭킹 (`compare.sh`)
 SLAM, TSDF 해상도, Surface 표현 방식을 직교 분리하여 독립 비교합니다.
@@ -65,11 +65,11 @@ SLAM, TSDF 해상도, Surface 표현 방식을 직교 분리하여 독립 비교
 
 ### A. 3D 복원 알고리즘 및 해상도 선택 (`mesh.sh`)
 ```bash
-# 1. TSDF Direct Mesh (기본 10mm)
-./scripts/pipeline/mesh.sh room01 --surface=tsdf_direct --voxel=0.01 --view
+# 1. TSDF Direct Mesh (기본 20mm - 고속 & 연산/메모리 최적화 표준)
+./scripts/pipeline/mesh.sh room01 --surface=tsdf_direct --voxel=0.02 --view
 
-# 2. 5mm 고정밀 TSDF 복원
-./scripts/pipeline/mesh.sh room01 --surface=tsdf_direct --voxel=0.005 --view
+# 2. 10mm 고정밀 TSDF 복원
+./scripts/pipeline/mesh.sh room01 --surface=tsdf_direct --voxel=0.01 --view
 
 # 3. Open3D Alpha Shape (점간 간격 기반 동적 스케일 표면 복원)
 ./scripts/pipeline/mesh.sh room01 --surface=alpha --voxel=0.02 --view

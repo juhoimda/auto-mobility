@@ -46,7 +46,7 @@ class AssociationSummary:
 def associate_trajectory_to_frames(
     frame_timestamps: Union[np.ndarray, List[float]],
     trajectory: Trajectory,
-    max_pose_gap_ms: float = 50.0,
+    max_pose_gap_ms: float = 500.0,
     enable_interpolation: bool = True
 ) -> Tuple[Dict[int, np.ndarray], List[PoseAssociationResult], AssociationSummary]:
     """Frame timestamps와 Trajectory 간 timestamp 매칭 및 SLERP 보간 수행.
@@ -100,14 +100,29 @@ def associate_trajectory_to_frames(
     rotations = Rotation.from_quat(traj_orientations)
     slerp = Slerp(traj_stamps, rotations) if (len(traj_stamps) >= 2 and enable_interpolation) else None
 
+    # Vectorized searchsorted for all frame timestamps at once
+    indices = np.searchsorted(traj_stamps, frame_stamps)
+
     poses_by_frame_id: Dict[int, np.ndarray] = {}
     records: List[PoseAssociationResult] = []
     dt_ms_list: List[float] = []
 
-    for fid, f_time in enumerate(frame_stamps):
-        # 1. Exact match check
-        idx = int(np.searchsorted(traj_stamps, f_time))
+    # Batch SLERP evaluation for valid interpolation frames
+    interp_mask = (indices > 0) & (indices < len(traj_stamps)) if (enable_interpolation and slerp is not None) else np.zeros(n_frames, dtype=bool)
+    if np.any(interp_mask):
+        valid_interp_times = frame_stamps[interp_mask]
+        try:
+            batch_interp_rots = slerp(valid_interp_times).as_matrix()
+        except Exception:
+            batch_interp_rots = None
+    else:
+        batch_interp_rots = None
 
+    interp_cnt = 0
+    for fid, f_time in enumerate(frame_stamps):
+        idx = int(indices[fid])
+
+        # 1. Exact match check
         if idx < len(traj_stamps) and abs(traj_stamps[idx] - f_time) < 1e-6:
             pos = traj_positions[idx]
             rot = rotations[idx].as_matrix()
@@ -131,10 +146,14 @@ def associate_trajectory_to_frames(
         if enable_interpolation and slerp is not None and 0 < idx < len(traj_stamps):
             t0, t1 = traj_stamps[idx - 1], traj_stamps[idx]
             dt_interval = t1 - t0
-            if dt_interval <= max_gap_sec * 2.0:  # Allow interpolation if gap between poses is reasonable
+            if dt_interval <= max_gap_sec * 2.0:
                 alpha = (f_time - t0) / dt_interval
                 interp_pos = (1.0 - alpha) * traj_positions[idx - 1] + alpha * traj_positions[idx]
-                interp_rot = slerp([f_time])[0].as_matrix()
+                if batch_interp_rots is not None and interp_mask[fid]:
+                    interp_rot = batch_interp_rots[interp_cnt]
+                    interp_cnt += 1
+                else:
+                    interp_rot = slerp([f_time])[0].as_matrix()
 
                 T = np.eye(4, dtype=np.float64)
                 T[:3, :3] = interp_rot
@@ -152,6 +171,8 @@ def associate_trajectory_to_frames(
                 ))
                 dt_ms_list.append(0.0)
                 continue
+            elif interp_mask[fid]:
+                interp_cnt += 1
 
         # 3. Fallback to Nearest
         candidates = []

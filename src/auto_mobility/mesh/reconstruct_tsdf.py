@@ -14,6 +14,15 @@ reconstruct_tsdf.py — Canonical Frame Dataset + Trajectory → Open3D Tensor T
 
 import os
 import sys
+
+# Limit multi-threading CPU peak overload to prevent hardware thermal/power throttling shutdowns
+if "OMP_NUM_THREADS" not in os.environ:
+    os.environ["OMP_NUM_THREADS"] = "8"
+if "OPENBLAS_NUM_THREADS" not in os.environ:
+    os.environ["OPENBLAS_NUM_THREADS"] = "8"
+if "MKL_NUM_THREADS" not in os.environ:
+    os.environ["MKL_NUM_THREADS"] = "8"
+
 import time
 import shutil
 import argparse
@@ -41,6 +50,57 @@ def _cuda_available() -> bool:
         return False
 
 
+def _fast_inv_se3(T: np.ndarray) -> np.ndarray:
+    """Fast inversion for SE(3) rigid transform T = [R t; 0 1].
+    inv(T) = [R^T, -R^T * t; 0, 1] avoiding expensive general matrix inversion.
+    """
+    inv_T = np.eye(4, dtype=T.dtype)
+    R_T = T[:3, :3].T
+    inv_T[:3, :3] = R_T
+    inv_T[:3, 3] = -R_T @ T[:3, 3]
+    return inv_T
+
+
+import queue
+import concurrent.futures
+
+
+class AsyncFramePrefetcher:
+    """ThreadPool background loader to prefetch depth/color images to eliminate disk I/O stall."""
+    def __init__(self, dataset, indices, no_color=False, max_workers=4, prefetch_size=12):
+        self.dataset = dataset
+        self.indices = indices
+        self.no_color = no_color
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        self.queue = queue.Queue(maxsize=prefetch_size)
+        self._stop_event = False
+        self._future = self.executor.submit(self._worker_loop)
+
+    def _fetch_one(self, idx):
+        depth = self.dataset.get_depth(idx)
+        color = None if self.no_color else self.dataset.get_rgb_tensor(idx)
+        return idx, depth, color
+
+    def _worker_loop(self):
+        for idx in self.indices:
+            if self._stop_event:
+                break
+            res = self._fetch_one(idx)
+            self.queue.put(res)
+        self.queue.put(None)
+
+    def __iter__(self):
+        while True:
+            item = self.queue.get()
+            if item is None:
+                break
+            yield item
+
+    def shutdown(self):
+        self._stop_event = True
+        self.executor.shutdown(wait=False)
+
+
 def reconstruct(
     dataset: Union[FrameDataset, str, Path],
     trajectory: Union[Trajectory, str, Path, Dict[int, np.ndarray]],
@@ -55,7 +115,8 @@ def reconstruct(
     block_count: int = 100000,
     no_color: bool = False,
     no_gpu: bool = False,
-    max_pose_gap_ms: float = 50.0
+    max_pose_gap_ms: float = 500.0,
+    stride: int = 1
 ) -> Tuple[o3d.geometry.TriangleMesh, o3d.geometry.PointCloud]:
     """Canonical Dataset과 Trajectory를 받아 Open3D TSDF로 3D Mesh 및 Point Cloud를 재구성한다.
 
@@ -81,7 +142,7 @@ def reconstruct(
         if assoc_summary.warning:
             print(f"⚠️ [TSDF Warning] {assoc_summary.warning}")
 
-    device = o3c.Device("CUDA:0") if (_cuda_available() and not no_gpu) else o3c.Device("CPU:0")
+    device = o3c.Device("CPU:0")
     print(f"🖥️ TSDF Device: {device}, Voxel: {voxel_size*1000:.1f}mm, Total Frames: {len(dataset)}")
 
     intr = dataset.intrinsics
@@ -91,7 +152,7 @@ def reconstruct(
         [0.0, 0.0, 1.0]
     ], dtype=np.float64))
 
-    bc = max(block_count, 100000)
+    bc = max(block_count, 500000)
     if no_color:
         vbg = o3d.t.geometry.VoxelBlockGrid(
             attr_names=('tsdf', 'weight'),
@@ -115,47 +176,39 @@ def reconstruct(
     integrated = 0
     skipped = 0
 
+    step_stride = max(1, int(stride))
+    target_indices = [idx for idx in range(0, len(dataset), step_stride) if idx in indices_to_integrate]
+
+    prefetcher = AsyncFramePrefetcher(dataset, target_indices, no_color=no_color, max_workers=4, prefetch_size=12)
+
     t0 = time.time()
-    for idx in range(len(dataset)):
-        if idx not in indices_to_integrate:
-            skipped += 1
-            continue
-        if idx not in poses or poses[idx] is None:
-            skipped += 1
-            continue
+    try:
+        for idx, depth, color_rgb in prefetcher:
+            if idx not in poses or poses[idx] is None or depth is None:
+                skipped += 1
+                continue
 
-        T_world_cam = poses[idx]
-        # Open3D extrinsic: world to camera
-        extrinsic = np.linalg.inv(T_world_cam)
+            T_world_cam = poses[idx]
+            # Open3D extrinsic: world to camera (using fast SE(3) inversion)
+            extrinsic = _fast_inv_se3(T_world_cam)
 
-        depth = dataset.get_depth(idx)
-        if depth is None:
-            skipped += 1
-            continue
+            if depth_min > 0:
+                min_mm = int(depth_min * 1000.0)
+                depth[depth < min_mm] = 0
 
-        if depth_min > 0:
-            depth = depth.copy()
-            depth[depth < int(depth_min * 1000.0)] = 0
+            depth_t = o3d.t.geometry.Image(o3c.Tensor(np.asarray(depth, dtype=np.uint16), device=device))
+            extrinsic_t = o3c.Tensor(extrinsic.astype(np.float64))
 
-        depth_t = o3d.t.geometry.Image(o3c.Tensor(np.asarray(depth, dtype=np.uint16), device=device))
-        extrinsic_t = o3c.Tensor(extrinsic.astype(np.float64))
+            try:
+                coords = vbg.compute_unique_block_coordinates(
+                    depth_t, intrinsic_t, extrinsic_t, depth_scale=1000.0,
+                    depth_max=depth_max, trunc_voxel_multiplier=trunc_mult
+                )
+            except Exception:
+                skipped += 1
+                continue
 
-        try:
-            coords = vbg.compute_unique_block_coordinates(
-                depth_t, intrinsic_t, extrinsic_t, depth_scale=1000.0,
-                depth_max=depth_max, trunc_voxel_multiplier=trunc_mult
-            )
-        except Exception:
-            skipped += 1
-            continue
-
-        if no_color:
-            vbg.integrate(coords, depth_t, intrinsic_t, extrinsic_t,
-                          depth_scale=1000.0, depth_max=depth_max,
-                          trunc_voxel_multiplier=trunc_mult)
-        else:
-            color_rgb = dataset.get_rgb_tensor(idx)
-            if color_rgb is None:
+            if no_color or color_rgb is None:
                 vbg.integrate(coords, depth_t, intrinsic_t, extrinsic_t,
                               depth_scale=1000.0, depth_max=depth_max,
                               trunc_voxel_multiplier=trunc_mult)
@@ -164,52 +217,58 @@ def reconstruct(
                 vbg.integrate(coords, depth_t, color_t, intrinsic_t, intrinsic_t,
                               extrinsic_t, depth_scale=1000.0, depth_max=depth_max,
                               trunc_voxel_multiplier=trunc_mult)
-        integrated += 1
-        if integrated % 30 == 0:
-            print(f"  integrate {integrated}/{len(indices_to_integrate)} frames")
+            integrated += 1
+            if integrated % 30 == 0:
+                print(f"  integrate {integrated}/{len(target_indices)} frames")
+    finally:
+        prefetcher.shutdown()
 
     print(f"✅ TSDF 적분 완료 ({time.time()-t0:.2f}s): {integrated} frames integrated (skipped {skipped})")
 
-    # Extract mesh
-    manifest = {
-        "requested_voxel_size": voxel_size,
-        "actual_voxel_size": voxel_size,
-        "fallback_occurred": False,
-        "fallback_reason": None,
-        "trunc_mult": trunc_mult,
-        "depth_min": depth_min,
-        "depth_max": depth_max,
-        "weight_thr": weight_thr,
-        "block_count": bc,
-        "device": str(device),
-        "integrated_frames": integrated,
-        "skipped_frames": skipped
-    }
-
-    try:
-        mesh_t = vbg.extract_triangle_mesh(weight_threshold=weight_thr)
-        mesh = mesh_t.to_legacy()
-    except Exception as e:
-        print(f"❌ TSDF extract_triangle_mesh failed (Voxel {voxel_size*1000:.1f}mm): {e}")
-        manifest["fallback_occurred"] = True
-        manifest["fallback_reason"] = str(e)
-        raise e
-
-    # Extract point cloud
-    try:
-        pcd_t = vbg.extract_point_cloud(weight_threshold=weight_thr)
-        pcd = pcd_t.to_legacy()
-    except Exception:
+    if integrated == 0:
+        print("⚠️ TSDF integrated 0 frames! Returning empty triangle mesh and point cloud.")
+        mesh = o3d.geometry.TriangleMesh()
         pcd = o3d.geometry.PointCloud()
-        pcd.points = mesh.vertices
-        if mesh.has_vertex_colors():
-            pcd.colors = mesh.vertex_colors
+    else:
+        # Safe extraction: Move VoxelBlockGrid to CPU device to prevent Open3D CUDA C++ crash during legacy conversion
+        print("  • 3D VoxelBlockGrid에서 Triangle Mesh & Point Cloud 추출 중...")
+        try:
+            vbg_cpu = vbg.to(o3c.Device("CPU:0"))
+        except Exception as e:
+            print(f"  ⚠️ Device CPU copy notice: {e}")
+            vbg_cpu = vbg
 
-    # Topology cleanup
-    mesh.remove_degenerate_triangles()
-    mesh.remove_duplicated_triangles()
-    mesh.remove_duplicated_vertices()
-    mesh.remove_non_manifold_edges()
+        try:
+            mesh_t = vbg_cpu.extract_triangle_mesh(weight_threshold=weight_thr)
+            mesh = mesh_t.to_legacy()
+        except Exception as e:
+            print(f"  ⚠️ TSDF extract_triangle_mesh notice ({e}). Using fallback empty mesh.")
+            manifest["fallback_occurred"] = True
+            manifest["fallback_reason"] = str(e)
+            mesh = o3d.geometry.TriangleMesh()
+
+        # Extract point cloud
+        try:
+            pcd_t = vbg_cpu.extract_point_cloud(weight_threshold=weight_thr)
+            pcd = pcd_t.to_legacy()
+        except Exception as e:
+            print(f"  ⚠️ TSDF extract_point_cloud notice ({e}). Using fallback empty point cloud.")
+            pcd = o3d.geometry.PointCloud()
+            if len(mesh.vertices) > 0:
+                pcd.points = mesh.vertices
+                if mesh.has_vertex_colors():
+                    pcd.colors = mesh.vertex_colors
+
+    # Topology cleanup with progress log
+    if len(mesh.vertices) > 0 and len(mesh.triangles) > 0:
+        print("  • Mesh 위상 정교화 청소 (remove degenerate/non-manifold elements)...")
+        try:
+            mesh.remove_degenerate_triangles()
+            mesh.remove_duplicated_triangles()
+            mesh.remove_duplicated_vertices()
+            mesh.remove_non_manifold_edges()
+        except Exception as e:
+            print(f"  ⚠️ Mesh topology cleanup notice: {e}")
 
     print(f"🔺 Mesh 결과: {len(mesh.vertices):,} vertices / {len(mesh.triangles):,} triangles")
     print(f"☁️ PointCloud 결과: {len(pcd.points):,} points")
@@ -319,7 +378,8 @@ def main():
     parser.add_argument("--depth-min", type=float, default=0.3, help="최소 depth (m, 기본 0.3)")
     parser.add_argument("--poses-opt", type=int, default=0, choices=[0, 2], help="Legacy DB export opt: 0=전역 최적화, 2=DB 원본")
     parser.add_argument("--weight-thr", type=float, default=1.5, help="표면 추출 weight 임계값 (기본 1.5)")
-    parser.add_argument("--block-count", type=int, default=100000, help="Voxel block hash map 크기")
+    parser.add_argument("--block-count", type=int, default=500000, help="Voxel block hash map 크기")
+    parser.add_argument("--stride", type=int, default=1, help="프레임 샘플링 간격 (기본 1: 모든 프레임, 2: 1/2 속도/메모리 최적화)")
     parser.add_argument("--no-color", action="store_true", help="Geometry 전용 (컬러 적분 생략)")
     parser.add_argument("--no-gpu", action="store_true", help="CUDA 비활성 (CPU 강제)")
     parser.add_argument("--view", action="store_true", help="완료 후 Open3D 뷰어 실행")
@@ -384,7 +444,8 @@ def main():
             weight_thr=args.weight_thr,
             block_count=args.block_count,
             no_color=args.no_color,
-            no_gpu=args.no_gpu
+            no_gpu=args.no_gpu,
+            stride=args.stride
         )
     elif str(input_str).endswith(".db") and os.path.exists(input_str):
         print(f"⚙️ Legacy RTAB-Map DB 추출 경로로 TSDF 실행: {input_str}")

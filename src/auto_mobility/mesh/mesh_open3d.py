@@ -137,9 +137,9 @@ def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_si
         )
     else:
         # 기본: Poisson (watertight, 구멍 없는 폐곡면) - BPA 대비 품질 우수
-        print(f"Reconstructing surface using Poisson Surface Reconstruction (depth={depth}, linear_fit=True, n_threads=-1)...")
+        print(f"Reconstructing surface using Poisson Surface Reconstruction (depth={depth}, linear_fit=True, n_threads=8)...")
         mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-            pcd, depth=depth, scale=1.1, linear_fit=True, n_threads=-1
+            pcd, depth=depth, scale=1.1, linear_fit=True, n_threads=8
         )
 
         if clean_density:

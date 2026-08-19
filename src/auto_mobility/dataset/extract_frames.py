@@ -183,9 +183,9 @@ def extract_dataset_from_bag(bag_path_or_name: str, out_dir: Optional[str] = Non
     if not selected_rgb or not selected_depth:
         raise ValueError(f"Rosbag does not contain required RGB and Depth topics! Available: {list(topic_map.keys())}")
 
-    # Prepare extraction buffers
-    rgb_frames: List[Tuple[float, float, np.ndarray, str]] = []  # (stamp, bag_stamp, bgr_img, frame_id)
-    depth_frames: List[Tuple[float, float, np.ndarray, str]] = []  # (stamp, bag_stamp, depth_16u, frame_id)
+    # Prepare extraction buffers (store raw bytes & metadata to prevent RAM peak OOM)
+    rgb_frames: List[Tuple[float, float, bytes, str, str]] = []  # (stamp, bag_stamp, raw_data, topic_type, frame_id)
+    depth_frames: List[Tuple[float, float, bytes, str, str]] = []  # (stamp, bag_stamp, raw_data, topic_type, frame_id)
     imu_records: List[dict] = []
     camera_info_record: Optional[dict] = None
 
@@ -201,17 +201,13 @@ def extract_dataset_from_bag(bag_path_or_name: str, out_dir: Optional[str] = Non
             msg = deserialize_message(data, get_message(topic_map[topic]))
             stamp = _stamp_sec(msg) or bag_stamp_sec
             fid = msg.header.frame_id if hasattr(msg, "header") else "camera_color_optical_frame"
-            img = decode_rgb_message(msg, topic_map[topic])
-            if img is not None:
-                rgb_frames.append((stamp, bag_stamp_sec, img, fid))
+            rgb_frames.append((stamp, bag_stamp_sec, data, topic_map[topic], fid))
 
         elif topic == selected_depth:
             msg = deserialize_message(data, get_message(topic_map[topic]))
             stamp = _stamp_sec(msg) or bag_stamp_sec
             fid = msg.header.frame_id if hasattr(msg, "header") else "camera_color_optical_frame"
-            dimg = decode_depth_message(msg, topic_map[topic])
-            if dimg is not None:
-                depth_frames.append((stamp, bag_stamp_sec, dimg, fid))
+            depth_frames.append((stamp, bag_stamp_sec, data, topic_map[topic], fid))
 
         elif topic == selected_info and camera_info_record is None:
             msg = deserialize_message(data, get_message(topic_map[topic]))
@@ -256,50 +252,56 @@ def extract_dataset_from_bag(bag_path_or_name: str, out_dir: Optional[str] = Non
     matched_pairs: List[dict] = []
     used_depth_indices = set()
 
-    for r_idx, (r_stamp, r_bag_stamp, r_img, r_fid) in enumerate(rgb_frames):
+    for r_idx, (r_stamp, r_bag_stamp, r_data, r_type, r_fid) in enumerate(rgb_frames):
         d_idx = int(np.argmin(np.abs(depth_stamps - r_stamp)))
         dt_ms = abs(depth_stamps[d_idx] - r_stamp) * 1000.0
         if dt_ms <= max_sync_dt_ms and d_idx not in used_depth_indices:
             used_depth_indices.add(d_idx)
-            d_stamp, d_bag_stamp, d_img, d_fid = depth_frames[d_idx]
+            d_stamp, d_bag_stamp, d_data, d_type, d_fid = depth_frames[d_idx]
             matched_pairs.append({
                 "rgb_stamp": r_stamp,
                 "depth_stamp": d_stamp,
                 "rgb_bag_stamp": r_bag_stamp,
-                "rgb_img": r_img,
-                "depth_img": d_img,
+                "rgb_data": r_data,
+                "rgb_type": r_type,
+                "depth_data": d_data,
+                "depth_type": d_type,
                 "dt_ms": dt_ms,
                 "fid": r_fid,
-                "width": r_img.shape[1],
-                "height": r_img.shape[0]
             })
 
     print(f"🔗 동기화 프레임 매칭: 총 {len(matched_pairs)} 프레임 페어 생성 (dt <= {max_sync_dt_ms}ms)")
 
-    # Save to canonical directory structure
+    # Save to canonical directory structure with lazy decoding
     rgb_dir = out_path / "rgb"
     depth_dir = out_path / "depth"
     rgb_dir.mkdir(parents=True, exist_ok=True)
     depth_dir.mkdir(parents=True, exist_ok=True)
 
     frames_csv_path = out_path / "frames.csv"
-    with open(frames_csv_path, "w", newline="", encoding="utf-8") as f_csv:
-        fieldnames = [
-            "frame_id", "rgb_timestamp", "depth_timestamp", "rgb_path", "depth_path",
-            "rgb_depth_dt_ms", "bag_timestamp", "camera_frame_id", "width", "height"
-        ]
-        writer = csv.DictWriter(f_csv, fieldnames=fieldnames)
-        writer.writeheader()
+    import concurrent.futures
 
-        for idx, pair in enumerate(matched_pairs):
+    def _process_and_save_pair(idx_and_pair):
+        idx, pair = idx_and_pair
+        try:
+            r_msg = deserialize_message(pair["rgb_data"], get_message(pair["rgb_type"]))
+            d_msg = deserialize_message(pair["depth_data"], get_message(pair["depth_type"]))
+            r_img = decode_rgb_message(r_msg, pair["rgb_type"])
+            d_img = decode_depth_message(d_msg, pair["depth_type"])
+
+            if r_img is None or d_img is None:
+                return None
+
+            h, w = r_img.shape[:2]
             frame_str = f"{idx:06d}"
             rgb_rel = f"rgb/{frame_str}.png"
             depth_rel = f"depth/{frame_str}.png"
 
-            cv2.imwrite(str(out_path / rgb_rel), pair["rgb_img"])
-            cv2.imwrite(str(out_path / depth_rel), pair["depth_img"])
+            png_opts = [cv2.IMWRITE_PNG_COMPRESSION, 1]
+            cv2.imwrite(str(out_path / rgb_rel), r_img, png_opts)
+            cv2.imwrite(str(out_path / depth_rel), d_img, png_opts)
 
-            writer.writerow({
+            return {
                 "frame_id": idx,
                 "rgb_timestamp": f"{pair['rgb_stamp']:.6f}",
                 "depth_timestamp": f"{pair['depth_stamp']:.6f}",
@@ -308,16 +310,53 @@ def extract_dataset_from_bag(bag_path_or_name: str, out_dir: Optional[str] = Non
                 "rgb_depth_dt_ms": f"{pair['dt_ms']:.3f}",
                 "bag_timestamp": f"{pair['rgb_bag_stamp']:.6f}",
                 "camera_frame_id": pair["fid"],
-                "width": pair["width"],
-                "height": pair["height"]
-            })
+                "width": w,
+                "height": h
+            }
+        except Exception as e:
+            print(f"⚠️ Frame {idx} save error: {e}")
+            return None
+
+    saved_records = []
+    saved_pairs_count = 0
+    total_matched = len(matched_pairs)
+    print(f"💾 프레임 디스크 저장 시작 (총 {total_matched} 프레임 / 8개 스레드 병렬 쓰기)...")
+    t_save_start = time.time()
+    first_w, first_h = 640, 480
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(_process_and_save_pair, (i, pair)) for i, pair in enumerate(matched_pairs)]
+        for done_cnt, fut in enumerate(concurrent.futures.as_completed(futures), 1):
+            res = fut.result()
+            if res is not None:
+                saved_records.append(res)
+                if saved_pairs_count == 0:
+                    first_w, first_h = res["width"], res["height"]
+                saved_pairs_count += 1
+
+            if done_cnt % 500 == 0 or done_cnt == total_matched:
+                pct = (done_cnt / total_matched) * 100.0
+                elapsed_s = time.time() - t_save_start
+                print(f"  • [Frame Extraction] 디스크 저장 진행 중: {done_cnt}/{total_matched} ({pct:.1f}%, {elapsed_s:.1f}s)")
+
+    saved_records.sort(key=lambda r: r["frame_id"])
+
+    with open(frames_csv_path, "w", newline="", encoding="utf-8") as f_csv:
+        fieldnames = [
+            "frame_id", "rgb_timestamp", "depth_timestamp", "rgb_path", "depth_path",
+            "rgb_depth_dt_ms", "bag_timestamp", "camera_frame_id", "width", "height"
+        ]
+        writer = csv.DictWriter(f_csv, fieldnames=fieldnames)
+        writer.writeheader()
+        for rec in saved_records:
+            writer.writerow(rec)
 
     # Save camera info
     cam_info_path = out_path / "camera_info.json"
     if camera_info_record is None:
         print("⚠️ CameraInfo 미발견! 기본 D435i Intrinsics(fx=385.0) 기록")
-        w = matched_pairs[0]["width"] if matched_pairs else 640
-        h = matched_pairs[0]["height"] if matched_pairs else 480
+        w = first_w
+        h = first_h
         camera_info_record = {
             "fx": 385.0, "fy": 385.0, "cx": w / 2.0, "cy": h / 2.0,
             "width": w, "height": h, "distortion_model": "plumb_bob",
@@ -348,13 +387,13 @@ def extract_dataset_from_bag(bag_path_or_name: str, out_dir: Optional[str] = Non
     r_stamps = [p["rgb_stamp"] for p in matched_pairs]
     r_diffs = np.diff(r_stamps) if len(r_stamps) > 1 else np.array([0.0])
     duration = float(r_stamps[-1] - r_stamps[0]) if len(r_stamps) > 1 else 0.0
-    est_hz = round(len(matched_pairs) / duration, 2) if duration > 0 else 0.0
+    est_hz = round(saved_pairs_count / duration, 2) if duration > 0 else 0.0
 
     dataset_info = {
         "dataset_name": bag_name,
         "source_bag": str(bag_path),
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "frame_count": len(matched_pairs),
+        "frame_count": saved_pairs_count,
         "duration_sec": round(duration, 3),
         "estimated_fps": est_hz,
         "raw_rgb_count": len(rgb_frames),
