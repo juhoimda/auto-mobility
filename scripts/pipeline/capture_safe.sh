@@ -82,8 +82,9 @@ stop_windows_camera() {
 PREVIEW_PID=""
 cleanup() {
     kill $GUARD_PID 2>/dev/null || true
-    kill $PREVIEW_PID 2>/dev/null || true
     wait $GUARD_PID 2>/dev/null || true
+    # Windows 프리뷰 신호 파일 제거 (realsense_pub.exe가 감지하여 창 자동 닫힘)
+    rm -f "$SHARED_DIR/camera_preview.txt" 2>/dev/null || true
     stop_windows_camera
 }
 trap cleanup EXIT INT TERM
@@ -161,11 +162,13 @@ echo "📊 capture_guard 모니터링 시작 → ${GUARD_BASE}.md"
 python3 "$PROJECT_DIR/src/auto_mobility/monitor/capture_guard.py" $GUARD_ARGS &
 GUARD_PID=$!
 
-# ── 실시간 카메라 시선 뷰어 (옵션: --view) ─────────────────────
+# ── 실시간 카메라 프리뷰 (옵션: --view) ────────────────────────
+# WSL 내부 Python 뷰어 대신 Windows 신호 파일 생성 →
+# realsense_pub.exe 자체적으로 OpenCV 창 표시 (녹화 성능 영향 없음)
 if [ "$SHOW_PREVIEW" = true ]; then
-    echo "👁️  실시간 카메라 프리뷰 창 실행 중..."
-    python3 "$PROJECT_DIR/scripts/utils/view_camera.py" "${VIEW_ARGS[@]}" &
-    PREVIEW_PID=$!
+    echo "👁️  Windows 프리뷰 창 신호 전송 → $SHARED_DIR/camera_preview.txt"
+    echo "preview" > "$SHARED_DIR/camera_preview.txt" 2>/dev/null || \
+        echo "⚠️  신호 파일 쓰기 실패 (WSL→Windows 공유 폴더 확인)"
 fi
 
 # ── 녹화 (압축 기본: RGB JPEG + Depth PNG lossless) ────────────
