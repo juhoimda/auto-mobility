@@ -75,16 +75,40 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 
-# 3. 토픽 존재 확인 (topic_probe: ros2 CLI 데몬 hang 회피)
-#    원격(Windows 카메라) / 로컬(WSL usbipd) 모드 자동 감지
+# 3. 토픽 존재 확인 (배치 프로브로 다중 프로세스 fork 및 직렬 대기 병목 제거)
+# 후보 토픽 목록을 한 번의 rclpy 세션으로 일괄 확인 (timeout: 1.5s)
+PROBE_CANDIDATES=(
+    "$RGB_TOPIC"
+    "$RGB_COMPRESSED_TOPIC"
+    "$DEPTH_TOPIC"
+    "$ALIGNED_DEPTH_TOPIC"
+    "$DEPTH_COMPRESSED_TOPIC"
+    "$ALIGNED_DEPTH_COMPRESSED_TOPIC"
+    "$CAMERA_INFO_TOPIC"
+    "$CAMERA_INFO_WINDOWS_TOPIC"
+    "$INFRA1_INFO_WINDOWS_TOPIC"
+    "$INFRA2_INFO_WINDOWS_TOPIC"
+    "$INFRA1_TOPIC"
+    "$INFRA2_TOPIC"
+    "$INFRA1_COMPRESSED_TOPIC"
+    "$INFRA2_COMPRESSED_TOPIC"
+    "$IMU_TOPIC"
+)
+
+declare -A TOPIC_STATUS
+while IFS=':' read -r topic_name status_code; do
+    [ -n "$topic_name" ] && TOPIC_STATUS["$topic_name"]="$status_code"
+done < <(topic_probe_batch 1.5 "${PROBE_CANDIDATES[@]}")
+
+# 원격(Windows 카메라) / 로컬(WSL usbipd) 모드 자동 감지
 MODE="local"
-if ! topic_exists "$RGB_TOPIC" 3 && topic_exists "$RGB_COMPRESSED_TOPIC" 3; then
+if [ "${TOPIC_STATUS[$RGB_TOPIC]:-1}" != "0" ] && [ "${TOPIC_STATUS[$RGB_COMPRESSED_TOPIC]:-1}" = "0" ]; then
     MODE="remote"
 fi
 echo "📡 카메라 모드: $MODE"
 
 # 압축 토픽이 없으면(예: 로컬 raw 전송 전용) 자동으로 raw 녹화로 폴백
-if [ "$FORCE_RAW" = false ] && ! topic_exists "$RGB_COMPRESSED_TOPIC" 3; then
+if [ "$FORCE_RAW" = false ] && [ "${TOPIC_STATUS[$RGB_COMPRESSED_TOPIC]:-1}" != "0" ]; then
     echo "⚠️  [폴백] 압축 RGB 토픽 미발행 → raw 토픽으로 녹화합니다."
     FORCE_RAW=true
 fi
@@ -92,48 +116,44 @@ fi
 DETECTED_DEPTH="${DEPTH_TOPIC}"
 DETECTED_DEPTH_COMPRESSED="${DEPTH_COMPRESSED_TOPIC}"
 if [ "$FORCE_RAW" = true ]; then
-    if topic_exists "$DEPTH_TOPIC" 3; then
+    if [ "${TOPIC_STATUS[$DEPTH_TOPIC]:-1}" = "0" ]; then
         DETECTED_DEPTH="$DEPTH_TOPIC"
-    elif topic_exists "$ALIGNED_DEPTH_TOPIC" 3; then
+    elif [ "${TOPIC_STATUS[$ALIGNED_DEPTH_TOPIC]:-1}" = "0" ]; then
         DETECTED_DEPTH="$ALIGNED_DEPTH_TOPIC"
     fi
 else
-    if topic_exists "$DEPTH_COMPRESSED_TOPIC" 3; then
+    if [ "${TOPIC_STATUS[$DEPTH_COMPRESSED_TOPIC]:-1}" = "0" ]; then
         DETECTED_DEPTH_COMPRESSED="$DEPTH_COMPRESSED_TOPIC"
-    elif topic_exists "$ALIGNED_DEPTH_COMPRESSED_TOPIC" 3; then
+    elif [ "${TOPIC_STATUS[$ALIGNED_DEPTH_COMPRESSED_TOPIC]:-1}" = "0" ]; then
         DETECTED_DEPTH_COMPRESSED="$ALIGNED_DEPTH_COMPRESSED_TOPIC"
     fi
 fi
 
-
 # CameraInfo: 표준 토픽 + Windows 원본 토픽 모두 존재 시 함께 기록
-# (오프라인 재생 시 republish.py 가 camera_info_windows 를 구독하므로 replay 정합성 확보)
 INFO_TOPICS=()
-topic_exists "$CAMERA_INFO_TOPIC" 3 && INFO_TOPICS+=("$CAMERA_INFO_TOPIC")
-topic_exists "$CAMERA_INFO_WINDOWS_TOPIC" 3 && INFO_TOPICS+=("$CAMERA_INFO_WINDOWS_TOPIC")
-topic_exists "$INFRA1_INFO_WINDOWS_TOPIC" 3 && INFO_TOPICS+=("$INFRA1_INFO_WINDOWS_TOPIC")
-topic_exists "$INFRA2_INFO_WINDOWS_TOPIC" 3 && INFO_TOPICS+=("$INFRA2_INFO_WINDOWS_TOPIC")
+[ "${TOPIC_STATUS[$CAMERA_INFO_TOPIC]:-1}" = "0" ] && INFO_TOPICS+=("$CAMERA_INFO_TOPIC")
+[ "${TOPIC_STATUS[$CAMERA_INFO_WINDOWS_TOPIC]:-1}" = "0" ] && INFO_TOPICS+=("$CAMERA_INFO_WINDOWS_TOPIC")
+[ "${TOPIC_STATUS[$INFRA1_INFO_WINDOWS_TOPIC]:-1}" = "0" ] && INFO_TOPICS+=("$INFRA1_INFO_WINDOWS_TOPIC")
+[ "${TOPIC_STATUS[$INFRA2_INFO_WINDOWS_TOPIC]:-1}" = "0" ] && INFO_TOPICS+=("$INFRA2_INFO_WINDOWS_TOPIC")
 
 # Infrared (IR Stereo) 감지 및 추가
 IR_TOPICS=()
 if [ "$FORCE_RAW" = true ]; then
-    topic_exists "$INFRA1_TOPIC" 3 && IR_TOPICS+=("$INFRA1_TOPIC")
-    topic_exists "$INFRA2_TOPIC" 3 && IR_TOPICS+=("$INFRA2_TOPIC")
+    [ "${TOPIC_STATUS[$INFRA1_TOPIC]:-1}" = "0" ] && IR_TOPICS+=("$INFRA1_TOPIC")
+    [ "${TOPIC_STATUS[$INFRA2_TOPIC]:-1}" = "0" ] && IR_TOPICS+=("$INFRA2_TOPIC")
 else
-    topic_exists "$INFRA1_COMPRESSED_TOPIC" 3 && IR_TOPICS+=("$INFRA1_COMPRESSED_TOPIC")
-    topic_exists "$INFRA2_COMPRESSED_TOPIC" 3 && IR_TOPICS+=("$INFRA2_COMPRESSED_TOPIC")
+    [ "${TOPIC_STATUS[$INFRA1_COMPRESSED_TOPIC]:-1}" = "0" ] && IR_TOPICS+=("$INFRA1_COMPRESSED_TOPIC")
+    [ "${TOPIC_STATUS[$INFRA2_COMPRESSED_TOPIC]:-1}" = "0" ] && IR_TOPICS+=("$INFRA2_COMPRESSED_TOPIC")
 fi
 
 # /tf_static: 로컬(realsense2_camera)은 자체 발행하지만, 원격(Windows)은 2026-08-18부터
 # Windows realsense_pub.py 가 직접 static TF 를 발행한다 (TRANSIENT_LOCAL, time=0).
-# topic_probe(rclpy 신규 구독)는 TRANSIENT_LOCAL 스냅샷을 받지 못하는 경우가 있어,
-# /tf_static 은 ros2 topic list(파일캐시/가장 가까운)로 대체 확인한다.
 TF_PUB_PID=""
 has_tf_static() {
-    if topic_exists /tf_static 3; then
+    if topic_exists /tf_static 1.0; then
         return 0
     fi
-    timeout 10 ros2 topic list 2>/dev/null | grep -qx /tf_static
+    timeout 2 ros2 topic list 2>/dev/null | grep -qx /tf_static
 }
 if ! has_tf_static; then
     echo "⚠️  [경고] /tf_static 을 확보할 수 없습니다. 기록에서 제외합니다."
@@ -151,8 +171,6 @@ fi
 RECORD_TOPICS+=("${IR_TOPICS[@]}" "${INFO_TOPICS[@]}" "$IMU_TOPIC")
 [ "$HAS_TF_STATIC" = true ] && RECORD_TOPICS+=(/tf_static)
 
-
-
 # 4. 사전 상태 및 FPS 검사 (제안서 핵심: RGB, Depth, IMU, CameraInfo, TF)
 echo "=========================================="
 echo "🎥 ROS2 Bag 녹화 사전 상태 점검"
@@ -164,10 +182,8 @@ echo "=========================================="
 
 MISSING_TOPIC=false
 for topic in "${RECORD_TOPICS[@]}"; do
-    # /tf_static: WSL 로컬 DDS 전달 결함으로 topic_probe(rclpy) 미감지.
-    #   has_tf_static() 가 감지했으므로 bag recorder(C++)에 위임.
     [ "$topic" = "/tf_static" ] && continue
-    if ! topic_exists "$topic" 3; then
+    if [ "${TOPIC_STATUS[$topic]:-1}" != "0" ]; then
         echo "❌ [오류] 필수 토픽 미발행: $topic"
         MISSING_TOPIC=true
     else

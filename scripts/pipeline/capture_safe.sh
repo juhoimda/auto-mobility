@@ -95,7 +95,7 @@ echo " 🛡️  CAPTURE-SAFE 모드 (raw dataset 확보 전용)"
 echo " 📦 Bag 이름: $NAME"
 echo "=========================================================="
 
-if ! topic_exists "$RGB_COMPRESSED_TOPIC" 3 && ! topic_exists "$RGB_TOPIC" 3; then
+if ! topic_exists "$RGB_COMPRESSED_TOPIC" 1.0 && ! topic_exists "$RGB_TOPIC" 1.0; then
     if [ "$CAMERA_MODE" = "remote" ]; then
         start_windows_camera || exit 1
     else
