@@ -105,6 +105,54 @@ if ! topic_exists "$RGB_COMPRESSED_TOPIC" 3 && ! topic_exists "$RGB_TOPIC" 3; th
     fi
 fi
 
+# ── 사전 상태 점검 (Preflight Sanity Check, feedback.md Section 25) ──
+echo "🔍 녹화 전 사전 센서 무결성(Preflight) 점검 중..."
+python3 - << 'PREFLIGHT_EOF'
+import sys, time
+from collections import defaultdict
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from sensor_msgs.msg import CompressedImage, CameraInfo, Imu
+
+QOS = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, durability=DurabilityPolicy.VOLATILE)
+IMU_QOS = QoSProfile(depth=50, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, durability=DurabilityPolicy.VOLATILE)
+
+class PreflightProbe(Node):
+    def __init__(self):
+        super().__init__('preflight_probe')
+        self.stamps = defaultdict(list)
+        self.create_subscription(CompressedImage, '/camera/camera/color/image_raw/compressed', lambda m: self.cb('rgb', m), QOS)
+        self.create_subscription(CompressedImage, '/camera/camera/depth/image_rect_raw/compressedDepth', lambda m: self.cb('depth', m), QOS)
+        self.create_subscription(CameraInfo, '/camera/camera/color/camera_info_windows', lambda m: self.cb('info', m), QOS)
+        self.create_subscription(Imu, '/camera/camera/imu', lambda m: self.cb('imu', m), IMU_QOS)
+
+    def cb(self, name, msg):
+        ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self.stamps[name].append(ts)
+
+rclpy.init()
+probe = PreflightProbe()
+t0 = time.time()
+while time.time() - t0 < 3.0:
+    rclpy.spin_once(probe, timeout_sec=0.05)
+
+rgb_n = len(probe.stamps['rgb'])
+dep_n = len(probe.stamps['depth'])
+imu_n = len(probe.stamps['imu'])
+info_n = len(probe.stamps['info'])
+
+print(f"  [Preflight] RGB: {rgb_n} frames, Depth: {dep_n} frames, IMU: {imu_n} msgs, CameraInfo: {info_n} msgs (3s probe)")
+
+if rgb_n < 20 or dep_n < 20:
+    print("⚠️  [경고] 초기 카메라 프레임 수신율이 낮습니다 (RGB < 20fps 또는 Depth < 20fps)!")
+else:
+    print("✅ [정상] 센서 스트림 초기 수신율 양호 (≥ 20 FPS)")
+
+rclpy.shutdown()
+PREFLIGHT_EOF
+
 # ── 경량 진단 (capture_guard) 백그라운드 시작 ───────────────────
 GUARD_BASE="$LOG_DIR/capture_safe_${NAME}"
 GUARD_ARGS="--interval 5 --headless --report ${GUARD_BASE}.md --json ${GUARD_BASE}.json"
@@ -129,9 +177,15 @@ cleanup
 
 echo ""
 echo "=========================================================="
-echo " ✅ CAPTURE-SAFE 완료"
+echo " 📊 센서 무결성 자동 정밀 진단 실행 중 (feedback.md Section 26)..."
+echo "=========================================================="
+DIAG_OUT="$DATA_DIR/diagnostics/$NAME"
+python3 -m auto_mobility.diagnostics.sensor_integrity "$NAME" --out-dir "$DIAG_OUT" || true
 
-echo " 📦 Bag: $BAG_DIR/$NAME"
-echo " 📊 진단 보고서: ${GUARD_BASE}.md"
-echo " 📋 매니페스트: $BAG_DIR/$NAME/dataset_manifest.json"
+echo ""
+echo "=========================================================="
+echo " ✅ CAPTURE-SAFE 완료"
+echo " 📦 Bag        : $BAG_DIR/$NAME"
+echo " 📊 진단 보고서: $DIAG_OUT/sensor_integrity.md"
+echo " 📋 매니페스트 : $BAG_DIR/$NAME/dataset_manifest.json"
 echo "=========================================================="

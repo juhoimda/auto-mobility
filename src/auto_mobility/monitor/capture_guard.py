@@ -98,6 +98,7 @@ class TopicRateMonitor(Node):
         self._max_gap = {t[0]: 0.0 for t in topics}
         self._rgb_topic = None
         self._depth_topic = None
+        self._sync_deltas = []
         for t, _, label in topics:
             if label == "RGB":
                 self._rgb_topic = t
@@ -134,6 +135,14 @@ class TopicRateMonitor(Node):
                                 if 0 < gap < 60.0:
                                     self._max_gap[t_name] = max(self._max_gap[t_name], gap)
                             self._last_stamp[t_name] = sec
+
+                            # 프레임 단위 연속 동기화 시차 측정
+                            if t_name == self._rgb_topic and self._depth_topic in self._last_stamp:
+                                d_ts = self._last_stamp[self._depth_topic]
+                                self._sync_deltas.append(abs(sec - d_ts))
+                            elif t_name == self._depth_topic and self._rgb_topic in self._last_stamp:
+                                r_ts = self._last_stamp[self._rgb_topic]
+                                self._sync_deltas.append(abs(sec - r_ts))
                 return _cb
 
             self.create_subscription(msg_type, topic, make_cb(topic), qos)
@@ -148,9 +157,12 @@ class TopicRateMonitor(Node):
                 gaps[t] = self._max_gap.get(t, 0.0)
                 self._max_gap[t] = 0.0
 
-            # RGB↔Depth sync delta (최신 stamp 차이, 1 interval 1샘플)
+            # RGB↔Depth sync delta (연속 구간 평균치 계산)
             sync_delta = None
-            if self._rgb_topic and self._depth_topic:
+            if self._sync_deltas:
+                sync_delta = sum(self._sync_deltas) / len(self._sync_deltas)
+                self._sync_deltas = []
+            elif self._rgb_topic and self._depth_topic:
                 rgb_ts = self._last_stamp.get(self._rgb_topic)
                 depth_ts = self._last_stamp.get(self._depth_topic)
                 if rgb_ts and depth_ts:
