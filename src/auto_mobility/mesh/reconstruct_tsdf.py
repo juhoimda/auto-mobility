@@ -300,7 +300,8 @@ def load_frames(frames_txt: str) -> list:
 def main():
     parser = argparse.ArgumentParser(description="Canonical Dataset / DB + Trajectory → TSDF Reconstruction")
     parser.add_argument("input", nargs="?", default=None, help="Canonical Frame Dataset 디렉터리, 데이터셋 이름 또는 RTAB DB 경로")
-    parser.add_argument("output", nargs="?", default=None, help="출력 mesh (.obj) 경로")
+    parser.add_argument("output_pos", nargs="?", default=None, help="출력 mesh (.obj) 경로 (위치 인자)")
+    parser.add_argument("--output", "-o", default=None, help="출력 mesh (.obj) 경로")
     parser.add_argument("--dataset", default=None, help="Canonical Frame Dataset 경로")
     parser.add_argument("--trajectory", default=None, help="TUM Trajectory 파일 (.txt)")
     parser.add_argument("--pcd-output", default=None, help="출력 pointcloud (.ply) 경로")
@@ -350,7 +351,7 @@ def main():
                 break
 
     # Determine output paths
-    out_mesh = args.output or os.path.join(MESH_DIR, f"{base_name}_rtab_tsdf.obj")
+    out_mesh = args.output or args.output_pos or os.path.join(MESH_DIR, f"{base_name}_rtab_tsdf.obj")
     out_pcd = args.pcd_output or os.path.join(POINTCLOUD_DIR, f"{base_name}_rtab_tsdf_cloud.ply")
 
     # Load holdout split if specified
