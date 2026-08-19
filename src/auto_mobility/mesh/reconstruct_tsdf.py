@@ -171,22 +171,29 @@ def reconstruct(
     print(f"✅ TSDF 적분 완료 ({time.time()-t0:.2f}s): {integrated} frames integrated (skipped {skipped})")
 
     # Extract mesh
+    manifest = {
+        "requested_voxel_size": voxel_size,
+        "actual_voxel_size": voxel_size,
+        "fallback_occurred": False,
+        "fallback_reason": None,
+        "trunc_mult": trunc_mult,
+        "depth_min": depth_min,
+        "depth_max": depth_max,
+        "weight_thr": weight_thr,
+        "block_count": bc,
+        "device": str(device),
+        "integrated_frames": integrated,
+        "skipped_frames": skipped
+    }
+
     try:
         mesh_t = vbg.extract_triangle_mesh(weight_threshold=weight_thr)
         mesh = mesh_t.to_legacy()
     except Exception as e:
-        if voxel_size < 0.02:
-            print(f"⚠️ Voxel {voxel_size*1000:.0f}mm 메모리 부족 발생. 20mm Voxel로 자동 재구성합니다...")
-            return reconstruct(
-                dataset=dataset, trajectory=poses, voxel_size=0.02,
-                output_mesh=output_mesh, output_pcd=output_pcd,
-                train_indices=train_indices, trunc_mult=trunc_mult,
-                depth_max=depth_max, depth_min=depth_min, weight_thr=weight_thr,
-                block_count=block_count, no_color=no_color, no_gpu=no_gpu,
-                max_pose_gap_ms=max_pose_gap_ms
-            )
-        else:
-            raise e
+        print(f"❌ TSDF extract_triangle_mesh failed (Voxel {voxel_size*1000:.1f}mm): {e}")
+        manifest["fallback_occurred"] = True
+        manifest["fallback_reason"] = str(e)
+        raise e
 
     # Extract point cloud
     try:

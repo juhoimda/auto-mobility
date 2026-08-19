@@ -6,6 +6,8 @@ source "$PIPELINE_DIR/../common.sh"
 export PYTHONWARNINGS="ignore"
 
 SLAM_TYPE="rtab"
+SURFACE_TYPE="tsdf_direct"
+FUSION_TYPE="tsdf"
 VOXEL="0.01"
 VIEW_FLAG=""
 INPUT_NAME=""
@@ -19,6 +21,12 @@ for arg in "$@"; do
         --slam=*)
             SLAM_TYPE="${arg#*=}"
             ;;
+        --surface=*|--method=*)
+            SURFACE_TYPE="${arg#*=}"
+            ;;
+        --fusion=*)
+            FUSION_TYPE="${arg#*=}"
+            ;;
         --voxel=*)
             VOXEL="${arg#*=}"
             ;;
@@ -28,8 +36,11 @@ for arg in "$@"; do
         rtab|rtabmap)
             SLAM_TYPE="rtab"
             ;;
-        orb|orbslam|orbslam3)
-            SLAM_TYPE="orb"
+        orb|orbslam|orbslam3|orb_rgbd)
+            SLAM_TYPE="orb_rgbd"
+            ;;
+        orb_rgbdi|rgbdi)
+            SLAM_TYPE="orb_rgbdi"
             ;;
         -*)
             echo "⚠️ 알 수 없는 옵션: $arg"
@@ -46,10 +57,11 @@ done
 
 if [ -z "$INPUT_NAME" ]; then
     echo "=========================================================="
-    echo " 사용법: $0 DATASET_NAME [--slam=rtab|orb] [--voxel=0.01|0.005|--fine] [--view]"
-    echo " 예시 (기본 RTAB-Map 10mm)    : $0 my_dataset --view"
-    echo " 예시 (ORB-SLAM3 궤적 적용)   : $0 my_dataset --slam=orb --view"
-    echo " 예시 (5mm 초고정밀 메쉬)     : $0 my_dataset --fine --view"
+    echo " 사용법: $0 DATASET_NAME [--slam=rtab|orb_rgbd|orb_rgbdi|stella_rgbd] [--surface=tsdf_direct|poisson|bpa|alpha|cgal_polygonal] [--voxel=0.01|0.005] [--view]"
+    echo " 예시 (기본 TSDF 10mm)       : $0 my_dataset --surface=tsdf_direct --view"
+    echo " 예시 (Alpha Shape 메쉬)     : $0 my_dataset --surface=alpha --view"
+    echo " 예시 (Poisson 8 octree)     : $0 my_dataset --surface=poisson --view"
+    echo " 예시 (ORB-SLAM3 RGBD-I 적용) : $0 my_dataset --slam=orb_rgbdi --view"
     echo "=========================================================="
     exit 1
 fi
@@ -67,15 +79,26 @@ fi
 
 # 2. SLAM 및 Trajectory 준비
 TRAJ_FILE=""
-SUFFIX="_rtab_tsdf"
+SUFFIX="_${SLAM_TYPE}_${SURFACE_TYPE}"
 
-if [ "$SLAM_TYPE" == "orb" ] || [ "$SLAM_TYPE" == "orbslam" ] || [ "$SLAM_TYPE" == "orbslam3" ]; then
-    TRAJ_FILE="$TRAJECTORY_DIR/orbslam3_${BASE_NAME}_trajectory.txt"
+if [ "$SLAM_TYPE" == "orb_rgbdi" ]; then
+    TRAJ_FILE="$TRAJECTORY_DIR/orb_rgbdi_${BASE_NAME}_trajectory.txt"
+    if [ ! -f "$TRAJ_FILE" ]; then
+        echo "⚙️ ORB-SLAM3 RGB-D-I 궤적이 없어 SLAM을 실행합니다..."
+        "$PIPELINE_DIR/run_slam.sh" "$BASE_NAME" --slam=orb_rgbdi
+    fi
+elif [ "$SLAM_TYPE" == "orb" ] || [ "$SLAM_TYPE" == "orb_rgbd" ] || [ "$SLAM_TYPE" == "orbslam3" ]; then
+    TRAJ_FILE="$TRAJECTORY_DIR/orb_rgbd_${BASE_NAME}_trajectory.txt"
     if [ ! -f "$TRAJ_FILE" ]; then
         echo "⚙️ ORB-SLAM3 궤적이 없어 SLAM을 실행합니다..."
-        "$PIPELINE_DIR/run_slam.sh" "$BASE_NAME" --slam=orb
+        "$PIPELINE_DIR/run_slam.sh" "$BASE_NAME" --slam=orb_rgbd
     fi
-    SUFFIX="_orbslam_tsdf"
+elif [ "$SLAM_TYPE" == "stella" ] || [ "$SLAM_TYPE" == "stella_rgbd" ]; then
+    TRAJ_FILE="$TRAJECTORY_DIR/stella_${BASE_NAME}_trajectory.txt"
+    if [ ! -f "$TRAJ_FILE" ]; then
+        echo "⚙️ stella_vslam 궤적이 없어 SLAM을 실행합니다..."
+        "$PIPELINE_DIR/run_slam.sh" "$BASE_NAME" --slam=stella_rgbd
+    fi
 else
     # RTAB-Map
     TRAJ_FILE="$TRAJECTORY_DIR/rtab_${BASE_NAME}_trajectory.txt"
@@ -86,40 +109,49 @@ else
     fi
 fi
 
-if [ "$VOXEL" == "0.005" ]; then
-    SUFFIX="${SUFFIX}_fine"
-fi
-
 OUT_MESH="${CUSTOM_OUT:-$MESH_DIR/${BASE_NAME}${SUFFIX}.obj}"
 OUT_PCD="$POINTCLOUD_DIR/${BASE_NAME}${SUFFIX}_cloud.ply"
 
 echo "=========================================================="
-echo " 🔨 3D Reconstruction 복원 시작 (TSDF Voxel: ${VOXEL}m)"
-if [ -d "$FRAME_PATH" ] && [ -f "$FRAME_PATH/frames.csv" ]; then
-    echo " 📂 프레임 입력 : $FRAME_PATH"
-else
-    echo " 📁 DB 파일 입력: $DB_FILE"
-fi
+echo " 🔨 3D Reconstruction 복원 시작"
+echo " 📂 프레임 입력 : $FRAME_PATH"
 echo " 📍 궤적 파일   : $TRAJ_FILE"
 echo " 🛠️ SLAM 백엔드 : $SLAM_TYPE"
+echo " 🧱 Surface 방식: $SURFACE_TYPE"
+echo " ⚙️ TSDF Voxel  : ${VOXEL}m"
 echo " ☁️ 점군 출력   : $OUT_PCD"
 echo " 💾 메쉬 출력   : $OUT_MESH"
 echo "=========================================================="
 
-if [ -d "$FRAME_PATH" ] && [ -f "$FRAME_PATH/frames.csv" ] && [ -f "$TRAJ_FILE" ]; then
-    python3 "$PROJECT_DIR/src/auto_mobility/mesh/reconstruct_tsdf.py" \
-        --dataset="$FRAME_PATH" \
-        --trajectory="$TRAJ_FILE" \
-        --output="$OUT_MESH" \
-        --pcd-output="$OUT_PCD" \
-        --voxel="$VOXEL"
+if [ "$SURFACE_TYPE" == "tsdf_direct" ] || [ "$SURFACE_TYPE" == "tsdf" ]; then
+    if [ -d "$FRAME_PATH" ] && [ -f "$FRAME_PATH/frames.csv" ] && [ -f "$TRAJ_FILE" ]; then
+        python3 "$PROJECT_DIR/src/auto_mobility/mesh/reconstruct_tsdf.py" \
+            --dataset="$FRAME_PATH" \
+            --trajectory="$TRAJ_FILE" \
+            --output="$OUT_MESH" \
+            --pcd-output="$OUT_PCD" \
+            --voxel="$VOXEL"
+    else
+        python3 "$PROJECT_DIR/src/auto_mobility/mesh/reconstruct_tsdf.py" \
+            "$DB_FILE" "$OUT_MESH" \
+            --pcd-output="$OUT_PCD" \
+            --voxel="$VOXEL" \
+            ${TRAJ_FILE:+--trajectory="$TRAJ_FILE"}
+    fi
 else
-    # Legacy DB fallback
-    python3 "$PROJECT_DIR/src/auto_mobility/mesh/reconstruct_tsdf.py" \
-        "$DB_FILE" "$OUT_MESH" \
-        --pcd-output="$OUT_PCD" \
-        --voxel="$VOXEL" \
-        ${TRAJ_FILE:+--trajectory="$TRAJ_FILE"}
+    # Non-TSDF surface methods (Poisson, BPA, Alpha, CGAL)
+    # First generate point cloud via TSDF if not present
+    if [ ! -f "$OUT_PCD" ]; then
+        python3 "$PROJECT_DIR/src/auto_mobility/mesh/reconstruct_tsdf.py" \
+            --dataset="$FRAME_PATH" \
+            --trajectory="$TRAJ_FILE" \
+            --pcd-output="$OUT_PCD" \
+            --voxel="$VOXEL"
+    fi
+    python3 "$PROJECT_DIR/src/auto_mobility/mesh/mesh_open3d.py" \
+        "$OUT_PCD" "$OUT_MESH" \
+        --method="$SURFACE_TYPE" \
+        --voxel="$VOXEL"
 fi
 
 if [ $? -eq 0 ]; then

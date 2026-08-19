@@ -2,11 +2,16 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <vector>
+#include <deque>
+#include <mutex>
 #include <chrono>
+#include <algorithm>
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <cv_bridge/cv_bridge.h>
@@ -16,6 +21,7 @@
 #include <message_filters/synchronizer.h>
 
 #include "System.h"
+#include "ImuTypes.h"
 
 class OrbSlam3RgbdNode : public rclcpp::Node
 {
@@ -25,24 +31,36 @@ public:
         this->declare_parameter<std::string>("vocab_path", "");
         this->declare_parameter<std::string>("config_path", "");
         this->declare_parameter<std::string>("output_trajectory", "ros2_data/trajectories/orbslam3_trajectory.txt");
+        this->declare_parameter<std::string>("sensor_mode", "RGBD"); // RGBD or IMU_RGBD
         this->declare_parameter<std::string>("rgb_topic", "/camera/camera/color/image_raw");
         this->declare_parameter<std::string>("depth_topic", "/camera/camera/depth/image_rect_raw");
+        this->declare_parameter<std::string>("imu_topic", "/camera/camera/imu");
         this->declare_parameter<bool>("use_viewer", false);
 
         std::string vocab_path = this->get_parameter("vocab_path").as_string();
         std::string config_path = this->get_parameter("config_path").as_string();
         output_trajectory_ = this->get_parameter("output_trajectory").as_string();
+        sensor_mode_ = this->get_parameter("sensor_mode").as_string();
         std::string rgb_topic = this->get_parameter("rgb_topic").as_string();
         std::string depth_topic = this->get_parameter("depth_topic").as_string();
+        std::string imu_topic = this->get_parameter("imu_topic").as_string();
         bool use_viewer = this->get_parameter("use_viewer").as_bool();
 
-        RCLCPP_INFO(this->get_logger(), "Initializing ORB-SLAM3 RGB-D Node...");
+        // Standardize sensor mode
+        std::string mode_upper = sensor_mode_;
+        std::transform(mode_upper.begin(), mode_upper.end(), mode_upper.begin(), ::toupper);
+        bool is_inertial = (mode_upper == "IMU_RGBD" || mode_upper == "RGBDI" || mode_upper == "ORB_RGBDI" || mode_upper == "INERTIAL");
+
+        RCLCPP_INFO(this->get_logger(), "Initializing ORB-SLAM3 Node (Mode: %s)...", is_inertial ? "RGB-D-Inertial" : "RGB-D");
         RCLCPP_INFO(this->get_logger(), "Vocab: %s", vocab_path.c_str());
         RCLCPP_INFO(this->get_logger(), "Config: %s", config_path.c_str());
         RCLCPP_INFO(this->get_logger(), "Output Trajectory: %s", output_trajectory_.c_str());
 
+        ORB_SLAM3::System::eSensor sensor_type = is_inertial ? ORB_SLAM3::System::IMU_RGBD : ORB_SLAM3::System::RGBD;
+        is_inertial_ = is_inertial;
+
         slam_system_ = std::make_unique<ORB_SLAM3::System>(
-            vocab_path, config_path, ORB_SLAM3::System::RGBD, use_viewer);
+            vocab_path, config_path, sensor_type, use_viewer);
 
         odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("/orbslam3/odom", 10);
 
@@ -53,6 +71,15 @@ public:
             SyncPolicy(30), rgb_sub_, depth_sub_);
         sync_->registerCallback(
             std::bind(&OrbSlam3RgbdNode::syncCallback, this, std::placeholders::_1, std::placeholders::_2));
+
+        if (is_inertial_)
+        {
+            imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
+                imu_topic,
+                rclcpp::SensorDataQoS(),
+                std::bind(&OrbSlam3RgbdNode::imuCallback, this, std::placeholders::_1));
+            RCLCPP_INFO(this->get_logger(), "Subscribed to IMU (%s)", imu_topic.c_str());
+        }
 
         RCLCPP_INFO(this->get_logger(), "Subscribed to RGB (%s) and Depth (%s)", rgb_topic.c_str(), depth_topic.c_str());
     }
@@ -72,6 +99,26 @@ public:
     }
 
 private:
+    void imuCallback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
+    {
+        std::lock_guard<std::mutex> lock(imu_mutex_);
+        double t = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
+        if (t <= 0.0)
+        {
+            t = this->now().seconds();
+        }
+        imu_buf_.emplace_back(
+            static_cast<float>(msg->linear_acceleration.x),
+            static_cast<float>(msg->linear_acceleration.y),
+            static_cast<float>(msg->linear_acceleration.z),
+            static_cast<float>(msg->angular_velocity.x),
+            static_cast<float>(msg->angular_velocity.y),
+            static_cast<float>(msg->angular_velocity.z),
+            t
+        );
+        total_imu_msgs_++;
+    }
+
     void syncCallback(
         const sensor_msgs::msg::Image::ConstSharedPtr& msg_rgb,
         const sensor_msgs::msg::Image::ConstSharedPtr& msg_depth)
@@ -115,7 +162,23 @@ private:
             timestamp = this->now().seconds();
         }
 
-        Sophus::SE3f Tcw = slam_system_->TrackRGBD(im_rgb, im_depth, timestamp);
+        std::vector<ORB_SLAM3::IMU::Point> vImuMeas;
+        if (is_inertial_)
+        {
+            std::lock_guard<std::mutex> lock(imu_mutex_);
+            while (!imu_buf_.empty() && imu_buf_.front().t <= timestamp)
+            {
+                vImuMeas.push_back(imu_buf_.front());
+                imu_buf_.pop_front();
+            }
+            frame_count_++;
+            if (vImuMeas.empty() && frame_count_ % 30 == 1 && total_imu_msgs_ == 0)
+            {
+                RCLCPP_WARN(this->get_logger(), "[orb_rgbdi] No IMU data received yet! Verify IMU topic is publishing.");
+            }
+        }
+
+        Sophus::SE3f Tcw = slam_system_->TrackRGBD(im_rgb, im_depth, timestamp, vImuMeas);
         Sophus::SE3f Twc = Tcw.inverse();
 
         if (odom_pub_->get_subscription_count() > 0)
@@ -145,9 +208,17 @@ private:
     message_filters::Subscriber<sensor_msgs::msg::Image> depth_sub_;
     std::shared_ptr<message_filters::Synchronizer<SyncPolicy>> sync_;
 
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
     std::unique_ptr<ORB_SLAM3::System> slam_system_;
     std::string output_trajectory_;
+    std::string sensor_mode_;
+    bool is_inertial_{false};
+
+    std::mutex imu_mutex_;
+    std::deque<ORB_SLAM3::IMU::Point> imu_buf_;
+    size_t total_imu_msgs_{0};
+    size_t frame_count_{0};
 };
 
 int main(int argc, char** argv)

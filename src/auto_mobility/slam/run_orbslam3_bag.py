@@ -16,7 +16,7 @@ from auto_mobility.config import BAG_DIR, TRAJECTORY_DIR, PROJECT_DIR
 from auto_mobility.trajectory.io import Trajectory
 
 
-def run_orbslam3_on_bag(bag_input: str, out_trajectory: str = None) -> str:
+def run_orbslam3_on_bag(bag_input: str, out_trajectory: str = None, mode: str = "rgbd") -> str:
     bag_path = Path(bag_input)
     if not bag_path.is_absolute():
         if (BAG_DIR / bag_input).exists():
@@ -24,14 +24,24 @@ def run_orbslam3_on_bag(bag_input: str, out_trajectory: str = None) -> str:
         elif not bag_path.exists():
             raise FileNotFoundError(f"Rosbag not found: {bag_input}")
 
+    mode_lower = mode.lower()
+    is_inertial = "rgbdi" in mode_lower or "inertial" in mode_lower or mode_lower == "orb_rgbdi"
+    slam_name = "orb_rgbdi" if is_inertial else "orb_rgbd"
+
     bag_name = bag_path.name
     if out_trajectory is None:
-        out_trajectory = str(TRAJECTORY_DIR / f"orbslam3_{bag_name}_trajectory.txt")
+        out_trajectory = str(TRAJECTORY_DIR / f"{slam_name}_{bag_name}_trajectory.txt")
     out_trajectory = os.path.abspath(out_trajectory)
     os.makedirs(os.path.dirname(out_trajectory), exist_ok=True)
 
     vocab_path = str(PROJECT_DIR / "third_party" / "ORB_SLAM3" / "Vocabulary" / "ORBvoc.txt")
-    config_path = str(PROJECT_DIR / "third_party" / "ORB_SLAM3" / "Examples" / "RGB-D" / "RealSense_D435i.yaml")
+    if is_inertial:
+        config_path = str(PROJECT_DIR / "third_party" / "ORB_SLAM3" / "Examples" / "RGB-D-Inertial" / "RealSense_D435i.yaml")
+        sensor_mode_arg = "IMU_RGBD"
+    else:
+        config_path = str(PROJECT_DIR / "third_party" / "ORB_SLAM3" / "Examples" / "RGB-D" / "RealSense_D435i.yaml")
+        sensor_mode_arg = "RGBD"
+
     node_exe = str(PROJECT_DIR / "install" / "auto_mobility" / "lib" / "auto_mobility" / "orbslam3_rgbd_node")
 
     if not os.path.exists(node_exe):
@@ -40,8 +50,9 @@ def run_orbslam3_on_bag(bag_input: str, out_trajectory: str = None) -> str:
         raise FileNotFoundError(f"orbslam3_rgbd_node not found. Run colcon build first.")
 
     print("==========================================================")
-    print(f" 🚀 Running ORB-SLAM3 RGB-D on Bag: {bag_name}")
+    print(f" 🚀 Running ORB-SLAM3 ({slam_name.upper()}) on Bag: {bag_name}")
     print(f" 📦 Source Bag: {bag_path}")
+    print(f" ⚙️ Sensor Mode: {sensor_mode_arg}")
     print(f" 📑 Output Trajectory: {out_trajectory}")
     print("==========================================================")
 
@@ -53,13 +64,14 @@ def run_orbslam3_on_bag(bag_input: str, out_trajectory: str = None) -> str:
     ]
     republish_proc = subprocess.Popen(republish_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=os.setsid)
 
-    # 2. Start orbslam3_rgbd_node
+    # 2. Start orbslam3 node
     orbslam_cmd = [
         node_exe,
         "--ros-args",
         "-p", f"vocab_path:={vocab_path}",
         "-p", f"config_path:={config_path}",
         "-p", f"output_trajectory:={out_trajectory}",
+        "-p", f"sensor_mode:={sensor_mode_arg}",
         "-p", "use_sim_time:=true"
     ]
     orbslam_proc = subprocess.Popen(orbslam_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, preexec_fn=os.setsid)
@@ -92,7 +104,7 @@ def run_orbslam3_on_bag(bag_input: str, out_trajectory: str = None) -> str:
     if os.path.exists(out_trajectory) and os.path.getsize(out_trajectory) > 0:
         traj = Trajectory.from_tum_file(out_trajectory)
         metrics = traj.compute_metrics()
-        print(f"✅ ORB-SLAM3 Trajectory generated successfully!")
+        print(f"✅ ORB-SLAM3 ({slam_name}) Trajectory generated successfully!")
         print(f"📊 Frames: {metrics.get('num_frames', 0)}, Length: {metrics.get('total_path_length_m', 0):.4f}m, MaxStep: {metrics.get('max_step_m', 0):.4f}m")
         return out_trajectory
     else:
@@ -104,12 +116,13 @@ def run_orbslam3_on_bag(bag_input: str, out_trajectory: str = None) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run ORB-SLAM3 RGB-D on rosbag")
+    parser = argparse.ArgumentParser(description="Run ORB-SLAM3 (RGB-D / RGB-D-Inertial) on rosbag")
     parser.add_argument("bag", help="Rosbag name or path")
     parser.add_argument("--out", default=None, help="Output TUM trajectory path (.txt)")
+    parser.add_argument("--mode", "--slam", default="rgbd", choices=["rgbd", "rgbdi", "orb_rgbd", "orb_rgbdi"], help="SLAM mode (default: rgbd)")
     args = parser.parse_args()
 
-    run_orbslam3_on_bag(args.bag, args.out)
+    run_orbslam3_on_bag(args.bag, args.out, mode=args.mode)
 
 
 if __name__ == "__main__":

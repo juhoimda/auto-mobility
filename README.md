@@ -1,10 +1,10 @@
 # 📐 Auto-Mobility
 
-RealSense D435i 기반 **Real-to-Sim 파이프라인** — 실제 공간을 촬영해 다중 SLAM(RTAB-Map / ORB-SLAM3)으로 궤적을 추적하고, Open3D GPU TSDF로 고정밀 3D 점군(Point Cloud) 및 표면 메시(Mesh)를 복원하며, Held-out 센서 관측 기반 정량 형상 품질 평가(Geometry QA) 및 후보 비교 랭킹을 제공합니다.
+RealSense D435i 기반 **Real-to-Sim 파이프라인** — 실제 공간을 촬영해 다중 SLAM(RTAB-Map / ORB-SLAM3 / ORB RGB-D-I / stella_vslam)으로 궤적을 추적하고, Open3D GPU TSDF 및 다양한 표면 복원(TSDF Direct / Poisson / BPA / Alpha Shape / CGAL Polygonal)으로 고정밀 3D 점군 및 표면 메시를 생성하며, Held-out 센서 관측 기반 정량 형상 품질 평가(Geometry QA) 및 다축 벤치마크 랭킹을 제공합니다.
 
 ```text
-RealSense D435i ──▶ Rosbag (MCAP) ──▶ Canonical Dataset ──▶ SLAM Trajectory ──▶ Open3D TSDF (GPU) ──▶ Geometry Evaluator
- (RGB-D+IR+IMU)     (불변 원본)         (알고리즘 독립)       (RTAB / ORB)         (3D Mesh / PCD)        (Depth MAE/P95 QA)
+RealSense D435i ──▶ Rosbag (MCAP) ──▶ Canonical Dataset ──▶ Multi-SLAM Trajectory ──▶ Surface Reconstruction ──▶ Multi-Axis Evaluator
+ (RGB-D+IR+IMU)     (불변 원본)         (알고리즘 독립)      (RTAB/ORB-RGBDI/stella)   (TSDF/Poisson/Alpha/CGAL)    (Depth MAE/P95 QA)
 ```
 
 ---
@@ -18,19 +18,21 @@ RealSense D435i ──▶ Rosbag (MCAP) ──▶ Canonical Dataset ──▶ SL
 # 2. 알고리즘 독립적인 Canonical Frame Dataset 생성 (1회 추출 후 재사용)
 ./scripts/pipeline/prepare_dataset.sh room01
 
-# 3. SLAM 궤적 생성
-./scripts/pipeline/run_slam.sh room01 --slam=rtab
+# 3. SLAM 궤적 생성 (원하는 백엔드 선택)
+./scripts/pipeline/run_slam.sh room01 --slam=rtab        # RTAB-Map
+./scripts/pipeline/run_slam.sh room01 --slam=orb_rgbdi   # ORB-SLAM3 RGB-D-Inertial
 
-# 4. 3D Mesh 및 Point Cloud 복원 (10mm TSDF)
-./scripts/pipeline/mesh.sh room01 --voxel=0.01
+# 4. 3D Mesh 및 Point Cloud 복원 (Surface 백엔드 및 해상도 선택)
+./scripts/pipeline/mesh.sh room01 --surface=tsdf_direct --voxel=0.01
+./scripts/pipeline/mesh.sh room01 --surface=alpha --voxel=0.02
 
 # 5. Held-out 센서 데이터 기반 정량 형상 품질 평가 (Depth Reprojection & Point-to-Mesh)
 ./scripts/pipeline/evaluate.sh room01 \
     ros2_data/meshes/room01_rtab_tsdf.obj \
     ros2_data/trajectories/rtab_room01_trajectory.txt
 
-# 6. 동일 데이터셋 내 다중 후보 자동 비교 & 랭킹 리포트
-python3 -m auto_mobility.evaluation.compare_results room01
+# 6. Multi-Axis 독립 벤치마크 & 랭킹 리포트 (Phase A: SLAM / Phase B: TSDF / Phase C: Surface)
+./scripts/pipeline/compare.sh room01 --quick
 ```
 
 자세한 단계별 가이드: **[docs/guide.md](docs/guide.md)**
@@ -39,15 +41,15 @@ python3 -m auto_mobility.evaluation.compare_results room01
 
 ## 🏗️ 시스템 아키텍처 (Layered Architecture)
 
-모든 모듈은 이전 특정 알고리즘의 내부 파일 포맷에 종속되지 않고 독립적인 표준 포맷으로 연결됩니다.
+모든 모듈은 특정 알고리즘의 내부 파일 포맷에 종속되지 않고 독립적인 표준 포맷으로 연결됩니다.
 
-| 계층 | 대상 모듈 | 입력 | 산출물 | 역할 |
+| 계층 | 대상 모듈 | 입력 | 산출물 | 지원 알고리즘 |
 | :--- | :--- | :--- | :--- | :--- |
-| **1. Sensor Ingress** | `republish.py` | D435i Topics | Rosbag (`.mcap`) | 무손실 센서 스트림 기록 |
-| **2. Canonical Dataset** | `dataset/` | Rosbag | `frames/` (RGB-D, CameraInfo, IMU) | 알고리즘 독립적 표준 데이터셋 |
-| **3. SLAM Backend** | `slam/` | Rosbag / Frames | `trajectories/` (TUM `.txt`) | 카메라 6자유도 포즈 추적 |
-| **4. Reconstruction** | `mesh/` | Frames + Trajectory | `meshes/` (`.obj`), `pointclouds/` (`.ply`) | 3D 표면 및 점군 복원 |
-| **5. Geometry Evaluator** | `evaluation/` | Mesh + Trajectory + Held-out Depth | `evaluations/` (JSON, MD, Heatmaps) | 실제 센서 관측 오차 정량 측정 및 랭킹 |
+| **1. Sensor Ingress** | `republish.py` | D435i Topics | Rosbag (`.mcap`) | 무손실 패스스루 / 시간 동기화 |
+| **2. Canonical Dataset** | `dataset/` | Rosbag | `frames/` | 표준 RGB-D + IMU + CameraInfo |
+| **3. SLAM Backend** | `slam/` | Rosbag / Frames | `trajectories/` (TUM `.txt`) | `rtab`, `orb_rgbd`, `orb_rgbdi`, `stella_rgbd` |
+| **4. Reconstruction** | `mesh/` | Frames + Trajectory | `meshes/`, `pointclouds/` | `tsdf_direct`, `poisson`, `bpa`, `alpha_shape`, `cgal_polygonal` |
+| **5. Geometry Evaluator** | `evaluation/` | Mesh + Trajectory + Held-out Depth | `evaluations/`, `benchmarks/` | Raycast Depth MAE/P95, Coverage, 축별 랭킹 |
 
 ### 📁 표준 디렉터리 구조 (`ros2_data/`)
 
@@ -59,8 +61,8 @@ ros2_data/
 ├── trajectories/                # 3단계: 표준 TUM 포맷 카메라 이동 궤적 (.txt)
 ├── pointclouds/                 # 4단계: 3D 점군 데이터 (.ply)
 ├── meshes/                      # 4단계: 최종 3D 표면 메쉬 (.obj)
-├── evaluations/                 # 5단계: 정량 품질 평가 결과 (JSON, MD, frame_metrics.csv, renders/)
-└── benchmarks/                  # 6단계: 다중 알고리즘 일괄 벤치마크 결과
+├── evaluations/                 # 5단계: 단일 후보 정량 품질 평가 결과 (JSON, MD, frame_metrics.csv)
+└── benchmarks/                  # 6단계: Multi-Axis 벤치마크 결과 및 Manifest 리포트
 ```
 
 ---
