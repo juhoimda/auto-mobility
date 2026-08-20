@@ -115,29 +115,42 @@ private:
             timestamp = this->now().seconds();
         }
 
-        auto cam_pose_wc = slam_system_->feed_RGBD_frame(im_rgb, im_depth, timestamp);
-
-        if (cam_pose_wc && odom_pub_->get_subscription_count() > 0)
+        if (timestamp <= last_frame_ts_)
         {
-            nav_msgs::msg::Odometry odom_msg;
-            odom_msg.header = msg_rgb->header;
-            odom_msg.header.frame_id = "odom";
-            odom_msg.child_frame_id = "camera_color_optical_frame";
+            return;
+        }
+        last_frame_ts_ = timestamp;
 
-            const auto& pose = *cam_pose_wc;
-            Eigen::Matrix3d R = pose.block<3, 3>(0, 0).cast<double>();
-            Eigen::Vector3d t = pose.block<3, 1>(0, 3).cast<double>();
-            Eigen::Quaterniond q(R);
+        try
+        {
+            auto cam_pose_wc = slam_system_->feed_RGBD_frame(im_rgb, im_depth, timestamp);
 
-            odom_msg.pose.pose.position.x = t.x();
-            odom_msg.pose.pose.position.y = t.y();
-            odom_msg.pose.pose.position.z = t.z();
-            odom_msg.pose.pose.orientation.x = q.x();
-            odom_msg.pose.pose.orientation.y = q.y();
-            odom_msg.pose.pose.orientation.z = q.z();
-            odom_msg.pose.pose.orientation.w = q.w();
+            if (cam_pose_wc && odom_pub_->get_subscription_count() > 0)
+            {
+                nav_msgs::msg::Odometry odom_msg;
+                odom_msg.header = msg_rgb->header;
+                odom_msg.header.frame_id = "odom";
+                odom_msg.child_frame_id = "camera_color_optical_frame";
 
-            odom_pub_->publish(odom_msg);
+                const auto& pose = *cam_pose_wc;
+                Eigen::Matrix3d R = pose.block<3, 3>(0, 0).cast<double>();
+                Eigen::Vector3d t = pose.block<3, 1>(0, 3).cast<double>();
+                Eigen::Quaterniond q(R);
+
+                odom_msg.pose.pose.position.x = t.x();
+                odom_msg.pose.pose.position.y = t.y();
+                odom_msg.pose.pose.position.z = t.z();
+                odom_msg.pose.pose.orientation.x = q.x();
+                odom_msg.pose.pose.orientation.y = q.y();
+                odom_msg.pose.pose.orientation.z = q.z();
+                odom_msg.pose.pose.orientation.w = q.w();
+
+                odom_pub_->publish(odom_msg);
+            }
+        }
+        catch (const std::exception& e)
+        {
+            RCLCPP_ERROR(this->get_logger(), "feed_RGBD_frame exception: %s", e.what());
         }
     }
 
@@ -149,6 +162,7 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
     std::unique_ptr<stella_vslam::system> slam_system_;
     std::string output_trajectory_;
+    double last_frame_ts_{0.0};
 };
 
 int main(int argc, char** argv)

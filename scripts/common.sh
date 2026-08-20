@@ -170,6 +170,9 @@ fi
 # PYTHONPATH 추가 (src 내부 auto_mobility 패키지 모듈 탐색 보장)
 export PYTHONPATH="$PROJECT_DIR/src:$PROJECT_DIR:$PYTHONPATH"
 
+# third_party 설치 라이브러리 경로 (libstella_vslam, libfbow, pangolin 등)
+export LD_LIBRARY_PATH="$PROJECT_DIR/third_party/installed/lib:$LD_LIBRARY_PATH"
+
 # 스크립트 실행 권한 자동 보장 (.py 는 python3 로 호출되므로 exec bit 불필요)
 chmod +x "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR"/*/*.sh 2>/dev/null || true
 

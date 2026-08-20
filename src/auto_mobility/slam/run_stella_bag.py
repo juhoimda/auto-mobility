@@ -105,6 +105,8 @@ def run_stella_vslam_on_bag(bag_input: str, out_trajectory: Optional[str] = None
     if dataset_path.exists() and (dataset_path / "frames.csv").exists():
         ds = FrameDataset(dataset_path)
         intrinsics = ds.intrinsics
+    if intrinsics is None:
+        intrinsics = CameraIntrinsics(fx=606.5387, fy=606.4935, cx=324.4991, cy=241.7047, width=640, height=480)
 
     config_path = str(PROJECT_DIR / "config" / "stella_vslam_d435i.yaml")
     generate_stella_config(intrinsics=intrinsics, output_path=config_path)
@@ -121,13 +123,18 @@ def run_stella_vslam_on_bag(bag_input: str, out_trajectory: Optional[str] = None
     print(f" 📑 Output Trajectory: {out_trajectory}")
     print("==========================================================")
 
+    env = os.environ.copy()
+    stella_lib_dir = str(PROJECT_DIR / "third_party" / "installed" / "lib")
+    existing_ld = env.get("LD_LIBRARY_PATH", "")
+    env["LD_LIBRARY_PATH"] = f"{stella_lib_dir}:{existing_ld}" if existing_ld else stella_lib_dir
+
     # 1. Start republish.py (decompress compressedDepth and compressed RGB)
     republish_cmd = [
         sys.executable,
         str(PROJECT_DIR / "src" / "auto_mobility" / "nodes" / "republish.py"),
         "--ros-args", "-p", "use_sim_time:=true"
     ]
-    republish_proc = subprocess.Popen(republish_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=os.setsid)
+    republish_proc = subprocess.Popen(republish_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=os.setsid, env=env)
 
     # 2. Start stella_rgbd_node
     stella_cmd = [
@@ -147,7 +154,8 @@ def run_stella_vslam_on_bag(bag_input: str, out_trajectory: Optional[str] = None
         stella_cmd,
         stdout=stella_log_file,
         stderr=subprocess.STDOUT,
-        preexec_fn=os.setsid
+        preexec_fn=os.setsid,
+        env=env
     )
 
     time.sleep(3.0)  # Wait for vocabulary to load into memory
@@ -155,7 +163,7 @@ def run_stella_vslam_on_bag(bag_input: str, out_trajectory: Optional[str] = None
     # 3. Play bag with --clock
     print("▶️ [Step 2] Playing rosbag with /clock...")
     play_cmd = ["ros2", "bag", "play", str(bag_path), "--clock", "--rate", "1.0"]
-    play_res = subprocess.run(play_cmd)
+    play_res = subprocess.run(play_cmd, env=env)
 
     print("▶️ [Step 3] Finalizing stella_vslam and saving trajectory...")
     time.sleep(3.0)
@@ -187,7 +195,12 @@ def run_stella_vslam_on_bag(bag_input: str, out_trajectory: Optional[str] = None
         print(f"📊 Frames: {metrics.get('num_frames', 0)}, Length: {metrics.get('total_path_length_m', 0):.4f}m, MaxStep: {metrics.get('max_step_m', 0):.4f}m")
         return out_trajectory
     else:
-        raise RuntimeError(f"Failed to generate stella_vslam trajectory file at {out_trajectory}")
+        log_snippet = ""
+        if os.path.exists(stella_log_path):
+            with open(stella_log_path, "r") as f:
+                lines = f.readlines()
+                log_snippet = "".join(lines[-25:])
+        raise RuntimeError(f"Failed to generate stella_vslam trajectory file at {out_trajectory}\n--- Last log lines ---\n{log_snippet}")
 
 
 def main():

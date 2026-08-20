@@ -190,6 +190,8 @@ class CompressedRepublisher(Node):
         self._rgb_stamper = MonotonicStamper()
         self._depth_stamper = MonotonicStamper()
         self._info_stamper = MonotonicStamper()
+        self._last_sim_rgb_src = 0.0
+        self._last_sim_depth_src = 0.0
 
         # ── 구독자 ──
         self.create_subscription(CompressedImage, rgb_comp,   self._on_rgb,   TRANSPORT_QOS, callback_group=self._rgb_cg)
@@ -284,7 +286,10 @@ class CompressedRepublisher(Node):
 
             if self.use_sim_time:
                 if src is not None and src > 0:
-                    rgb_stamp = _sec_to_stamp(self._rgb_stamper.next(src))
+                    if src <= self._last_sim_rgb_src:
+                        return
+                    self._last_sim_rgb_src = src
+                    rgb_stamp = msg.header.stamp
                 else:
                     rgb_stamp = self.get_clock().now().to_msg()
             else:
@@ -323,7 +328,10 @@ class CompressedRepublisher(Node):
 
             if self.use_sim_time:
                 if src is not None and src > 0:
-                    depth_stamp = _sec_to_stamp(self._depth_stamper.next(src))
+                    if src <= self._last_sim_depth_src:
+                        return
+                    self._last_sim_depth_src = src
+                    depth_stamp = msg.header.stamp
                 else:
                     depth_stamp = self.get_clock().now().to_msg()
             else:

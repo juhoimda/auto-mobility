@@ -127,7 +127,12 @@ def run_orbslam3_on_bag(bag_input: str, out_trajectory: str = None, mode: str = 
         if os.path.exists("CameraTrajectory.txt"):
             os.rename("CameraTrajectory.txt", out_trajectory)
             return out_trajectory
-        raise RuntimeError(f"Failed to generate ORB-SLAM3 trajectory file at {out_trajectory}")
+        log_snippet = ""
+        if os.path.exists(orbslam_log_path):
+            with open(orbslam_log_path, "r") as f:
+                lines = f.readlines()
+                log_snippet = "".join(lines[-25:])
+        raise RuntimeError(f"Failed to generate ORB-SLAM3 trajectory file at {out_trajectory}\n--- Last log lines ---\n{log_snippet}")
 
 
 def main():

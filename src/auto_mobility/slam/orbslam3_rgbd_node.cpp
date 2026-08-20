@@ -114,12 +114,25 @@ public:
 private:
     void imuCallback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
     {
+        if (std::isnan(msg->linear_acceleration.x) || std::isnan(msg->linear_acceleration.y) || std::isnan(msg->linear_acceleration.z) ||
+            std::isnan(msg->angular_velocity.x) || std::isnan(msg->angular_velocity.y) || std::isnan(msg->angular_velocity.z))
+        {
+            return;
+        }
+
         std::lock_guard<std::mutex> lock(imu_mutex_);
         double t = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
         if (t <= 0.0)
         {
             t = this->now().seconds();
         }
+
+        // Ensure strictly increasing IMU timestamps
+        if (!imu_buf_.empty() && t <= imu_buf_.back().t)
+        {
+            return;
+        }
+
         imu_buf_.emplace_back(
             static_cast<float>(msg->linear_acceleration.x),
             static_cast<float>(msg->linear_acceleration.y),
@@ -175,17 +188,11 @@ private:
             timestamp = this->now().seconds();
         }
 
-        // Republish delivers RGB/DEPTH in two independent streams, so the
-        // synchronized pairs can occasionally carry a non-monotonic (backwards)
-        // timestamp. ORB-SLAM3 treats a backwards timestamp as "timestamp older
-        // than previous frame detected!" and resets/creates new maps, which in
-        // IMU mode races between Tracking and LocalMapping and crashes on a
-        // dangling mutex. Drop out-of-order frames instead.
-        if (timestamp <= last_frame_ts_)
+        // Drop out-of-order frames and duplicate frames arriving too closely (< 10ms)
+        if (last_frame_ts_ > 0.0 && timestamp - last_frame_ts_ < 0.01)
         {
             return;
         }
-        last_frame_ts_ = timestamp;
 
         std::vector<ORB_SLAM3::IMU::Point> vImuMeas;
         if (is_inertial_)
@@ -196,17 +203,36 @@ private:
                 vImuMeas.push_back(imu_buf_.front());
                 imu_buf_.pop_front();
             }
+
+            // For subsequent frames in inertial mode, if no IMU measurement is available yet,
+            // skip this frame to prevent dT=0 degenerate preintegration in ORB-SLAM3
+            if (last_frame_ts_ > 0.0 && vImuMeas.empty())
+            {
+                return;
+            }
+
             frame_count_++;
             if (frame_count_ % 30 == 0)
             {
-                double last_imu_t = imu_buf_.empty() ? 0.0 : imu_buf_.back().t;
                 RCLCPP_INFO(this->get_logger(),
                     "[diag] fr=%zu rgb_t=%.6f imu_for_frame=%zu imu_buf=%zu imu_total=%zu",
                     frame_count_, timestamp, vImuMeas.size(), imu_buf_.size(), total_imu_msgs_);
             }
         }
 
-        Sophus::SE3f Tcw = slam_system_->TrackRGBD(im_rgb, im_depth, timestamp, vImuMeas);
+        last_frame_ts_ = timestamp;
+
+        Sophus::SE3f Tcw;
+        try
+        {
+            Tcw = slam_system_->TrackRGBD(im_rgb, im_depth, timestamp, vImuMeas);
+        }
+        catch (const std::exception& e)
+        {
+            RCLCPP_ERROR(this->get_logger(), "TrackRGBD exception: %s", e.what());
+            return;
+        }
+
         Sophus::SE3f Twc = Tcw.inverse();
 
         if (odom_pub_->get_subscription_count() > 0)

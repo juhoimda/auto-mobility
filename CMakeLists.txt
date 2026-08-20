@@ -112,6 +112,10 @@ if(EXISTS "${ORB_SLAM3_DIR}/lib/libORB_SLAM3.so")
     cv_bridge
     message_filters
   )
+  set_target_properties(orbslam3_rgbd_node PROPERTIES
+    BUILD_RPATH "${ORB_SLAM3_DIR}/lib;${ORB_SLAM3_DIR}/Thirdparty/DBoW2/lib;${ORB_SLAM3_DIR}/Thirdparty/g2o/lib;${PANGOLIN_DIR}/lib"
+    INSTALL_RPATH "${ORB_SLAM3_DIR}/lib;${ORB_SLAM3_DIR}/Thirdparty/DBoW2/lib;${ORB_SLAM3_DIR}/Thirdparty/g2o/lib;${PANGOLIN_DIR}/lib"
+  )
   install(TARGETS orbslam3_rgbd_node DESTINATION lib/${PROJECT_NAME})
 endif()
 
@@ -140,6 +144,10 @@ if(EXISTS "${STELLA_DIR}/lib/libstella_vslam.so")
     nav_msgs
     cv_bridge
     message_filters
+  )
+  set_target_properties(stella_rgbd_node PROPERTIES
+    BUILD_RPATH "${STELLA_DIR}/lib"
+    INSTALL_RPATH "${STELLA_DIR}/lib"
   )
   install(TARGETS stella_rgbd_node DESTINATION lib/${PROJECT_NAME})
 endif()
