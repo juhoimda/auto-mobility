@@ -140,12 +140,22 @@ def evaluate_reconstruction(
     render_samples: int = 10,
     runtime_sec: Optional[float] = None,
     peak_rss_mb: Optional[float] = None,
-    peak_gpu_memory_mb: Optional[float] = None
+    peak_gpu_memory_mb: Optional[float] = None,
+    cheap: bool = False,
+    mode: Optional[str] = None
 ) -> dict:
-    """Reconstruction 결과물에 대해 Held-out Depth Reprojection 및 기하 정밀도 통합 평가 수행."""
+    """Reconstruction 결과물에 대해 Held-out Depth Reprojection 및 기하 정밀도 통합 평가 수행.
+    
+    cheap=True 또는 mode="cheap" 시:
+      - holdout frame 부분 샘플링 (최대 12장)
+      - 오차 시각화 이미지 디스크 저장 생략 (render_samples=0)
+      - Point-to-Mesh 거리 연산 샘플링 축소 (10k points)
+      - Dominant plane RANSAC 축소
+    """
     t_start = time.time()
     cfg = get_evaluation_config()
     eval_cfg = cfg.get("evaluation", {})
+    is_cheap = cheap or (mode == "cheap")
 
     # 1. Load dataset
     if isinstance(dataset_input, FrameDataset):
@@ -184,10 +194,12 @@ def evaluate_reconstruction(
     out_dir = Path(output_dir) if output_dir else (EVALUATION_DIR / dataset_name / cand_name)
     out_dir.mkdir(parents=True, exist_ok=True)
     renders_dir = out_dir / "renders"
-    renders_dir.mkdir(parents=True, exist_ok=True)
+    if not is_cheap:
+        renders_dir.mkdir(parents=True, exist_ok=True)
 
     print("==========================================================")
-    print(f" 📐 3D Reconstruction 정량 품질 평가 시작")
+    eval_mode_tag = "⚡ [CHEAP SCREENING]" if is_cheap else "🔬 [FULL FIDELITY]"
+    print(f" 📐 3D Reconstruction 정량 품질 평가 시작 {eval_mode_tag}")
     print(f" 📦 Dataset    : {dataset_name} ({len(dataset)} frames)")
     print(f" 📍 Trajectory : {traj_path_str} ({len(traj)} poses)")
     print(f" 🔺 Mesh       : {mesh_path_str} ({len(mesh.vertices):,} vertices)")
@@ -222,8 +234,16 @@ def evaluate_reconstruction(
         )
     save_split_json(split_data, str(out_dir / "split.json"))
 
-    holdout_indices = split_data.get("holdout_indices", [])
-    print(f"🎯 Hold-out 평가 프레임 수: {len(holdout_indices)}장 ({split_data.get('holdout_ratio', 0.0)*100:.1f}%)")
+    raw_holdout_indices = split_data.get("holdout_indices", [])
+    
+    # In cheap mode: sample subset of holdout frames (up to 12 frames)
+    if is_cheap and len(raw_holdout_indices) > 12:
+        step = max(1, len(raw_holdout_indices) // 12)
+        holdout_indices = raw_holdout_indices[::step][:12]
+    else:
+        holdout_indices = raw_holdout_indices
+
+    print(f"🎯 Hold-out 평가 프레임 수: {len(holdout_indices)}장 (전체 {len(raw_holdout_indices)}장 중 {'샘플링' if is_cheap and len(raw_holdout_indices) > 12 else '전체'})")
 
     # 6. Raycasting Depth Reprojection on Hold-out frames
     scene = create_raycasting_scene(mesh)
@@ -231,12 +251,11 @@ def evaluate_reconstruction(
     depth_max_m = float(eval_cfg.get("raycasting", {}).get("depth_max_m", 5.0))
 
     frame_metrics_list = []
-    all_real_depths = []
-    all_rend_depths = []
     all_world_points = []
 
-    # Visualization sample indices
-    render_sample_indices = set(np.linspace(0, max(0, len(holdout_indices)-1), min(len(holdout_indices), render_samples), dtype=int))
+    # Visualization sample indices (disabled in cheap mode)
+    actual_render_samples = 0 if is_cheap else render_samples
+    render_sample_indices = set(np.linspace(0, max(0, len(holdout_indices)-1), min(len(holdout_indices), actual_render_samples), dtype=int)) if actual_render_samples > 0 else set()
     render_records = []
 
     for h_idx, f_idx in enumerate(holdout_indices):
@@ -257,7 +276,7 @@ def evaluate_reconstruction(
         f_metrics["timestamp"] = dataset.frames[f_idx].rgb_timestamp
         frame_metrics_list.append(f_metrics)
 
-        # Collect for point-to-mesh and visualization
+        # Collect for visualization if enabled
         if h_idx in render_sample_indices:
             real_p = renders_dir / f"{f_idx:06d}_real.png"
             rend_p = renders_dir / f"{f_idx:06d}_rendered.png"
@@ -277,7 +296,7 @@ def evaluate_reconstruction(
         pts_w = backproject_depth_to_world_points(
             real_depth, T_world_cam, dataset.intrinsics,
             depth_min_mm=depth_min_m*1000.0, depth_max_mm=depth_max_m*1000.0,
-            stride=4
+            stride=6 if is_cheap else 4
         )
         if len(pts_w) > 0:
             all_world_points.append(pts_w)
@@ -297,11 +316,15 @@ def evaluate_reconstruction(
     valid_w20s = [m["within_20mm_ratio"] for m in frame_metrics_list]
     valid_w10s = [m["within_10mm_ratio"] for m in frame_metrics_list]
     valid_w50s = [m["within_50mm_ratio"] for m in frame_metrics_list]
+    valid_compl = [m.get("observed_surface_completeness", 0.0) for m in frame_metrics_list]
+    valid_fs_viol = [m.get("free_space_violation_ratio", 0.0) for m in frame_metrics_list]
+    valid_fs_corr = [m.get("free_space_correctness_ratio", 1.0) for m in frame_metrics_list]
 
     # Point-to-Mesh Distance
+    max_pts = 10000 if is_cheap else 50000
     if all_world_points:
         combined_pts = np.concatenate(all_world_points, axis=0)
-        p2m_metrics = compute_point_to_mesh_metrics(scene, combined_pts, max_sample_points=50000)
+        p2m_metrics = compute_point_to_mesh_metrics(scene, combined_pts, max_sample_points=max_pts)
     else:
         p2m_metrics = compute_point_to_mesh_metrics(scene, np.empty((0, 3)))
 
@@ -312,6 +335,9 @@ def evaluate_reconstruction(
         "depth_p90_mm": round(float(np.percentile(valid_p95s, 90)), 2) if valid_p95s else None,
         "depth_p95_mm": round(float(np.mean(valid_p95s)), 2) if valid_p95s else None,
         "depth_coverage_ratio": round(float(np.mean(valid_covs)), 4) if valid_covs else 0.0,
+        "observed_surface_completeness": round(float(np.mean(valid_compl)), 4) if valid_compl else 0.0,
+        "free_space_violation_ratio": round(float(np.mean(valid_fs_viol)), 4) if valid_fs_viol else 0.0,
+        "free_space_correctness_ratio": round(float(np.mean(valid_fs_corr)), 4) if valid_fs_corr else 1.0,
         "within_10mm_ratio": round(float(np.mean(valid_w10s)), 4) if valid_w10s else 0.0,
         "within_20mm_ratio": round(float(np.mean(valid_w20s)), 4) if valid_w20s else 0.0,
         "within_50mm_ratio": round(float(np.mean(valid_w50s)), 4) if valid_w50s else 0.0,

@@ -18,7 +18,8 @@ def compute_depth_metrics(
     real_depth_mm: np.ndarray,
     rendered_depth_mm: np.ndarray,
     depth_min_mm: float = 300.0,
-    depth_max_mm: float = 5000.0
+    depth_max_mm: float = 5000.0,
+    free_space_margin_mm: float = 50.0
 ) -> dict:
     """단일 프레임 또는 누적 프레임의 실제 관측 Depth와 Rendered Mesh Depth 간 정밀 오차 지표 계산."""
     # 유효 마스크 정의
@@ -36,6 +37,9 @@ def compute_depth_metrics(
             "valid_prediction_pixels": n_pred,
             "overlapping_pixels": 0,
             "depth_coverage_ratio": 0.0,
+            "observed_surface_completeness": 0.0,
+            "free_space_violation_ratio": 0.0,
+            "free_space_correctness_ratio": 1.0,
             "depth_mae_mm": None,
             "depth_rmse_mm": None,
             "depth_median_error_mm": None,
@@ -54,6 +58,9 @@ def compute_depth_metrics(
             "valid_prediction_pixels": n_pred,
             "overlapping_pixels": 0,
             "depth_coverage_ratio": coverage,
+            "observed_surface_completeness": 0.0,
+            "free_space_violation_ratio": 0.0,
+            "free_space_correctness_ratio": 1.0,
             "depth_mae_mm": None,
             "depth_rmse_mm": None,
             "depth_median_error_mm": None,
@@ -64,7 +71,10 @@ def compute_depth_metrics(
             "within_50mm_ratio": 0.0
         }
 
-    errors = np.abs(real_depth_mm[overlap].astype(np.float64) - rendered_depth_mm[overlap].astype(np.float64))
+    real_overlap = real_depth_mm[overlap].astype(np.float64)
+    rend_overlap = rendered_depth_mm[overlap].astype(np.float64)
+    errors = np.abs(real_overlap - rend_overlap)
+
     mae = float(np.mean(errors))
     rmse = float(np.sqrt(np.mean(errors ** 2)))
     median_err = float(np.median(errors))
@@ -75,11 +85,23 @@ def compute_depth_metrics(
     w20 = float(np.mean(errors <= 20.0))
     w50 = float(np.mean(errors <= 50.0))
 
+    # Free-space violation: rendered depth is significantly closer than measured real depth
+    # indicating phantom geometry / false surface blocking empty ray space.
+    free_space_violations = np.sum(rend_overlap < (real_overlap - free_space_margin_mm))
+    fs_violation_ratio = float(free_space_violations / max(n_overlap, 1))
+    fs_correctness = float(np.clip(1.0 - fs_violation_ratio, 0.0, 1.0))
+
+    # Observed surface completeness = coverage * ratio of points within 50mm bound
+    surface_completeness = float(round(coverage * w50, 4))
+
     return {
         "valid_reference_pixels": n_ref,
         "valid_prediction_pixels": n_pred,
         "overlapping_pixels": n_overlap,
         "depth_coverage_ratio": coverage,
+        "observed_surface_completeness": surface_completeness,
+        "free_space_violation_ratio": round(fs_violation_ratio, 4),
+        "free_space_correctness_ratio": round(fs_correctness, 4),
         "depth_mae_mm": round(mae, 2),
         "depth_rmse_mm": round(rmse, 2),
         "depth_median_error_mm": round(median_err, 2),

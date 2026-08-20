@@ -17,9 +17,14 @@ def create_holdout_split(
     policy: str = "every_nth",
     nth: int = 5,
     ratio: float = 0.20,
-    valid_indices: Optional[List[int]] = None
+    valid_indices: Optional[List[int]] = None,
+    holdout_ratio: Optional[float] = None,
+    seed: Optional[int] = None
 ) -> dict:
     """Deterministic Train / Hold-out split 생성."""
+    if holdout_ratio is not None:
+        ratio = holdout_ratio
+        policy = "ratio"
     if valid_indices is not None:
         frame_list = list(valid_indices)
     else:
