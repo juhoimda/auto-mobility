@@ -114,6 +114,12 @@ def run_tsdf_worker(
     worker_env.setdefault("MKL_NUM_THREADS", "4")
     worker_env.setdefault("NUMEXPR_NUM_THREADS", "4")
     worker_env.setdefault("VECLIB_MAXIMUM_THREADS", "4")
+    if "LD_LIBRARY_PATH" in worker_env:
+        cleaned_ld = [p for p in worker_env["LD_LIBRARY_PATH"].split(":") if "/opt/ros" not in p and p]
+        if cleaned_ld:
+            worker_env["LD_LIBRARY_PATH"] = ":".join(cleaned_ld)
+        else:
+            worker_env.pop("LD_LIBRARY_PATH", None)
     if env:
         worker_env.update(env)
 
@@ -208,6 +214,12 @@ def run_surface_worker(
     worker_env.setdefault("MKL_NUM_THREADS", "4")
     worker_env.setdefault("NUMEXPR_NUM_THREADS", "4")
     worker_env.setdefault("VECLIB_MAXIMUM_THREADS", "4")
+    if "LD_LIBRARY_PATH" in worker_env:
+        cleaned_ld = [p for p in worker_env["LD_LIBRARY_PATH"].split(":") if "/opt/ros" not in p and p]
+        if cleaned_ld:
+            worker_env["LD_LIBRARY_PATH"] = ":".join(cleaned_ld)
+        else:
+            worker_env.pop("LD_LIBRARY_PATH", None)
     if env:
         worker_env.update(env)
 

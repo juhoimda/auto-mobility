@@ -121,12 +121,14 @@ class SearchEngine:
                 print(f"⏭️ Mesh & PCD 재사용: {mesh_out.name}")
                 self._log_decision("Phase A (SLAM)", cand_name, "REUSED_MESH", "Reused existing valid mesh/pcd artifact")
             else:
+                stride = max(1, len(self.dataset) // 1500) if not self.quick else max(2, len(self.dataset) // 500)
                 w_res = run_tsdf_worker(
                     dataset_dir=str(self.dataset.dataset_dir),
                     traj_file=traj_file,
                     mesh_path=str(mesh_out),
                     pcd_path=str(pcd_out),
                     voxel=0.010,
+                    stride=stride,
                     split_file=str(self.split_file),
                     quick=self.quick
                 )
@@ -236,12 +238,14 @@ class SearchEngine:
                 print(f"⏭️ Mesh & PCD 재사용: {mesh_out.name}")
                 self._log_decision("Phase B (TSDF)", cand_name, "REUSED_MESH", "Reused existing mesh & PCD files")
             else:
+                stride = max(1, len(self.dataset) // 2000) if not self.quick else max(2, len(self.dataset) // 500)
                 w_res = run_tsdf_worker(
                     dataset_dir=str(self.dataset.dataset_dir),
                     traj_file=best_traj,
                     mesh_path=str(mesh_out),
                     pcd_path=str(pcd_out),
                     voxel=v,
+                    stride=stride,
                     split_file=str(self.split_file),
                     quick=self.quick
                 )
@@ -344,12 +348,14 @@ class SearchEngine:
                     print(f"⏭️ Mesh & PCD 재사용: {mesh_out.name}")
                     self._log_decision("Phase B (TSDF)", cand_name, "REUSED_MESH", "Reused existing 5mm mesh & PCD")
                 else:
+                    stride = max(1, len(self.dataset) // 2000) if not self.quick else max(2, len(self.dataset) // 500)
                     w_res = run_tsdf_worker(
                         dataset_dir=str(self.dataset.dataset_dir),
                         traj_file=best_traj,
                         mesh_path=str(mesh_out),
                         pcd_path=str(pcd_out),
                         voxel=v,
+                        stride=stride,
                         split_file=str(self.split_file),
                         quick=self.quick
                     )

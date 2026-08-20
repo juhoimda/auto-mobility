@@ -21,6 +21,9 @@ from auto_mobility.dataset.frame_dataset import FrameDataset
 from auto_mobility.trajectory.io import Trajectory
 from auto_mobility.trajectory.export_trajectory import export_from_db
 from auto_mobility.evaluation.split import create_holdout_split, save_split_json, load_split_json
+from auto_mobility.diagnostics.pose_alignment import diagnose_pose_alignment
+from auto_mobility.diagnostics.pipeline_diagnosis import diagnose_pipeline
+from auto_mobility.diagnostics.frame_quality import analyze_frame_quality
 
 from auto_mobility.benchmark.artifacts import ArtifactManager
 from auto_mobility.benchmark.search import SearchEngine
@@ -167,6 +170,11 @@ class BenchmarkOrchestrator:
 
         dataset = FrameDataset(frame_out_dir)
         print(f"📊 Dataset Loaded: {len(dataset)} valid RGB-D frames")
+        frame_quality = analyze_frame_quality(dataset, sample_count=100)
+        print(
+            f"🧪 Canonical frame quality: {frame_quality.get('overall_status')} "
+            f"invalid_depth={frame_quality.get('mean_invalid_depth_ratio')}"
+        )
 
         # Create or load holdout split
         split_file = self.report_dir / "holdout_split.json"
@@ -193,6 +201,56 @@ class BenchmarkOrchestrator:
 
         # 2. Trajectories
         trajectories, traj_metrics = self.load_trajectories()
+
+        # Diagnose frame↔trajectory connectivity before spending time on TSDF
+        # and surface candidates.  A downstream mesh cannot be trusted when
+        # the trajectory covers only a small fraction of the RGB-D sequence.
+        pose_diagnostics: Dict[str, dict] = {}
+        frame_timestamps = dataset.get_timestamps(use_rgb=True)
+        for slam_name, traj_path in trajectories.items():
+            try:
+                traj_obj = Trajectory.from_tum_file(traj_path)
+                pose_diagnostics[slam_name] = diagnose_pose_alignment(
+                    frame_timestamps,
+                    traj_obj,
+                    trajectory_path=traj_path,
+                    max_pose_gap_ms=50.0,
+                )
+            except Exception as exc:
+                pose_diagnostics[slam_name] = {
+                    "trajectory_path": str(traj_path),
+                    "status": "FAIL",
+                    "cause": "TRAJECTORY_PARSE",
+                    "error": str(exc),
+                    "warnings": ["Trajectory could not be parsed"],
+                }
+        if pose_diagnostics:
+            for name, diag in pose_diagnostics.items():
+                print(
+                    f"📐 Pose alignment [{name}]: {diag.get('status')} "
+                    f"coverage={diag.get('pose_coverage_ratio', 0.0) * 100:.1f}% "
+                    f"cause={diag.get('cause', 'UNKNOWN')}"
+                )
+
+        sensor_diagnostics: dict = {}
+        sensor_manifest = self.bag_path / "dataset_manifest.json"
+        if sensor_manifest.exists():
+            try:
+                with open(sensor_manifest, "r", encoding="utf-8") as f:
+                    sensor_diagnostics = json.load(f)
+                # validate_bag manifests do not have an overall_status field;
+                # derive it from required checks and retain all raw evidence.
+                if "overall_status" not in sensor_diagnostics:
+                    checks = sensor_diagnostics.get("checks", {})
+                    sensor_diagnostics["overall_status"] = (
+                        "FAIL" if any(not c.get("pass", False) for c in checks.values())
+                        else ("WARN" if sensor_diagnostics.get("warnings") else "PASS")
+                    )
+            except Exception as exc:
+                sensor_diagnostics = {
+                    "overall_status": "WARN",
+                    "warnings": [f"Sensor manifest could not be read: {exc}"],
+                }
 
         # Previous state restoration for Resume
         prev_manifest = {}
@@ -231,7 +289,27 @@ class BenchmarkOrchestrator:
             best_traj = trajectories.get(best_slam, list(trajectories.values())[0] if trajectories else "")
 
         # ── PHASE B ──
-        if self.phase in ("all", "b", "tsdf", "fusion"):
+        # Do not attribute a bad pose stream to TSDF or surface code.  The
+        # phase remains represented in the manifest as BLOCKED for auditability.
+        pose_gate_failed = (not trajectories) or (
+            bool(pose_diagnostics)
+            and not any(d.get("status") in ("PASS", "WARN") for d in pose_diagnostics.values())
+        )
+        if pose_gate_failed and self.phase in ("all", "b", "tsdf", "fusion"):
+            tsdf_eval_results = [{
+                "candidate_name": f"{best_slam}_tsdf",
+                "status": "BLOCKED",
+                "overall_status": "BLOCKED",
+                "blocked_by": "POSE_ALIGNMENT",
+                "error": "All available trajectories failed pose alignment gate",
+                "geometry": {},
+                "mesh": {},
+            }]
+            best_tsdf_summary = tsdf_eval_results[0]
+            best_pcd = self.artifact_mgr.get_pcd_path(best_slam, 10)
+            best_tsdf_mesh = self.artifact_mgr.get_mesh_path(best_slam, 10)
+            print("⛔ Phase B BLOCKED: all trajectories failed pose alignment gate")
+        elif self.phase in ("all", "b", "tsdf", "fusion"):
             tsdf_eval_results, best_voxel_m, best_pcd, best_tsdf_mesh, best_tsdf_summary = search_engine.run_phase_b(
                 best_slam=best_slam,
                 best_traj=best_traj,
@@ -251,7 +329,18 @@ class BenchmarkOrchestrator:
             best_tsdf_mesh = self.artifact_mgr.get_mesh_path(best_slam, best_v_mm)
 
         # ── PHASE C ──
-        if self.phase in ("all", "c", "surface", "mesh"):
+        if pose_gate_failed and self.phase in ("all", "c", "surface", "mesh"):
+            surface_eval_results = [{
+                "candidate_name": f"{best_slam}_surface",
+                "status": "BLOCKED",
+                "overall_status": "BLOCKED",
+                "blocked_by": "POSE_ALIGNMENT",
+                "error": "Surface evaluation blocked because pose alignment failed",
+                "geometry": {},
+                "mesh": {},
+            }]
+            print("⛔ Phase C BLOCKED: all trajectories failed pose alignment gate")
+        elif self.phase in ("all", "c", "surface", "mesh"):
             surface_eval_results, winner_c = search_engine.run_phase_c(
                 best_slam=best_slam,
                 best_traj=best_traj,
@@ -267,6 +356,18 @@ class BenchmarkOrchestrator:
             tsdf_eval_results,
             surface_eval_results
         )
+        sensor_evidence = dict(sensor_diagnostics)
+        if frame_quality.get("overall_status") != "PASS" or not sensor_evidence:
+            sensor_evidence = frame_quality
+        else:
+            sensor_evidence["frame_quality"] = frame_quality
+        pipeline_diagnosis = diagnose_pipeline(
+            sensor_input=sensor_evidence,
+            pose_alignment=pose_diagnostics,
+            phase_a=slam_eval_results,
+            phase_b=tsdf_eval_results,
+            phase_c=surface_eval_results,
+        )
 
         manifest = {
             "benchmark_id": f"bench_{self.bag_name}",
@@ -280,6 +381,10 @@ class BenchmarkOrchestrator:
                 "split": str(split_file),
                 "trajectories": trajectories,
             },
+            "pose_alignment_diagnostics": pose_diagnostics,
+            "sensor_diagnostics": sensor_diagnostics,
+            "frame_quality": frame_quality,
+            "pipeline_diagnosis": pipeline_diagnosis,
             "hardware": get_system_hardware_info(),
             "software": get_software_info(),
             "summary_stats": search_engine.stats,

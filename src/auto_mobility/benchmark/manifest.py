@@ -177,9 +177,21 @@ class BenchmarkManifestExporter:
                 for r_line in explain_winner_decision(winner, runner_up):
                     lines.append(r_line)
                 lines.append("\n")
-            else:
-                lines.append("## ⚠️ Benchmark Result: No Passing Candidates\n")
-                lines.append("- All candidates failed Hard Gate quality criteria; no final winner selected.\n")
+        else:
+            lines.append("## ⚠️ Benchmark Result: No Passing Candidates\n")
+            lines.append("- All candidates failed Hard Gate quality criteria; no final winner selected.\n")
+
+        diagnosis = manifest.get("pipeline_diagnosis")
+        if diagnosis:
+            lines.append("## 🧭 Root-Cause Diagnosis\n")
+            lines.append(f"- **Primary cause**: `{diagnosis.get('primary_cause', 'INCONCLUSIVE')}`")
+            lines.append(f"- **Confidence**: `{diagnosis.get('confidence', 'low')}`")
+            lines.append(f"- **Rationale**: {diagnosis.get('rationale', '')}\n")
+            lines.append("| Stage | Status | Cause |")
+            lines.append("| :--- | :---: | :--- |")
+            for stage, detail in diagnosis.get("stages", {}).items():
+                lines.append(f"| {stage} | **{detail.get('status', 'UNKNOWN')}** | {detail.get('cause', 'NONE')} |")
+            lines.append("")
 
         # 1. SLAM Ranking
         lines.append("## 1. [SLAM Ranking] Trajectory & Downstream Consistency\n")
@@ -187,7 +199,7 @@ class BenchmarkManifestExporter:
         lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
         for s in manifest.get("phase_a_slam_results", []):
             status = s.get("status") or s.get("overall_status", "UNKNOWN")
-            if status in ("FAIL", "FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "FAIL_EXCEPTION", "SKIPPED_UNAVAILABLE", "PRUNED"):
+            if status in ("FAIL", "FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "FAIL_EXCEPTION", "SKIPPED_UNAVAILABLE", "PRUNED", "BLOCKED", "NOT_EVALUATED"):
                 lines.append(f"| **{s['candidate_name']}** | ❌ {status} | - | - | - | - | - | - | - |")
                 continue
             tm = s.get("trajectory_metrics", {})
@@ -207,7 +219,7 @@ class BenchmarkManifestExporter:
         lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
         for s in manifest.get("phase_b_tsdf_results", []):
             status = s.get("status") or s.get("overall_status", "UNKNOWN")
-            if status in ("FAIL", "FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "FAIL_EXCEPTION", "SKIPPED_UNAVAILABLE", "PRUNED"):
+            if status in ("FAIL", "FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "FAIL_EXCEPTION", "SKIPPED_UNAVAILABLE", "PRUNED", "BLOCKED", "NOT_EVALUATED"):
                 lines.append(f"| **{s['candidate_name']}** | ❌ {status} | - | FAIL | FAIL | FAIL | 0 | 0.0s |")
                 continue
             gm = s.get("geometry", {})
@@ -227,7 +239,7 @@ class BenchmarkManifestExporter:
         lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
         for s in manifest.get("phase_c_surface_results", []):
             status = s.get("status") or s.get("overall_status", "UNKNOWN")
-            if status in ("FAIL", "FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "FAIL_EXCEPTION", "SKIPPED_UNAVAILABLE", "PRUNED"):
+            if status in ("FAIL", "FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "FAIL_EXCEPTION", "SKIPPED_UNAVAILABLE", "PRUNED", "BLOCKED", "NOT_EVALUATED"):
                 lines.append(f"| **{s['candidate_name']}** | ❌ {status} | - | - | - | - | - | - | - |")
                 continue
             gm = s.get("geometry", {})
@@ -305,6 +317,11 @@ class BenchmarkManifestExporter:
         # 2. Save experiment_manifest.json (Atomic)
         manifest_file = report_dir / "experiment_manifest.json"
         atomic_write_json(manifest_file, manifest_data)
+
+        # Keep the concise attribution separately discoverable for tooling.
+        diagnosis = manifest_data.get("pipeline_diagnosis")
+        if diagnosis is not None:
+            atomic_write_json(report_dir / "pipeline_diagnosis.json", diagnosis)
 
         # 3. Save rankings.json (Atomic)
         rankings_file = report_dir / "rankings.json"

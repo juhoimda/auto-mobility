@@ -10,6 +10,30 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+# Canonical RGB-D frames are read from rosbag2 before the Open3D benchmark.
+# rosbag2_py is installed through the ROS environment, whereas Open3D must not
+# inherit ROS's LD_LIBRARY_PATH (see the note below).  Keep these two runtimes
+# isolated: extraction runs in a short-lived ROS subprocess and the benchmark
+# itself continues in the clean environment prepared by this script.
+_extract_frames_with_ros() {
+    local bag_input="$1"
+    local ros_distro="${ROS_DISTRO:-humble}"
+    local ros_setup="/opt/ros/${ros_distro}/setup.bash"
+
+    if [ ! -f "$ros_setup" ]; then
+        echo "ERROR: ROS 2 setup file not found: $ros_setup" >&2
+        echo "       Canonical frame extraction requires rosbag2_py." >&2
+        return 1
+    fi
+
+    echo "⚙️ Canonical RGB-D 프레임 준비 중 (격리된 ROS 환경)..."
+    bash -c '
+        source "$1"
+        export PYTHONPATH="$2/src:$2${PYTHONPATH:+:$PYTHONPATH}"
+        exec python3 "$2/src/auto_mobility/dataset/extract_frames.py" "$3"
+    ' _ "$ros_setup" "$PROJECT_DIR" "$bag_input"
+}
+
 # HW 과부하 및 WSL2 셧다운/연결 끊김 방지를 위한 CPU 멀티스레드 상한 제한 (기본 4코어)
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-4}"
@@ -61,6 +85,10 @@ if [ -z "$1" ]; then
     echo "=========================================================="
     exit 1
 fi
+
+# Do this before stripping ROS paths below.  The extractor is cache-aware, so
+# invoking it on an already prepared dataset only validates and reuses frames.
+_extract_frames_with_ros "$1" || exit $?
 
 export PYTHONPATH="$PROJECT_DIR/src:$PROJECT_DIR"
 exec python3 "$PROJECT_DIR/src/auto_mobility/slam/compare_algorithms.py" "$@"

@@ -76,9 +76,9 @@ def _estimate_block_count(
     depth_max: float,
     no_color: bool = False,
     block_resolution: int = 16,
-    safety_factor: float = 2.0,
-    min_blocks: int = 8192,
-    memory_budget_gb: float = 8.0,
+    safety_factor: float = 1.5,
+    min_blocks: int = 2048,
+    memory_budget_gb: float = 2.0,
 ) -> int:
     """궤적 범위(장면 규모)를 기반으로 VoxelBlockGrid의 block_count를 추정한다.
 
@@ -100,8 +100,13 @@ def _estimate_block_count(
         return min_blocks
 
     pos = np.asarray(positions, dtype=np.float64)
-    lo = pos.min(axis=0) - depth_max
-    hi = pos.max(axis=0) + depth_max
+    # Filter extreme outlier jumping poses (1st to 99th percentile) to avoid gigantic bounding boxes
+    if len(pos) >= 20:
+        lo = np.percentile(pos, 1, axis=0) - depth_max
+        hi = np.percentile(pos, 99, axis=0) + depth_max
+    else:
+        lo = pos.min(axis=0) - depth_max
+        hi = pos.max(axis=0) + depth_max
     ext = np.maximum(hi - lo, voxel_size * block_resolution)
 
     block_size = voxel_size * block_resolution
@@ -318,26 +323,23 @@ def reconstruct(
         # ── Triangle Mesh 추출 ──
         print("  • Triangle Mesh 추출 중...")
         mesh = o3d.geometry.TriangleMesh()
-        try:
-            mesh_t = vbg_cpu.extract_triangle_mesh(weight_threshold=weight_thr)
-            mesh = mesh_t.to_legacy()
-        except Exception as e:
-            print(f"  ⚠️ extract_triangle_mesh 실패: {e}")
-
-        if len(mesh.vertices) > 0 and len(mesh.triangles) > 0:
-            print("  • Mesh 위상 정교화...")
-            try:
-                mesh.remove_degenerate_triangles()
-                mesh.remove_duplicated_triangles()
-                mesh.remove_duplicated_vertices()
-                mesh.remove_non_manifold_edges()
-            except Exception as e:
-                print(f"  ⚠️ Mesh cleanup 실패: {e}")
-
-        print(f"🔺 Mesh 결과: {len(mesh.vertices):,} vertices / {len(mesh.triangles):,} triangles")
-        print(f"☁️ PointCloud 결과: {len(pcd.points):,} points")
-
         if output_mesh:
+            try:
+                if len(pcd.points) > 0:
+                    pcd_down = pcd.voxel_down_sample(voxel_size=max(voxel_size, 0.03))
+                    pcd_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=max(voxel_size * 4, 0.08), max_nn=20))
+                    mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd_down, depth=8)
+                    if len(mesh.vertices) > 0 and len(mesh.triangles) > 0:
+                        mesh.remove_degenerate_triangles()
+                        mesh.remove_duplicated_triangles()
+                        mesh.remove_duplicated_vertices()
+                        mesh.remove_non_manifold_edges()
+            except Exception as e:
+                print(f"  ⚠️ Mesh 생성 실패: {e}")
+
+            print(f"🔺 Mesh 결과: {len(mesh.vertices):,} vertices / {len(mesh.triangles):,} triangles")
+            print(f"☁️ PointCloud 결과: {len(pcd.points):,} points")
+
             os.makedirs(os.path.dirname(os.path.abspath(output_mesh)), exist_ok=True)
             o3d.io.write_triangle_mesh(output_mesh, mesh)
             print(f"💾 Mesh 저장: {output_mesh}")
