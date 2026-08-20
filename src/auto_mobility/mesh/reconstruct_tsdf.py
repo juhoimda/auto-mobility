@@ -194,6 +194,11 @@ def reconstruct(
         if assoc_summary.warning:
             print(f"⚠️ [TSDF Warning] {assoc_summary.warning}")
 
+    # NOTE: no_gpu parameter accepted for API compatibility but CUDA is intentionally disabled.
+    # In the benchmark environment, mixing ROS and Open3D CUDA paths causes SIGSEGV
+    # (LD_LIBRARY_PATH conflict between ROS OpenCV/PCL and Open3D bundled libraries).
+    # CPU:0 is safe and reproducible. To re-enable GPU, sanitize LD_LIBRARY_PATH first
+    # (compare.sh already strips /opt/ros before calling the benchmark).
     device = o3c.Device("CPU:0")
     print(f"🖥️ TSDF Device: {device}, Voxel: {voxel_size*1000:.1f}mm, Total Frames: {len(dataset)}")
 
@@ -288,58 +293,54 @@ def reconstruct(
         mesh = o3d.geometry.TriangleMesh()
         pcd = o3d.geometry.PointCloud()
     else:
-        # Safe extraction: Move VoxelBlockGrid to CPU device to prevent Open3D CUDA C++ crash during legacy conversion
-        print("  • 3D VoxelBlockGrid에서 Triangle Mesh & Point Cloud 추출 중...")
         try:
             vbg_cpu = vbg.to(o3c.Device("CPU:0"))
         except Exception as e:
             print(f"  ⚠️ Device CPU copy notice: {e}")
             vbg_cpu = vbg
 
-        try:
-            mesh_t = vbg_cpu.extract_triangle_mesh(weight_threshold=weight_thr)
-            mesh = mesh_t.to_legacy()
-        except Exception as e:
-            print(f"  ⚠️ TSDF extract_triangle_mesh notice ({e}). Using fallback empty mesh.")
-            manifest["fallback_occurred"] = True
-            manifest["fallback_reason"] = str(e)
-            mesh = o3d.geometry.TriangleMesh()
-
-        # Extract point cloud
+        # ── Point Cloud 추출 + 즉시 저장 ──
+        # Open3D extract_triangle_mesh()가 대용량 VoxelBlockGrid에서
+        # SIGSEGV될 수 있어, pcd를 먼저 추출·저장해 crash 시에도 보존한다.
+        print("  • PointCloud 추출 중...")
         try:
             pcd_t = vbg_cpu.extract_point_cloud(weight_threshold=weight_thr)
             pcd = pcd_t.to_legacy()
         except Exception as e:
-            print(f"  ⚠️ TSDF extract_point_cloud notice ({e}). Using fallback empty point cloud.")
+            print(f"  ⚠️ extract_point_cloud 실패: {e}. 빈 PointCloud 사용.")
             pcd = o3d.geometry.PointCloud()
-            if len(mesh.vertices) > 0:
-                pcd.points = mesh.vertices
-                if mesh.has_vertex_colors():
-                    pcd.colors = mesh.vertex_colors
 
-    # Topology cleanup with progress log
-    if len(mesh.vertices) > 0 and len(mesh.triangles) > 0:
-        print("  • Mesh 위상 정교화 청소 (remove degenerate/non-manifold elements)...")
+        if output_pcd:
+            os.makedirs(os.path.dirname(os.path.abspath(output_pcd)), exist_ok=True)
+            o3d.io.write_point_cloud(output_pcd, pcd)
+            print(f"☁️ PointCloud 저장: {output_pcd}")
+
+        # ── Triangle Mesh 추출 ──
+        print("  • Triangle Mesh 추출 중...")
+        mesh = o3d.geometry.TriangleMesh()
         try:
-            mesh.remove_degenerate_triangles()
-            mesh.remove_duplicated_triangles()
-            mesh.remove_duplicated_vertices()
-            mesh.remove_non_manifold_edges()
+            mesh_t = vbg_cpu.extract_triangle_mesh(weight_threshold=weight_thr)
+            mesh = mesh_t.to_legacy()
         except Exception as e:
-            print(f"  ⚠️ Mesh topology cleanup notice: {e}")
+            print(f"  ⚠️ extract_triangle_mesh 실패: {e}")
 
-    print(f"🔺 Mesh 결과: {len(mesh.vertices):,} vertices / {len(mesh.triangles):,} triangles")
-    print(f"☁️ PointCloud 결과: {len(pcd.points):,} points")
+        if len(mesh.vertices) > 0 and len(mesh.triangles) > 0:
+            print("  • Mesh 위상 정교화...")
+            try:
+                mesh.remove_degenerate_triangles()
+                mesh.remove_duplicated_triangles()
+                mesh.remove_duplicated_vertices()
+                mesh.remove_non_manifold_edges()
+            except Exception as e:
+                print(f"  ⚠️ Mesh cleanup 실패: {e}")
 
-    if output_mesh:
-        os.makedirs(os.path.dirname(os.path.abspath(output_mesh)), exist_ok=True)
-        o3d.io.write_triangle_mesh(output_mesh, mesh)
-        print(f"💾 Mesh 저장: {output_mesh}")
+        print(f"🔺 Mesh 결과: {len(mesh.vertices):,} vertices / {len(mesh.triangles):,} triangles")
+        print(f"☁️ PointCloud 결과: {len(pcd.points):,} points")
 
-    if output_pcd:
-        os.makedirs(os.path.dirname(os.path.abspath(output_pcd)), exist_ok=True)
-        o3d.io.write_point_cloud(output_pcd, pcd)
-        print(f"☁️ PointCloud 저장: {output_pcd}")
+        if output_mesh:
+            os.makedirs(os.path.dirname(os.path.abspath(output_mesh)), exist_ok=True)
+            o3d.io.write_triangle_mesh(output_mesh, mesh)
+            print(f"💾 Mesh 저장: {output_mesh}")
 
     return mesh, pcd
 
