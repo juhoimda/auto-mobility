@@ -63,3 +63,35 @@ def test_depth_metrics_coverage_and_unobserved_regions():
     assert metrics["overlapping_pixels"] == 4000
     assert metrics["depth_coverage_ratio"] == 0.40
     assert metrics["depth_mae_mm"] == 20.0
+
+
+def test_free_space_violation_detection():
+    # Real depth is at 2000mm (2.0m)
+    real = np.full((100, 100), 2000.0, dtype=np.float32)
+    rendered = np.full((100, 100), 2000.0, dtype=np.float32)
+
+    # 30% of pixels have phantom surfaces in free space at 1500mm (500mm closer than real wall)
+    rendered[:30, :] = 1500.0
+
+    metrics = compute_depth_metrics(real, rendered, free_space_margin_mm=50.0)
+
+    # 3000 out of 10000 pixels violate free space
+    assert metrics["free_space_violation_ratio"] == 0.30
+    assert metrics["free_space_correctness_ratio"] == 0.70
+
+
+def test_surface_completeness():
+    # Real depth is at 2000mm
+    real = np.full((100, 100), 2000.0, dtype=np.float32)
+    rendered = np.zeros((100, 100), dtype=np.float32)
+
+    # 80% coverage, all with 10mm error (within 50mm)
+    rendered[:80, :] = 2010.0
+
+    metrics = compute_depth_metrics(real, rendered)
+
+    assert metrics["depth_coverage_ratio"] == 0.80
+    assert metrics["within_50mm_ratio"] == 1.0
+    # Observed surface completeness = coverage * within_50mm_ratio = 0.80 * 1.0 = 0.80
+    assert metrics["observed_surface_completeness"] == 0.80
+
