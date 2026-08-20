@@ -26,7 +26,7 @@ def generate_stella_config(
     height: int = 480,
     fps: float = 30.0,
     depth_factor: float = 1000.0,
-    depth_threshold: float = 40.0
+    depth_threshold: float = 4.0
 ) -> str:
     """stella_vslam 호환 YAML 설정을 생성하고 저장한다."""
     fx = intrinsics.fx if intrinsics else 385.0
@@ -81,7 +81,7 @@ def generate_stella_config(
     return output_path
 
 
-def run_stella_vslam_on_bag(bag_input: str, out_trajectory: Optional[str] = None) -> str:
+def run_stella_vslam_on_bag(bag_input: str, out_trajectory: Optional[str] = None, rate: float = 1.0) -> str:
     bag_path = Path(bag_input)
     if not bag_path.is_absolute():
         if (BAG_DIR / bag_input).exists():
@@ -120,6 +120,7 @@ def run_stella_vslam_on_bag(bag_input: str, out_trajectory: Optional[str] = None
     print("==========================================================")
     print(f" 🚀 Running stella_vslam (RGB-D) on Bag: {bag_name}")
     print(f" 📦 Source Bag: {bag_path}")
+    print(f" ⏩ Play Rate: {rate}x")
     print(f" 📑 Output Trajectory: {out_trajectory}")
     print("==========================================================")
 
@@ -161,8 +162,8 @@ def run_stella_vslam_on_bag(bag_input: str, out_trajectory: Optional[str] = None
     time.sleep(3.0)  # Wait for vocabulary to load into memory
 
     # 3. Play bag with --clock
-    print("▶️ [Step 2] Playing rosbag with /clock...")
-    play_cmd = ["ros2", "bag", "play", str(bag_path), "--clock", "--rate", "1.0"]
+    print(f"▶️ [Step 2] Playing rosbag with /clock (Rate: {rate}x)...")
+    play_cmd = ["ros2", "bag", "play", str(bag_path), "--clock", "--rate", str(rate)]
     play_res = subprocess.run(play_cmd, env=env)
 
     print("▶️ [Step 3] Finalizing stella_vslam and saving trajectory...")
@@ -207,9 +208,10 @@ def main():
     parser = argparse.ArgumentParser(description="Run stella_vslam RGB-D on rosbag")
     parser.add_argument("bag", help="Rosbag name or path")
     parser.add_argument("--out", default=None, help="Output TUM trajectory path (.txt)")
+    parser.add_argument("--rate", type=float, default=1.0, help="Bag playback rate (default: 1.0)")
     args = parser.parse_args()
 
-    run_stella_vslam_on_bag(args.bag, args.out)
+    run_stella_vslam_on_bag(args.bag, args.out, rate=args.rate)
 
 
 if __name__ == "__main__":

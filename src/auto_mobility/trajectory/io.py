@@ -62,11 +62,54 @@ class Trajectory:
                 else:
                     ids.append(len(stamps) - 1)
 
+        if not stamps:
+            return cls(
+                timestamps=np.empty((0,), dtype=np.float64),
+                positions=np.empty((0, 3), dtype=np.float64),
+                orientations=np.empty((0, 4), dtype=np.float64),
+                frame_ids=[]
+            )
+
+        stamps_arr = np.array(stamps, dtype=np.float64)
+        poses_arr = np.array(poses, dtype=np.float64)
+        quats_arr = np.array(quats, dtype=np.float64)
+        ids_arr = np.array(ids, dtype=int)
+
+        # 1. Sort chronologically by timestamp (fixes unsorted rtabmap-export outputs)
+        sort_order = np.argsort(stamps_arr)
+        stamps_arr = stamps_arr[sort_order]
+        poses_arr = poses_arr[sort_order]
+        quats_arr = quats_arr[sort_order]
+        ids_arr = ids_arr[sort_order]
+
+        # 2. Filter duplicate / non-monotonic timestamps
+        if len(stamps_arr) > 1:
+            dt = np.diff(stamps_arr)
+            valid_mask = np.insert(dt > 1e-6, 0, True)
+            stamps_arr = stamps_arr[valid_mask]
+            poses_arr = poses_arr[valid_mask]
+            quats_arr = quats_arr[valid_mask]
+            ids_arr = ids_arr[valid_mask]
+
+        # 3. Filter isolated (0,0,0) tracking-loss reset artifacts
+        if len(poses_arr) > 2:
+            is_zero = np.all(poses_arr == 0.0, axis=1)
+            drop_zero = np.zeros(len(poses_arr), dtype=bool)
+            for i in range(1, len(poses_arr)):
+                if is_zero[i] and np.linalg.norm(poses_arr[i - 1]) > 0.3:
+                    drop_zero[i] = True
+            if np.any(drop_zero):
+                keep = ~drop_zero
+                stamps_arr = stamps_arr[keep]
+                poses_arr = poses_arr[keep]
+                quats_arr = quats_arr[keep]
+                ids_arr = ids_arr[keep]
+
         return cls(
-            timestamps=np.array(stamps),
-            positions=np.array(poses),
-            orientations=np.array(quats),
-            frame_ids=ids
+            timestamps=stamps_arr,
+            positions=poses_arr,
+            orientations=quats_arr,
+            frame_ids=ids_arr.tolist()
         )
 
     def to_pose_matrix_dict(self) -> Dict[int, np.ndarray]:

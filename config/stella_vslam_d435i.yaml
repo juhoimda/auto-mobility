@@ -16,7 +16,7 @@ Camera:
   p1: 0.0
   p2: 0.0
   k3: 0.0
-  depth_threshold: 40.0
+  depth_threshold: 4.0
   depth_factor: 1000.0
 Feature:
   max_num_keypoints: 1200

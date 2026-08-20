@@ -12,11 +12,99 @@ import subprocess
 from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-from auto_mobility.config import BAG_DIR, TRAJECTORY_DIR, PROJECT_DIR
+from auto_mobility.config import BAG_DIR, TRAJECTORY_DIR, PROJECT_DIR, FRAME_DIR
+from auto_mobility.dataset.frame_dataset import FrameDataset, CameraIntrinsics
 from auto_mobility.trajectory.io import Trajectory
 
 
-def run_orbslam3_on_bag(bag_input: str, out_trajectory: str = None, mode: str = "rgbd") -> str:
+def generate_orbslam3_config(
+    intrinsics: CameraIntrinsics = None,
+    is_inertial: bool = False,
+    output_path: str = None
+) -> str:
+    """bag 실제 Intrinsics를 반영한 ORB-SLAM3 YAML 설정을 동적 생성한다."""
+    fx = intrinsics.fx if intrinsics else 606.5387
+    fy = intrinsics.fy if intrinsics else 606.4935
+    cx = intrinsics.cx if intrinsics else 324.4991
+    cy = intrinsics.cy if intrinsics else 241.7047
+    w = intrinsics.width if intrinsics else 640
+    h = intrinsics.height if intrinsics else 480
+
+    lines = [
+        "%YAML:1.0",
+        "",
+        'File.version: "1.0"',
+        'Camera.type: "PinHole"',
+        f"Camera1.fx: {fx:.6f}",
+        f"Camera1.fy: {fy:.6f}",
+        f"Camera1.cx: {cx:.6f}",
+        f"Camera1.cy: {cy:.6f}",
+        "Camera1.k1: 0.0",
+        "Camera1.k2: 0.0",
+        "Camera1.p1: 0.0",
+        "Camera1.p2: 0.0",
+        f"Camera.width: {w}",
+        f"Camera.height: {h}",
+        "Camera.fps: 30",
+        "Camera.RGB: 1",
+        "Stereo.ThDepth: 40.0",
+        "Stereo.b: 0.0745",
+        "RGBD.DepthMapFactor: 1000.0",
+        "",
+    ]
+    if is_inertial:
+        lines.extend([
+            "# Transformation from body-frame (imu) to left camera",
+            "IMU.T_b_c1: !!opencv-matrix",
+            "   rows: 4",
+            "   cols: 4",
+            "   dt: f",
+            "   data: [0.999903, -0.0138036, -0.00208099, -0.0202141,",
+            "         0.0137985, 0.999902, -0.00243498, 0.00505961,",
+            "         0.0021144, 0.00240603, 0.999995, 0.0114047,",
+            "         0.0, 0.0, 0.0, 1.0]",
+            "",
+            "IMU.InsertKFsWhenLost: 0",
+            "IMU.fastInit: 1",
+            "IMU.NoiseGyro: 1e-2",
+            "IMU.NoiseAcc: 1e-1",
+            "IMU.GyroWalk: 1e-6",
+            "IMU.AccWalk: 1e-4",
+            "IMU.Frequency: 200.0",
+            "",
+        ])
+
+    lines.extend([
+        "ORBextractor.nFeatures: 2000",
+        "ORBextractor.scaleFactor: 1.2",
+        "ORBextractor.nLevels: 8",
+        "ORBextractor.iniThFAST: 15",
+        "ORBextractor.minThFAST: 5",
+        "",
+        "Viewer.KeyFrameSize: 0.05",
+        "Viewer.KeyFrameLineWidth: 1.0",
+        "Viewer.GraphLineWidth: 0.9",
+        "Viewer.PointSize: 2.0",
+        "Viewer.CameraSize: 0.08",
+        "Viewer.CameraLineWidth: 3.0",
+        "Viewer.ViewpointX: 0.0",
+        "Viewer.ViewpointY: -0.7",
+        "Viewer.ViewpointZ: -3.5",
+        "Viewer.ViewpointF: 500.0",
+        ""
+    ])
+
+    if output_path is None:
+        fname = "orbslam3_rgbdi_custom.yaml" if is_inertial else "orbslam3_rgbd_custom.yaml"
+        output_path = str(PROJECT_DIR / "config" / fname)
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    return output_path
+
+
+def run_orbslam3_on_bag(bag_input: str, out_trajectory: str = None, mode: str = "rgbd", rate: float = 1.0) -> str:
     bag_path = Path(bag_input)
     if not bag_path.is_absolute():
         if (BAG_DIR / bag_input).exists():
@@ -34,13 +122,18 @@ def run_orbslam3_on_bag(bag_input: str, out_trajectory: str = None, mode: str = 
     out_trajectory = os.path.abspath(out_trajectory)
     os.makedirs(os.path.dirname(out_trajectory), exist_ok=True)
 
+    # Load intrinsics from canonical dataset if present
+    dataset_path = FRAME_DIR / bag_name
+    intrinsics = None
+    if dataset_path.exists() and (dataset_path / "frames.csv").exists():
+        ds = FrameDataset(dataset_path)
+        intrinsics = ds.intrinsics
+    if intrinsics is None:
+        intrinsics = CameraIntrinsics(fx=606.5387, fy=606.4935, cx=324.4991, cy=241.7047, width=640, height=480)
+
     vocab_path = str(PROJECT_DIR / "third_party" / "ORB_SLAM3" / "Vocabulary" / "ORBvoc.txt")
-    if is_inertial:
-        config_path = str(PROJECT_DIR / "third_party" / "ORB_SLAM3" / "Examples" / "RGB-D-Inertial" / "RealSense_D435i.yaml")
-        sensor_mode_arg = "IMU_RGBD"
-    else:
-        config_path = str(PROJECT_DIR / "third_party" / "ORB_SLAM3" / "Examples" / "RGB-D" / "RealSense_D435i.yaml")
-        sensor_mode_arg = "RGBD"
+    config_path = generate_orbslam3_config(intrinsics=intrinsics, is_inertial=is_inertial)
+    sensor_mode_arg = "IMU_RGBD" if is_inertial else "RGBD"
 
     node_exe = str(PROJECT_DIR / "install" / "auto_mobility" / "lib" / "auto_mobility" / "orbslam3_rgbd_node")
 
@@ -53,6 +146,7 @@ def run_orbslam3_on_bag(bag_input: str, out_trajectory: str = None, mode: str = 
     print(f" 🚀 Running ORB-SLAM3 ({slam_name.upper()}) on Bag: {bag_name}")
     print(f" 📦 Source Bag: {bag_path}")
     print(f" ⚙️ Sensor Mode: {sensor_mode_arg}")
+    print(f" ⏩ Play Rate: {rate}x")
     print(f" 📑 Output Trajectory: {out_trajectory}")
     print("==========================================================")
 
@@ -89,8 +183,8 @@ def run_orbslam3_on_bag(bag_input: str, out_trajectory: str = None, mode: str = 
     time.sleep(4.0)  # Wait for vocabulary to load into memory
 
     # 3. Play bag with --clock
-    print("▶️ [Step 2] Playing rosbag with /clock...")
-    play_cmd = ["ros2", "bag", "play", str(bag_path), "--clock", "--rate", "1.0"]
+    print(f"▶️ [Step 2] Playing rosbag with /clock (Rate: {rate}x)...")
+    play_cmd = ["ros2", "bag", "play", str(bag_path), "--clock", "--rate", str(rate)]
     play_res = subprocess.run(play_cmd)
 
     print("▶️ [Step 3] Finalizing ORB-SLAM3 and saving trajectory...")
@@ -140,9 +234,10 @@ def main():
     parser.add_argument("bag", help="Rosbag name or path")
     parser.add_argument("--out", default=None, help="Output TUM trajectory path (.txt)")
     parser.add_argument("--mode", "--slam", default="rgbd", choices=["rgbd", "rgbdi", "orb_rgbd", "orb_rgbdi"], help="SLAM mode (default: rgbd)")
+    parser.add_argument("--rate", type=float, default=1.0, help="Bag playback rate (default: 1.0)")
     args = parser.parse_args()
 
-    run_orbslam3_on_bag(args.bag, args.out, mode=args.mode)
+    run_orbslam3_on_bag(args.bag, args.out, mode=args.mode, rate=args.rate)
 
 
 if __name__ == "__main__":

@@ -61,15 +61,15 @@ echo "=========================================================="
 
 if [ "$SLAM_TYPE" == "orb_rgbdi" ] || [ "$SLAM_TYPE" == "rgbdi" ]; then
     OUT_TRAJ="$TRAJECTORY_DIR/orb_rgbdi_${BAG_NAME}_trajectory.txt"
-    python3 "$PROJECT_DIR/src/auto_mobility/slam/run_orbslam3_bag.py" "$BAG_PATH" --out "$OUT_TRAJ" --mode rgbdi
+    python3 "$PROJECT_DIR/src/auto_mobility/slam/run_orbslam3_bag.py" "$BAG_PATH" --out "$OUT_TRAJ" --mode rgbdi --rate "$RATE"
     echo "✅ ORB-SLAM3 RGB-D-I 완료 -> $OUT_TRAJ"
 elif [ "$SLAM_TYPE" == "orb" ] || [ "$SLAM_TYPE" == "orbslam" ] || [ "$SLAM_TYPE" == "orbslam3" ] || [ "$SLAM_TYPE" == "orb_rgbd" ]; then
     OUT_TRAJ="$TRAJECTORY_DIR/orb_rgbd_${BAG_NAME}_trajectory.txt"
-    python3 "$PROJECT_DIR/src/auto_mobility/slam/run_orbslam3_bag.py" "$BAG_PATH" --out "$OUT_TRAJ" --mode rgbd
+    python3 "$PROJECT_DIR/src/auto_mobility/slam/run_orbslam3_bag.py" "$BAG_PATH" --out "$OUT_TRAJ" --mode rgbd --rate "$RATE"
     echo "✅ ORB-SLAM3 RGB-D 완료 -> $OUT_TRAJ"
 elif [ "$SLAM_TYPE" == "stella" ] || [ "$SLAM_TYPE" == "stella_rgbd" ]; then
     OUT_TRAJ="$TRAJECTORY_DIR/stella_${BAG_NAME}_trajectory.txt"
-    python3 "$PROJECT_DIR/src/auto_mobility/slam/run_stella_bag.py" "$BAG_PATH" --out "$OUT_TRAJ"
+    python3 "$PROJECT_DIR/src/auto_mobility/slam/run_stella_bag.py" "$BAG_PATH" --out "$OUT_TRAJ" --rate "$RATE"
     echo "✅ stella_vslam RGB-D 완료 -> $OUT_TRAJ"
 else
     # RTAB-Map
