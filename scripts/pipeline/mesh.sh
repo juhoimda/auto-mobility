@@ -13,8 +13,10 @@ export MKL_NUM_THREADS="${MKL_NUM_THREADS:-8}"
 SLAM_TYPE="rtab"
 SURFACE_TYPE="tsdf_direct"
 FUSION_TYPE="tsdf"
-VOXEL="0.02"
-STRIDE="2"
+VOXEL="0.008"
+STRIDE="1"
+DEPTH_MAX="3.0"
+TRUNC_MULT="4"
 VIEW_FLAG=""
 INPUT_NAME=""
 CUSTOM_OUT=""
@@ -38,6 +40,12 @@ for arg in "$@"; do
             ;;
         --stride=*)
             STRIDE="${arg#*=}"
+            ;;
+        --depth-max=*)
+            DEPTH_MAX="${arg#*=}"
+            ;;
+        --trunc-mult=*)
+            TRUNC_MULT="${arg#*=}"
             ;;
         --fine)
             VOXEL="0.005"
@@ -66,8 +74,8 @@ done
 
 if [ -z "$INPUT_NAME" ]; then
     echo "=========================================================="
-    echo " 사용법: $0 DATASET_NAME [--slam=rtab|orb_rgbd|orb_rgbdi|stella_rgbd] [--surface=tsdf_direct|poisson|bpa|alpha|cgal_polygonal] [--voxel=0.01|0.005] [--view]"
-    echo " 예시 (기본 TSDF 10mm)       : $0 my_dataset --surface=tsdf_direct --view"
+    echo " 사용법: $0 DATASET_NAME [--slam=rtab|rtab_dense|orb_rgbd|orb_rgbdi|stella_rgbd] [--surface=tsdf_direct|poisson|bpa|alpha|cgal_polygonal] [--voxel=0.008|0.005] [--depth-max=3.0] [--view]"
+    echo " 예시 (기본 TSDF 8mm)        : $0 my_dataset --surface=tsdf_direct --view"
     echo " 예시 (Alpha Shape 메쉬)     : $0 my_dataset --surface=alpha --view"
     echo " 예시 (Poisson 8 octree)     : $0 my_dataset --surface=poisson --view"
     echo " 예시 (ORB-SLAM3 RGBD-I 적용) : $0 my_dataset --slam=orb_rgbdi --view"
@@ -108,6 +116,13 @@ elif [ "$SLAM_TYPE" == "stella" ] || [ "$SLAM_TYPE" == "stella_rgbd" ]; then
         echo "⚙️ stella_vslam 궤적이 없어 SLAM을 실행합니다..."
         "$PIPELINE_DIR/run_slam.sh" "$BASE_NAME" --slam=stella_rgbd
     fi
+elif [ "$SLAM_TYPE" == "rtab_dense" ]; then
+    TRAJ_FILE="$TRAJECTORY_DIR/rtab_dense_${BASE_NAME}_trajectory.txt"
+    DB_FILE="$DB_DIR/${BASE_NAME}_dense.db"
+    if [ ! -f "$TRAJ_FILE" ] && [ ! -f "$DB_FILE" ]; then
+        echo "⚙️ 고밀도 RTAB-Map 궤적이 없어 SLAM을 실행합니다..."
+        "$PIPELINE_DIR/run_slam.sh" "$BASE_NAME" --slam=rtab --dense
+    fi
 else
     # RTAB-Map
     TRAJ_FILE="$TRAJECTORY_DIR/rtab_${BASE_NAME}_trajectory.txt"
@@ -128,6 +143,7 @@ echo " 📍 궤적 파일   : $TRAJ_FILE"
 echo " 🛠️ SLAM 백엔드 : $SLAM_TYPE"
 echo " 🧱 Surface 방식: $SURFACE_TYPE"
 echo " ⚙️ TSDF Voxel  : ${VOXEL}m"
+echo " 📏 Depth 범위 : 0.3m ~ ${DEPTH_MAX}m (trunc ${TRUNC_MULT} voxels)"
 echo " ☁️ 점군 출력   : $OUT_PCD"
 echo " 💾 메쉬 출력   : $OUT_MESH"
 echo "=========================================================="
@@ -140,12 +156,16 @@ if [ "$SURFACE_TYPE" == "tsdf_direct" ] || [ "$SURFACE_TYPE" == "tsdf" ]; then
             --output="$OUT_MESH" \
             --pcd-output="$OUT_PCD" \
             --voxel="$VOXEL" \
+            --depth-max="$DEPTH_MAX" \
+            --trunc-mult="$TRUNC_MULT" \
             --stride="$STRIDE"
     else
         python3 "$PROJECT_DIR/src/auto_mobility/mesh/reconstruct_tsdf.py" \
             "$DB_FILE" "$OUT_MESH" \
             --pcd-output="$OUT_PCD" \
             --voxel="$VOXEL" \
+            --depth-max="$DEPTH_MAX" \
+            --trunc-mult="$TRUNC_MULT" \
             --stride="$STRIDE" \
             ${TRAJ_FILE:+--trajectory="$TRAJ_FILE"}
     fi
@@ -158,6 +178,8 @@ else
             --trajectory="$TRAJ_FILE" \
             --pcd-output="$OUT_PCD" \
             --voxel="$VOXEL" \
+            --depth-max="$DEPTH_MAX" \
+            --trunc-mult="$TRUNC_MULT" \
             --stride="$STRIDE"
     fi
     python3 "$PROJECT_DIR/src/auto_mobility/mesh/mesh_open3d.py" \

@@ -4,9 +4,15 @@
 PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$PIPELINE_DIR/../common.sh"
 
+# Keep ROS launch logs inside the project output tree. This also makes offline
+# runs work in sandboxed/CI environments where ~/.ros is read-only.
+export ROS_LOG_DIR="${ROS_LOG_DIR:-$LOG_DIR/ros}"
+mkdir -p "$ROS_LOG_DIR"
+
 SLAM_TYPE="rtab"
 RATE="1.0"
 BAG_NAME=""
+DENSE_MAPPING="false"
 
 for arg in "$@"; do
     case $arg in
@@ -15,6 +21,9 @@ for arg in "$@"; do
             ;;
         --rate=*)
             RATE="${arg#*=}"
+            ;;
+        --dense)
+            DENSE_MAPPING="true"
             ;;
         rtab|rtabmap)
             SLAM_TYPE="rtab"
@@ -35,7 +44,7 @@ done
 
 if [ -z "$BAG_NAME" ]; then
     echo "=========================================================="
-    echo " 사용법: $0 BAG_NAME [--slam=rtab|orb] [--rate=1.0]"
+    echo " 사용법: $0 BAG_NAME [--slam=rtab|orb] [--rate=1.0] [--dense]"
     echo " 예시  : $0 my_dataset --slam=rtab"
     echo " 예시  : $0 my_dataset --slam=orb"
     echo "=========================================================="
@@ -73,13 +82,25 @@ elif [ "$SLAM_TYPE" == "stella" ] || [ "$SLAM_TYPE" == "stella_rgbd" ]; then
     echo "✅ stella_vslam RGB-D 완료 -> $OUT_TRAJ"
 else
     # RTAB-Map
-    DB_PATH="$DB_DIR/${BAG_NAME}.db"
-    OUT_TRAJ="$TRAJECTORY_DIR/rtab_${BAG_NAME}_trajectory.txt"
+    if [ "$DENSE_MAPPING" = "true" ]; then
+        # Preserve standard outputs for reproducible before/after comparison.
+        DB_PATH="$DB_DIR/${BAG_NAME}_dense.db"
+        OUT_TRAJ="$TRAJECTORY_DIR/rtab_dense_${BAG_NAME}_trajectory.txt"
+    else
+        DB_PATH="$DB_DIR/${BAG_NAME}.db"
+        OUT_TRAJ="$TRAJECTORY_DIR/rtab_${BAG_NAME}_trajectory.txt"
+    fi
     
     echo "▶️ RTAB-Map 백그라운드 시작..."
+    if [ "$DENSE_MAPPING" = "true" ]; then
+        SLAM_LOG="$LOG_DIR/rtab_${BAG_NAME}_dense.log"
+    else
+        SLAM_LOG="$LOG_DIR/rtab_${BAG_NAME}.log"
+    fi
     setsid ros2 launch auto_mobility rtab_bag.launch.py \
         database_path:="$DB_PATH" \
-        use_compressed:=true >/dev/null 2>&1 &
+        dense_mapping:="$DENSE_MAPPING" \
+        use_compressed:=true >"$SLAM_LOG" 2>&1 &
     SLAM_PID=$!
     
     sleep 3
@@ -93,7 +114,11 @@ else
     kill -SIGKILL -- -$SLAM_PID 2>/dev/null || pkill -SIGKILL -f "rtabmap" 2>/dev/null || true
     
     # TUM Trajectory 내보내기
-    python3 -c "from auto_mobility.trajectory.export_trajectory import export_from_db; export_from_db('$DB_PATH', '$OUT_TRAJ')" 2>/dev/null || true
+    python3 -c "from auto_mobility.trajectory.export_trajectory import export_from_db; export_from_db('$DB_PATH', '$OUT_TRAJ')"
+    if [ ! -s "$OUT_TRAJ" ] || [ "$(grep -vc '^#' "$OUT_TRAJ")" -lt 2 ]; then
+        echo "❌ RTAB-Map trajectory export produced fewer than two poses: $OUT_TRAJ" >&2
+        exit 1
+    fi
     
     echo "✅ RTAB-Map 완료 -> DB: $DB_PATH | Trajectory: $OUT_TRAJ"
 fi

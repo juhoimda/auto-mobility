@@ -1,7 +1,7 @@
 import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
@@ -37,6 +37,12 @@ def generate_launch_description():
         'use_imu',
         default_value='true',
         description='Whether to use IMU (requires imu_filter_madgwick to compute orientation)'
+    )
+
+    dense_mapping_arg = DeclareLaunchArgument(
+        'dense_mapping',
+        default_value='false',
+        description='Offline reconstruction profile: preserve an RTAB-Map node for every RGB-D frame'
     )
 
     depth_compressed_topic_arg = DeclareLaunchArgument(
@@ -82,9 +88,27 @@ def generate_launch_description():
             'topic_queue_size': RTAB_BAG_TOPIC_QUEUE_SIZE,
             'use_sim_time': 'true',
             'database_path': LaunchConfiguration('database_path'),
-            'rtabmap_args': RTABMAP_ARGS,
+            # A dense offline pass must not reuse the live-view keyframe policy.
+            # DetectionRate=0 removes the temporal cap, zero updates prevent
+            # motion-threshold suppression, and intermediate nodes retain each
+            # processed RGB-D observation for later pose export.
+            'rtabmap_args': PythonExpression([
+                "'", RTABMAP_ARGS,
+                " --Rtabmap/DetectionRate 0 --Rtabmap/CreateIntermediateNodes true"
+                " --RGBD/LinearUpdate 0 --RGBD/AngularUpdate 0' if '",
+                LaunchConfiguration('dense_mapping'),
+                "' == 'true' else '", RTABMAP_ARGS, "'"
+            ]),
             # Odom/OdomF2M 계열은 rtabmap 메인이 선언하지 않아 크래시 → rgbd_odometry에 odom_args로 전달
-            'odom_args': ODOM_ARGS
+            # A one-frame odometry loss must not start a new map during an
+            # offline dense pass.  ResetCountdown=1 fragmented the test bag
+            # into seven map IDs, leaving rtabmap-export with only 11 poses in
+            # the first connected component.
+            'odom_args': PythonExpression([
+                "'", ODOM_ARGS, " --Odom/ResetCountdown 0' if '",
+                LaunchConfiguration('dense_mapping'),
+                "' == 'true' else '", ODOM_ARGS, "'"
+            ])
         }.items()
     )
 
@@ -94,6 +118,7 @@ def generate_launch_description():
         depth_compressed_topic_arg,
         depth_topic_arg,
         use_imu_arg,
+        dense_mapping_arg,
         camera_tf_pub_node,
         republish_compressed_node,
         imu_filter_node,
@@ -101,4 +126,3 @@ def generate_launch_description():
         point_cloud_node,
         rtabmap_launch
     ])
-

@@ -321,24 +321,24 @@ def reconstruct(
             print(f"☁️ PointCloud 저장: {output_pcd}")
 
         # ── Triangle Mesh 추출 ──
+        # ``tsdf_direct`` must be the TSDF zero-crossing surface.  The previous
+        # implementation silently converted a 3 cm downsampled point cloud with
+        # Poisson(depth=8), which discarded the requested voxel resolution and
+        # produced a closed, inflated surface.  Poisson is available explicitly
+        # through mesh_open3d.py; it is not a valid fallback for direct TSDF.
         print("  • Triangle Mesh 추출 중...")
         mesh = o3d.geometry.TriangleMesh()
         if output_mesh:
             try:
-                if len(pcd.points) > 0:
-                    pcd_down = pcd.voxel_down_sample(voxel_size=max(voxel_size, 0.03))
-                    pcd_down.estimate_normals(
-                        o3d.geometry.KDTreeSearchParamHybrid(radius=max(voxel_size * 4, 0.08), max_nn=20),
-                        fast_normal_computation=True
-                    )
-                    mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd_down, depth=8)
-                    if len(mesh.vertices) > 0 and len(mesh.triangles) > 0:
-                        mesh.remove_degenerate_triangles()
-                        mesh.remove_duplicated_triangles()
-                        mesh.remove_duplicated_vertices()
-                        mesh.remove_non_manifold_edges()
+                mesh_t = vbg_cpu.extract_triangle_mesh(weight_threshold=weight_thr)
+                mesh = mesh_t.to_legacy()
+                if len(mesh.vertices) > 0 and len(mesh.triangles) > 0:
+                    mesh.remove_degenerate_triangles()
+                    mesh.remove_duplicated_triangles()
+                    mesh.remove_duplicated_vertices()
+                    mesh.remove_non_manifold_edges()
             except Exception as e:
-                print(f"  ⚠️ Mesh 생성 실패: {e}")
+                raise RuntimeError(f"TSDF direct mesh extraction failed: {e}") from e
 
             print(f"🔺 Mesh 결과: {len(mesh.vertices):,} vertices / {len(mesh.triangles):,} triangles")
             print(f"☁️ PointCloud 결과: {len(pcd.points):,} points")
