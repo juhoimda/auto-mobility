@@ -74,7 +74,17 @@ def run_orbslam3_on_bag(bag_input: str, out_trajectory: str = None, mode: str = 
         "-p", f"sensor_mode:={sensor_mode_arg}",
         "-p", "use_sim_time:=true"
     ]
-    orbslam_proc = subprocess.Popen(orbslam_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, preexec_fn=os.setsid)
+    log_dir = PROJECT_DIR / "ros2_data" / "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    orbslam_log_path = log_dir / f"orbslam3_{bag_name}.log"
+    orbslam_log_file = open(orbslam_log_path, "w")
+
+    orbslam_proc = subprocess.Popen(
+        orbslam_cmd,
+        stdout=orbslam_log_file,
+        stderr=subprocess.STDOUT,
+        preexec_fn=os.setsid
+    )
 
     time.sleep(4.0)  # Wait for vocabulary to load into memory
 
@@ -98,6 +108,11 @@ def run_orbslam3_on_bag(bag_input: str, out_trajectory: str = None, mode: str = 
 
     try:
         os.killpg(os.getpgid(republish_proc.pid), signal.SIGINT)
+    except Exception:
+        pass
+
+    try:
+        orbslam_log_file.close()
     except Exception:
         pass
 

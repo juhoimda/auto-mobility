@@ -8,7 +8,9 @@
       → 상대 타이밍(프레임 간격)이 캡처 시점 그대로 보존되고, RTAB-Map 에 입력되는
         stamp 의 clock domain 은 WSL 로 정렬된다 (TF lookup 안전).
     - offset 은 수신 시각과 원본 stamp 의 차이의 롤링 중앙값으로 추정 (네트워크 지터 강건).
-    - sim_time(오프라인 bag 재생) 모드에서는 /clock 기반 재생성 (기존 동작 유지).
+    - sim_time(오프라인 bag 재생) 모드에서는 /clock 기반 stamp 를 사용한다.
+      (bag 재생 시 /clock 이 bag 원본 stamp 와 동일 clock domain 이므로,
+        IMU 는 bag 원본 stamp 유지 + 이미지는 /clock stamp 로 단조 증가하게 정렬된다.
   - CameraInfo: Windows 전용 토픽(/camera/camera/color/camera_info_windows) 구독 → 표준
     토픽(/camera/camera/color/camera_info)으로 재발행 (피드백 루프 없음).
   - 수신 카메라 정보가 없는 동안 기본 intrinsics 를 사용하되 명시적 WARNING 을 반복 출력.
@@ -148,7 +150,7 @@ class CompressedRepublisher(Node):
         self.get_logger().info(f'Depth: {depth_comp} -> {depth_out}')
         self.get_logger().info(
             f'Info:  {info_in} (Win) -> {info_out} | '
-            f'timestamp: {"pass-through+offset" if not self.use_sim_time else "sim_time 재생성"}'
+            f'timestamp: {"pass-through+offset" if not self.use_sim_time else "/clock 기반"}'
         )
 
         # ── TF Static Broadcaster (camera_tf_pub.py가 전담하므로 기본 비활성화) ──
@@ -281,7 +283,10 @@ class CompressedRepublisher(Node):
                 return
 
             if self.use_sim_time:
-                rgb_stamp = self.get_clock().now().to_msg()
+                if src is not None and src > 0:
+                    rgb_stamp = _sec_to_stamp(self._rgb_stamper.next(src))
+                else:
+                    rgb_stamp = self.get_clock().now().to_msg()
             else:
                 rgb_stamp = _sec_to_stamp(self._out_stamp(src, self._rgb_stamper))
 
@@ -317,7 +322,10 @@ class CompressedRepublisher(Node):
                 return
 
             if self.use_sim_time:
-                depth_stamp = self.get_clock().now().to_msg()
+                if src is not None and src > 0:
+                    depth_stamp = _sec_to_stamp(self._depth_stamper.next(src))
+                else:
+                    depth_stamp = self.get_clock().now().to_msg()
             else:
                 depth_stamp = _sec_to_stamp(self._out_stamp(src, self._depth_stamper))
 

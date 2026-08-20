@@ -9,6 +9,8 @@
 #include <algorithm>
 
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/callback_group.hpp>
+#include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/imu.hpp>
@@ -74,10 +76,21 @@ public:
 
         if (is_inertial_)
         {
+            // IMU is 200Hz and the single-threaded executor is blocked while
+            // TrackRGBD() runs, so a small best-effort queue (depth 5) silently
+            // drops most IMU samples -> ORB-SLAM3 inertial preintegration fails
+            // and crashes on null pointers. Use a deep RELIABLE queue instead
+            // (bag records IMU as RELIABLE/depth 50; rclcpp::QoS default is
+            // RELIABLE + KEEP_LAST).
+            rclcpp::QoS imu_qos(2000);
+            rclcpp::SubscriptionOptions sub_opts;
+            imu_cg_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+            sub_opts.callback_group = imu_cg_;
             imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
                 imu_topic,
-                rclcpp::SensorDataQoS(),
-                std::bind(&OrbSlam3RgbdNode::imuCallback, this, std::placeholders::_1));
+                imu_qos,
+                std::bind(&OrbSlam3RgbdNode::imuCallback, this, std::placeholders::_1),
+                sub_opts);
             RCLCPP_INFO(this->get_logger(), "Subscribed to IMU (%s)", imu_topic.c_str());
         }
 
@@ -162,6 +175,18 @@ private:
             timestamp = this->now().seconds();
         }
 
+        // Republish delivers RGB/DEPTH in two independent streams, so the
+        // synchronized pairs can occasionally carry a non-monotonic (backwards)
+        // timestamp. ORB-SLAM3 treats a backwards timestamp as "timestamp older
+        // than previous frame detected!" and resets/creates new maps, which in
+        // IMU mode races between Tracking and LocalMapping and crashes on a
+        // dangling mutex. Drop out-of-order frames instead.
+        if (timestamp <= last_frame_ts_)
+        {
+            return;
+        }
+        last_frame_ts_ = timestamp;
+
         std::vector<ORB_SLAM3::IMU::Point> vImuMeas;
         if (is_inertial_)
         {
@@ -172,9 +197,12 @@ private:
                 imu_buf_.pop_front();
             }
             frame_count_++;
-            if (vImuMeas.empty() && frame_count_ % 30 == 1 && total_imu_msgs_ == 0)
+            if (frame_count_ % 30 == 0)
             {
-                RCLCPP_WARN(this->get_logger(), "[orb_rgbdi] No IMU data received yet! Verify IMU topic is publishing.");
+                double last_imu_t = imu_buf_.empty() ? 0.0 : imu_buf_.back().t;
+                RCLCPP_INFO(this->get_logger(),
+                    "[diag] fr=%zu rgb_t=%.6f imu_for_frame=%zu imu_buf=%zu imu_total=%zu",
+                    frame_count_, timestamp, vImuMeas.size(), imu_buf_.size(), total_imu_msgs_);
             }
         }
 
@@ -209,6 +237,7 @@ private:
     std::shared_ptr<message_filters::Synchronizer<SyncPolicy>> sync_;
 
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
+    rclcpp::CallbackGroup::SharedPtr imu_cg_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
     std::unique_ptr<ORB_SLAM3::System> slam_system_;
     std::string output_trajectory_;
@@ -219,13 +248,17 @@ private:
     std::deque<ORB_SLAM3::IMU::Point> imu_buf_;
     size_t total_imu_msgs_{0};
     size_t frame_count_{0};
+    double last_frame_ts_{0.0};
 };
 
 int main(int argc, char** argv)
 {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<OrbSlam3RgbdNode>();
-    rclcpp::spin(node);
+    rclcpp::executors::MultiThreadedExecutor executor(
+        rclcpp::ExecutorOptions(), 2);
+    executor.add_node(node);
+    executor.spin();
     rclcpp::shutdown();
     return 0;
 }

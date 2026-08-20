@@ -21,6 +21,9 @@ cmake-build-*/
 CMakeCache.txt
 CMakeFiles/
 third_party/ORB_SLAM3/
+third_party/FBoW/
+third_party/stella_vslam/
+third_party/installed/
 
 
 # ROS / ROS2 build, data and log artifacts

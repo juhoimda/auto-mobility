@@ -46,10 +46,14 @@ install(
     src/auto_mobility/nodes/camera_tf_pub.py
     src/auto_mobility/mesh/mesh_open3d.py
     src/auto_mobility/mesh/reconstruct_tsdf.py
+    src/auto_mobility/mesh/worker.py
+    src/auto_mobility/mesh/worker_surface.py
     src/auto_mobility/mesh/view_mesh.py
     src/auto_mobility/mesh/view_pointcloud.py
     src/auto_mobility/isaac/load_isaac_mesh.py
     src/auto_mobility/slam/benchmark_slam.py
+    src/auto_mobility/slam/compare_algorithms.py
+    src/auto_mobility/benchmark/cli.py
     src/auto_mobility/utils/benchmark_hw.py
     src/auto_mobility/utils/inspect_system.py
     src/auto_mobility/utils/validate.py
@@ -109,6 +113,35 @@ if(EXISTS "${ORB_SLAM3_DIR}/lib/libORB_SLAM3.so")
     message_filters
   )
   install(TARGETS orbslam3_rgbd_node DESTINATION lib/${PROJECT_NAME})
+endif()
+
+set(STELLA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/installed)
+if(EXISTS "${STELLA_DIR}/lib/libstella_vslam.so")
+  add_executable(stella_rgbd_node src/auto_mobility/slam/stella_rgbd_node.cpp)
+  target_compile_features(stella_rgbd_node PRIVATE cxx_std_17)
+  target_include_directories(stella_rgbd_node PRIVATE
+    ${STELLA_DIR}/include
+    ${OpenCV_INCLUDE_DIRS}
+    ${EIGEN3_INCLUDE_DIR}
+  )
+  target_link_directories(stella_rgbd_node PRIVATE
+    ${STELLA_DIR}/lib
+  )
+  target_link_libraries(stella_rgbd_node
+    stella_vslam
+    fbow
+    pthread
+    ${OpenCV_LIBS}
+  )
+  ament_target_dependencies(stella_rgbd_node
+    rclcpp
+    sensor_msgs
+    geometry_msgs
+    nav_msgs
+    cv_bridge
+    message_filters
+  )
+  install(TARGETS stella_rgbd_node DESTINATION lib/${PROJECT_NAME})
 endif()
 
 ament_package()

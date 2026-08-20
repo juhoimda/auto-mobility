@@ -1,24 +1,17 @@
 #!/usr/bin/env python3
 """
-run_stella_bag.py — stella_vslam RGB-D SLAM 실행 및 TUM Trajectory 변환 어댑터
-
-기능:
-  1. CameraInfo / Canonical Dataset 기반 stella_vslam 호환 YAML 설정 파일 자동 생성
-  2. stella_vslam 프로세스 실행 (stella_vslam / run_slam / stella_vslam_ros)
-  3. stella_vslam 궤적 결과(Keyframe / Frame 궤적)를 표준 TUM format으로 변환
-  4. 프로세스 반환 코드 및 환경 미설치 시 명확한 에러 핸들링
+run_stella_bag.py — rosbag 재생을 통해 stella_vslam RGB-D를 실행하고 TUM Trajectory를 추출하는 도구
 """
 
 import os
 import sys
 import time
 import yaml
-import shutil
+import signal
 import argparse
 import subprocess
 from pathlib import Path
-from typing import Optional, Dict, Any
-import numpy as np
+from typing import Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from auto_mobility.config import BAG_DIR, TRAJECTORY_DIR, PROJECT_DIR, FRAME_DIR
@@ -46,11 +39,11 @@ def generate_stella_config(
             "name": "RealSense D435i RGB-D",
             "setup": "RGBD",
             "model": "perspective",
-            "color_order": "RGB",
+            "color_order": "BGR",
             "cols": width,
             "rows": height,
             "fps": fps,
-            "focal_x_baseline": fx * 0.05,  # virtual stereo baseline
+            "focal_x_baseline": fx * 0.05,
             "fx": fx,
             "fy": fy,
             "cx": cx,
@@ -79,7 +72,7 @@ def generate_stella_config(
     }
 
     if output_path is None:
-        output_path = "/tmp/stella_vslam_d435i.yaml"
+        output_path = str(PROJECT_DIR / "config" / "stella_vslam_d435i.yaml")
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
@@ -88,47 +81,7 @@ def generate_stella_config(
     return output_path
 
 
-def convert_stella_trajectory_to_tum(stella_traj_file: str, tum_out_file: str) -> str:
-    """stella_vslam 출력 궤적 파일(timestamp x y z qx qy qz qw 또는 4x4 matrix)을 표준 TUM 형식으로 변환."""
-    if not os.path.exists(stella_traj_file) or os.path.getsize(stella_traj_file) == 0:
-        raise FileNotFoundError(f"stella_vslam trajectory file not found or empty: {stella_traj_file}")
-
-    lines_out = []
-    with open(stella_traj_file, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split()
-            if len(parts) >= 8:
-                # Format: timestamp tx ty tz qx qy qz qw
-                ts = float(parts[0])
-                tx, ty, tz = float(parts[1]), float(parts[2]), float(parts[3])
-                qx, qy, qz, qw = float(parts[4]), float(parts[5]), float(parts[6]), float(parts[7])
-                lines_out.append(f"{ts:.6f} {tx:.6f} {ty:.6f} {tz:.6f} {qx:.6f} {qy:.6f} {qz:.6f} {qw:.6f}\n")
-            elif len(parts) == 12 or len(parts) == 16:
-                # 3x4 or 4x4 matrix row format: timestamp r00 r01 ...
-                ts = float(parts[0])
-                m_vals = [float(p) for p in parts[1:13]]
-                from scipy.spatial.transform import Rotation
-                R_mat = np.array([
-                    [m_vals[0], m_vals[1], m_vals[2]],
-                    [m_vals[4], m_vals[5], m_vals[6]],
-                    [m_vals[8], m_vals[9], m_vals[10]]
-                ])
-                tx, ty, tz = m_vals[3], m_vals[7], m_vals[11]
-                q = Rotation.from_matrix(R_mat).as_quat() # x, y, z, w
-                lines_out.append(f"{ts:.6f} {tx:.6f} {ty:.6f} {tz:.6f} {q[0]:.6f} {q[1]:.6f} {q[2]:.6f} {q[3]:.6f}\n")
-
-    os.makedirs(os.path.dirname(os.path.abspath(tum_out_file)), exist_ok=True)
-    with open(tum_out_file, "w", encoding="utf-8") as f:
-        f.writelines(lines_out)
-
-    return tum_out_file
-
-
 def run_stella_vslam_on_bag(bag_input: str, out_trajectory: Optional[str] = None) -> str:
-    """stella_vslam을 실행하고 표준 TUM trajectory를 생성한다."""
     bag_path = Path(bag_input)
     if not bag_path.is_absolute():
         if (BAG_DIR / bag_input).exists():
@@ -142,24 +95,9 @@ def run_stella_vslam_on_bag(bag_input: str, out_trajectory: Optional[str] = None
     out_trajectory = os.path.abspath(out_trajectory)
     os.makedirs(os.path.dirname(out_trajectory), exist_ok=True)
 
-    # Check for executable
-    stella_exec = shutil.which("stella_vslam") or shutil.which("run_slam")
-    if stella_exec is None:
-        candidate_paths = [
-            PROJECT_DIR / "third_party" / "stella_vslam" / "build" / "run_slam",
-            PROJECT_DIR / "third_party" / "installed" / "bin" / "run_slam",
-            Path("/usr/local/bin/run_slam"),
-        ]
-        for c in candidate_paths:
-            if c.exists() and os.access(str(c), os.X_OK):
-                stella_exec = str(c)
-                break
-
-    if stella_exec is None:
-        raise RuntimeError(
-            "stella_vslam executable not found in system PATH or third_party. "
-            "Please build stella_vslam in third_party/stella_vslam or install via official repo."
-        )
+    vocab_path = str(PROJECT_DIR / "third_party" / "stella_vslam" / "vocab" / "orb_vocab.fbow")
+    if not os.path.exists(vocab_path):
+        raise FileNotFoundError(f"stella_vslam vocabulary not found at {vocab_path}")
 
     # Generate config
     dataset_path = FRAME_DIR / bag_name
@@ -168,28 +106,88 @@ def run_stella_vslam_on_bag(bag_input: str, out_trajectory: Optional[str] = None
         ds = FrameDataset(dataset_path)
         intrinsics = ds.intrinsics
 
-    config_file = str(PROJECT_DIR / "config" / "stella_vslam_d435i.yaml")
-    generate_stella_config(intrinsics=intrinsics, output_path=config_file)
+    config_path = str(PROJECT_DIR / "config" / "stella_vslam_d435i.yaml")
+    generate_stella_config(intrinsics=intrinsics, output_path=config_path)
 
-    raw_traj_out = f"/tmp/stella_{bag_name}_raw_traj.txt"
-    cmd = [
-        stella_exec,
-        "-c", config_file,
-        "--eval-log-dir", "/tmp",
+    node_exe = str(PROJECT_DIR / "install" / "auto_mobility" / "lib" / "auto_mobility" / "stella_rgbd_node")
+    if not os.path.exists(node_exe):
+        node_exe = str(PROJECT_DIR / "build" / "auto_mobility" / "stella_rgbd_node")
+    if not os.path.exists(node_exe):
+        raise FileNotFoundError("stella_rgbd_node not found. Run colcon build first.")
+
+    print("==========================================================")
+    print(f" 🚀 Running stella_vslam (RGB-D) on Bag: {bag_name}")
+    print(f" 📦 Source Bag: {bag_path}")
+    print(f" 📑 Output Trajectory: {out_trajectory}")
+    print("==========================================================")
+
+    # 1. Start republish.py (decompress compressedDepth and compressed RGB)
+    republish_cmd = [
+        sys.executable,
+        str(PROJECT_DIR / "src" / "auto_mobility" / "nodes" / "republish.py"),
         "--ros-args", "-p", "use_sim_time:=true"
     ]
+    republish_proc = subprocess.Popen(republish_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=os.setsid)
 
-    print(f"🚀 Running stella_vslam on {bag_name}...")
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
-        raise RuntimeError(f"stella_vslam failed with exit code {res.returncode}:\n{res.stderr}\n{res.stdout}")
+    # 2. Start stella_rgbd_node
+    stella_cmd = [
+        node_exe,
+        "--ros-args",
+        "-p", f"vocab_path:={vocab_path}",
+        "-p", f"config_path:={config_path}",
+        "-p", f"output_trajectory:={out_trajectory}",
+        "-p", "use_sim_time:=true"
+    ]
+    log_dir = PROJECT_DIR / "ros2_data" / "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    stella_log_path = log_dir / f"stella_{bag_name}.log"
+    stella_log_file = open(stella_log_path, "w")
 
-    if os.path.exists(raw_traj_out):
-        convert_stella_trajectory_to_tum(raw_traj_out, out_trajectory)
+    stella_proc = subprocess.Popen(
+        stella_cmd,
+        stdout=stella_log_file,
+        stderr=subprocess.STDOUT,
+        preexec_fn=os.setsid
+    )
+
+    time.sleep(3.0)  # Wait for vocabulary to load into memory
+
+    # 3. Play bag with --clock
+    print("▶️ [Step 2] Playing rosbag with /clock...")
+    play_cmd = ["ros2", "bag", "play", str(bag_path), "--clock", "--rate", "1.0"]
+    play_res = subprocess.run(play_cmd)
+
+    print("▶️ [Step 3] Finalizing stella_vslam and saving trajectory...")
+    time.sleep(3.0)
+
+    # Gracefully terminate stella node with SIGINT to trigger destructor
+    try:
+        os.killpg(os.getpgid(stella_proc.pid), signal.SIGINT)
+        stella_proc.wait(timeout=10)
+    except Exception:
+        try:
+            os.killpg(os.getpgid(stella_proc.pid), signal.SIGKILL)
+        except Exception:
+            pass
+
+    try:
+        os.killpg(os.getpgid(republish_proc.pid), signal.SIGINT)
+    except Exception:
+        pass
+
+    try:
+        stella_log_file.close()
+    except Exception:
+        pass
+
+    if os.path.exists(out_trajectory) and os.path.getsize(out_trajectory) > 0:
+        traj = Trajectory.from_tum_file(out_trajectory)
+        metrics = traj.compute_metrics()
+        print(f"✅ stella_vslam Trajectory generated successfully!")
+        print(f"📊 Frames: {metrics.get('num_frames', 0)}, Length: {metrics.get('total_path_length_m', 0):.4f}m, MaxStep: {metrics.get('max_step_m', 0):.4f}m")
+        return out_trajectory
     else:
-        raise RuntimeError(f"stella_vslam trajectory output missing at {raw_traj_out}")
-
-    return out_trajectory
+        raise RuntimeError(f"Failed to generate stella_vslam trajectory file at {out_trajectory}")
 
 
 def main():
