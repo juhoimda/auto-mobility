@@ -109,11 +109,11 @@ def run_tsdf_worker(
         cmd.append("--no-gpu")
 
     worker_env = os.environ.copy()
-    worker_env.setdefault("OMP_NUM_THREADS", "4")
-    worker_env.setdefault("OPENBLAS_NUM_THREADS", "4")
-    worker_env.setdefault("MKL_NUM_THREADS", "4")
-    worker_env.setdefault("NUMEXPR_NUM_THREADS", "4")
-    worker_env.setdefault("VECLIB_MAXIMUM_THREADS", "4")
+    worker_env.setdefault("OMP_NUM_THREADS", "8")
+    worker_env.setdefault("OPENBLAS_NUM_THREADS", "8")
+    worker_env.setdefault("MKL_NUM_THREADS", "8")
+    worker_env.setdefault("NUMEXPR_NUM_THREADS", "8")
+    worker_env.setdefault("VECLIB_MAXIMUM_THREADS", "8")
     if "LD_LIBRARY_PATH" in worker_env:
         cleaned_ld = [p for p in worker_env["LD_LIBRARY_PATH"].split(":") if "/opt/ros" not in p and p]
         if cleaned_ld:
@@ -209,11 +209,11 @@ def run_surface_worker(
         cmd.append("--no-simplify")
 
     worker_env = os.environ.copy()
-    worker_env.setdefault("OMP_NUM_THREADS", "4")
-    worker_env.setdefault("OPENBLAS_NUM_THREADS", "4")
-    worker_env.setdefault("MKL_NUM_THREADS", "4")
-    worker_env.setdefault("NUMEXPR_NUM_THREADS", "4")
-    worker_env.setdefault("VECLIB_MAXIMUM_THREADS", "4")
+    worker_env.setdefault("OMP_NUM_THREADS", "8")
+    worker_env.setdefault("OPENBLAS_NUM_THREADS", "8")
+    worker_env.setdefault("MKL_NUM_THREADS", "8")
+    worker_env.setdefault("NUMEXPR_NUM_THREADS", "8")
+    worker_env.setdefault("VECLIB_MAXIMUM_THREADS", "8")
     if "LD_LIBRARY_PATH" in worker_env:
         cleaned_ld = [p for p in worker_env["LD_LIBRARY_PATH"].split(":") if "/opt/ros" not in p and p]
         if cleaned_ld:

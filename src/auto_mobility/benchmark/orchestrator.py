@@ -277,7 +277,9 @@ class BenchmarkOrchestrator:
 
         # ── PHASE A ──
         if self.phase in ("all", "a", "slam"):
-            slam_eval_results, best_slam, best_traj = search_engine.run_phase_a(trajectories, traj_metrics)
+            slam_eval_results, best_slam, best_traj = search_engine.run_phase_a(
+                trajectories, traj_metrics, pose_diagnostics=pose_diagnostics
+            )
         else:
             if slam_eval_results:
                 from auto_mobility.benchmark.scoring import rank_candidate_summaries

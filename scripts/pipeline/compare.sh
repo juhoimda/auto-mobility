@@ -34,12 +34,12 @@ _extract_frames_with_ros() {
     ' _ "$ros_setup" "$PROJECT_DIR" "$bag_input"
 }
 
-# HW 과부하 및 WSL2 셧다운/연결 끊김 방지를 위한 CPU 멀티스레드 상한 제한 (기본 4코어)
-export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
-export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-4}"
-export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
-export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-4}"
-export VECLIB_MAXIMUM_THREADS="${VECLIB_MAXIMUM_THREADS:-4}"
+# HW 과부하 및 WSL2 셧다운/발열 스로틀링 방지를 위한 CPU 멀티스레드 상한 제한 (16코어 중 8코어 점유 권장)
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-8}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-8}"
+export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-8}"
+export VECLIB_MAXIMUM_THREADS="${VECLIB_MAXIMUM_THREADS:-8}"
 _sanitize_path() {
     local var="$1" out=""
     local _oldifs="$IFS"

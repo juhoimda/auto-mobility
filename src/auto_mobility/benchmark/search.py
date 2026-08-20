@@ -91,7 +91,8 @@ class SearchEngine:
     def run_phase_a(
         self,
         trajectories: Dict[str, str],
-        traj_metrics: Dict[str, dict]
+        traj_metrics: Dict[str, dict],
+        pose_diagnostics: Optional[Dict[str, dict]] = None
     ) -> Tuple[List[dict], str, str]:
         """Runs Phase A SLAM comparison and returns (results, best_slam_name, best_slam_traj)."""
         print("\n==========================================================")
@@ -107,6 +108,20 @@ class SearchEngine:
             pcd_out = self.artifact_mgr.get_pcd_path(slam_k, 10)
             eval_dir = self.artifact_mgr.get_candidate_eval_dir(cand_name)
 
+            # 1. Fast Pose Preflight Gate:
+            # Skip heavy TSDF reconstruction for severely broken trajectories (coverage < 30%) when alternatives exist
+            if pose_diagnostics and slam_k in pose_diagnostics and len(trajectories) > 1:
+                diag = pose_diagnostics[slam_k]
+                cov = diag.get("pose_coverage_ratio", 1.0)
+                if diag.get("status") == "FAIL" and cov < 0.30:
+                    print(f"⚠️ [Phase A Preflight] {slam_k} 포즈 커버리지 극히 불량 ({cov*100:.1f}% < 30%) → 무거운 TSDF 연산 생략 (시간 단축)")
+                    self._log_decision("Phase A (SLAM)", cand_name, "PRUNED_POSE", f"Low pose coverage ({cov*100:.1f}%) in preflight")
+                    self.stats["pruned_count"] += 1
+                    fail_rec = self._fail_summary(cand_name, f"Pose coverage too low ({cov*100:.1f}%)", status="FAIL_ALIGNMENT")
+                    fail_rec["trajectory_metrics"] = traj_metrics.get(slam_k, {})
+                    slam_eval_results.append(fail_rec)
+                    continue
+
             cached_summary = self.artifact_mgr.should_reuse_evaluation(cand_name, self.force)
             if cached_summary:
                 print(f"⏭️ Evaluation 재사용: {cand_name}")
@@ -121,7 +136,7 @@ class SearchEngine:
                 print(f"⏭️ Mesh & PCD 재사용: {mesh_out.name}")
                 self._log_decision("Phase A (SLAM)", cand_name, "REUSED_MESH", "Reused existing valid mesh/pcd artifact")
             else:
-                stride = max(1, len(self.dataset) // 1500) if not self.quick else max(2, len(self.dataset) // 500)
+                stride = max(3, len(self.dataset) // 300) if self.quick else (max(2, len(self.dataset) // 1000) if self.mode != "full" else max(1, len(self.dataset) // 2000))
                 w_res = run_tsdf_worker(
                     dataset_dir=str(self.dataset.dataset_dir),
                     traj_file=traj_file,
@@ -238,7 +253,7 @@ class SearchEngine:
                 print(f"⏭️ Mesh & PCD 재사용: {mesh_out.name}")
                 self._log_decision("Phase B (TSDF)", cand_name, "REUSED_MESH", "Reused existing mesh & PCD files")
             else:
-                stride = max(1, len(self.dataset) // 2000) if not self.quick else max(2, len(self.dataset) // 500)
+                stride = max(3, len(self.dataset) // 300) if self.quick else (max(2, len(self.dataset) // 1000) if self.mode != "full" else max(1, len(self.dataset) // 2000))
                 w_res = run_tsdf_worker(
                     dataset_dir=str(self.dataset.dataset_dir),
                     traj_file=best_traj,
@@ -348,7 +363,7 @@ class SearchEngine:
                     print(f"⏭️ Mesh & PCD 재사용: {mesh_out.name}")
                     self._log_decision("Phase B (TSDF)", cand_name, "REUSED_MESH", "Reused existing 5mm mesh & PCD")
                 else:
-                    stride = max(1, len(self.dataset) // 2000) if not self.quick else max(2, len(self.dataset) // 500)
+                    stride = max(3, len(self.dataset) // 300) if self.quick else (max(2, len(self.dataset) // 1000) if self.mode != "full" else max(1, len(self.dataset) // 2000))
                     w_res = run_tsdf_worker(
                         dataset_dir=str(self.dataset.dataset_dir),
                         traj_file=best_traj,

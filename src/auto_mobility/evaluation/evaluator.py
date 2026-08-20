@@ -142,15 +142,16 @@ def evaluate_reconstruction(
     peak_rss_mb: Optional[float] = None,
     peak_gpu_memory_mb: Optional[float] = None,
     cheap: bool = False,
-    mode: Optional[str] = None
+    mode: Optional[str] = None,
+    max_holdout_samples: Optional[int] = None
 ) -> dict:
     """Reconstruction 결과물에 대해 Held-out Depth Reprojection 및 기하 정밀도 통합 평가 수행.
     
     cheap=True 또는 mode="cheap" 시:
       - holdout frame 부분 샘플링 (최대 12장)
       - 오차 시각화 이미지 디스크 저장 생략 (render_samples=0)
-      - Point-to-Mesh 거리 연산 샘플링 축소 (10k points)
-      - Dominant plane RANSAC 축소
+      - Point-to-Mesh 거리 연산 샘플링 축소 (5k points)
+      - Dominant plane RANSAC 축소 (200회, 2개 평면)
     """
     t_start = time.time()
     cfg = get_evaluation_config()
@@ -236,14 +237,16 @@ def evaluate_reconstruction(
 
     raw_holdout_indices = split_data.get("holdout_indices", [])
     
-    # In cheap mode: sample subset of holdout frames (up to 12 frames)
-    if is_cheap and len(raw_holdout_indices) > 12:
-        step = max(1, len(raw_holdout_indices) // 12)
-        holdout_indices = raw_holdout_indices[::step][:12]
+    # Adaptive Hold-out frame sampling:
+    # cheap screening -> max 12 frames, full fidelity -> max 40 frames (statistically representative, ~99% CLT confidence)
+    max_eval_frames = max_holdout_samples if max_holdout_samples is not None else (12 if is_cheap else 40)
+    if len(raw_holdout_indices) > max_eval_frames:
+        step = max(1, len(raw_holdout_indices) // max_eval_frames)
+        holdout_indices = raw_holdout_indices[::step][:max_eval_frames]
     else:
         holdout_indices = raw_holdout_indices
 
-    print(f"🎯 Hold-out 평가 프레임 수: {len(holdout_indices)}장 (전체 {len(raw_holdout_indices)}장 중 {'샘플링' if is_cheap and len(raw_holdout_indices) > 12 else '전체'})")
+    print(f"🎯 Hold-out 평가 프레임 수: {len(holdout_indices)}장 (전체 {len(raw_holdout_indices)}장 중 {'샘플링' if len(raw_holdout_indices) > len(holdout_indices) else '전체'})")
 
     # 6. Raycasting Depth Reprojection on Hold-out frames
     scene = create_raycasting_scene(mesh)
@@ -321,7 +324,7 @@ def evaluate_reconstruction(
     valid_fs_corr = [m.get("free_space_correctness_ratio", 1.0) for m in frame_metrics_list]
 
     # Point-to-Mesh Distance
-    max_pts = 10000 if is_cheap else 50000
+    max_pts = 5000 if is_cheap else 50000
     if all_world_points:
         combined_pts = np.concatenate(all_world_points, axis=0)
         p2m_metrics = compute_point_to_mesh_metrics(scene, combined_pts, max_sample_points=max_pts)
@@ -348,7 +351,11 @@ def evaluate_reconstruction(
     mesh_summary = compute_mesh_quality_metrics(mesh)
 
     # 8. Dominant Plane Analysis
-    plane_summary = compute_plane_quality_metrics(mesh)
+    plane_summary = compute_plane_quality_metrics(
+        mesh,
+        num_iterations=200 if is_cheap else 1000,
+        max_planes=2 if is_cheap else 5
+    )
 
     # 9. Trajectory Quality
     traj_summary = compute_trajectory_quality(traj)

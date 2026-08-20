@@ -327,7 +327,10 @@ def reconstruct(
             try:
                 if len(pcd.points) > 0:
                     pcd_down = pcd.voxel_down_sample(voxel_size=max(voxel_size, 0.03))
-                    pcd_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=max(voxel_size * 4, 0.08), max_nn=20))
+                    pcd_down.estimate_normals(
+                        o3d.geometry.KDTreeSearchParamHybrid(radius=max(voxel_size * 4, 0.08), max_nn=20),
+                        fast_normal_computation=True
+                    )
                     mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd_down, depth=8)
                     if len(mesh.vertices) > 0 and len(mesh.triangles) > 0:
                         mesh.remove_degenerate_triangles()
