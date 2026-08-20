@@ -84,6 +84,8 @@ def run_tsdf_worker(
     mesh_path: Optional[str] = None,
     pcd_path: Optional[str] = None,
     voxel: float = 0.010,
+    depth_max: float = 3.0,
+    trunc_mult: float = 4.0,
     split_file: Optional[str] = None,
     stride: int = 1,
     quick: bool = False,
@@ -97,6 +99,8 @@ def run_tsdf_worker(
         f"--dataset={dataset_dir}",
         f"--trajectory={traj_file}",
         f"--voxel={voxel}",
+        f"--depth-max={depth_max}",
+        f"--trunc-mult={trunc_mult}",
         f"--stride={stride}",
     ]
     if mesh_path:

@@ -367,8 +367,8 @@ class BenchmarkManifestExporter:
                     "method": "Open3D Tensor VoxelBlockGrid TSDF",
                     "voxel_size_m": winner_summary.get("voxel_size_m") or 0.010,
                     "depth_min_m": 0.3,
-                    "depth_max_m": 5.0,
-                    "trunc_mult": 5.0
+                    "depth_max_m": 3.0,
+                    "trunc_mult": 4.0
                 },
                 "surface": {
                     "method": winner_summary.get("surface_method", "tsdf_direct"),

@@ -39,6 +39,8 @@ def main():
     parser.add_argument("--output-mesh", default=None)
     parser.add_argument("--pcd-output", default=None)
     parser.add_argument("--voxel", type=float, default=0.010)
+    parser.add_argument("--depth-max", type=float, default=3.0)
+    parser.add_argument("--trunc-mult", type=float, default=4.0)
     parser.add_argument("--split", default=None, help="shared_holdout_split.json 경로")
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--no-color", action="store_true")
@@ -55,11 +57,13 @@ def main():
 
     dataset = FrameDataset(args.dataset)
 
-    print(f"Worker: reconstruct {args.dataset} voxel={args.voxel}", flush=True)
+    print(f"Worker: reconstruct {args.dataset} voxel={args.voxel} depth_max={args.depth_max} trunc={args.trunc_mult}", flush=True)
     reconstruct(
         dataset=dataset,
         trajectory=args.trajectory,
         voxel_size=args.voxel,
+        depth_max=args.depth_max,
+        trunc_mult=args.trunc_mult,
         output_mesh=args.output_mesh,
         output_pcd=args.pcd_output,
         train_indices=train_indices,

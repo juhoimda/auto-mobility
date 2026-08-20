@@ -52,6 +52,10 @@ class SearchEngine:
 
         self.quick = (self.mode == "quick")
         self.full = (self.mode == "full")
+        # These must match mesh.sh production defaults. Benchmarking different
+        # fusion limits than the final artifact made previous rankings invalid.
+        self.depth_max = 3.0
+        self.trunc_mult = 4.0
 
         # Search trace & execution statistics
         self.decision_trace: List[Dict[str, str]] = []
@@ -84,6 +88,12 @@ class SearchEngine:
             "trajectory_metrics": {},
             "runtime_sec": None,
         }
+
+    def _stride(self) -> int:
+        """Full mode is fidelity mode: integrate every train frame."""
+        if self.mode == "full":
+            return 1
+        return max(3, len(self.dataset) // 300) if self.quick else max(2, len(self.dataset) // 1000)
 
     # ───────────────────────────────────────────────────────────
     # PHASE A: SLAM Backend Comparison (Fixed 10mm TSDF)
@@ -136,13 +146,15 @@ class SearchEngine:
                 print(f"⏭️ Mesh & PCD 재사용: {mesh_out.name}")
                 self._log_decision("Phase A (SLAM)", cand_name, "REUSED_MESH", "Reused existing valid mesh/pcd artifact")
             else:
-                stride = max(3, len(self.dataset) // 300) if self.quick else (max(2, len(self.dataset) // 1000) if self.mode != "full" else max(1, len(self.dataset) // 2000))
+                stride = self._stride()
                 w_res = run_tsdf_worker(
                     dataset_dir=str(self.dataset.dataset_dir),
                     traj_file=traj_file,
                     mesh_path=str(mesh_out),
                     pcd_path=str(pcd_out),
                     voxel=0.010,
+                    depth_max=self.depth_max,
+                    trunc_mult=self.trunc_mult,
                     stride=stride,
                     split_file=str(self.split_file),
                     quick=self.quick
@@ -214,7 +226,9 @@ class SearchEngine:
         cand_10mm_name = f"{best_slam}_voxel10mm"
 
         # 1. Evaluate baseline 10mm & coarse 20mm
-        base_voxels = [0.020, 0.010]
+        # Full fidelity includes the production 8 mm setting. Standard mode
+        # remains a cheap 20/10 mm screen, then full mode resolves the winner.
+        base_voxels = [0.020, 0.010] + ([0.008] if self.full else [])
 
         for v in base_voxels:
             v_mm = int(round(v * 1000))
@@ -253,13 +267,15 @@ class SearchEngine:
                 print(f"⏭️ Mesh & PCD 재사용: {mesh_out.name}")
                 self._log_decision("Phase B (TSDF)", cand_name, "REUSED_MESH", "Reused existing mesh & PCD files")
             else:
-                stride = max(3, len(self.dataset) // 300) if self.quick else (max(2, len(self.dataset) // 1000) if self.mode != "full" else max(1, len(self.dataset) // 2000))
+                stride = self._stride()
                 w_res = run_tsdf_worker(
                     dataset_dir=str(self.dataset.dataset_dir),
                     traj_file=best_traj,
                     mesh_path=str(mesh_out),
                     pcd_path=str(pcd_out),
                     voxel=v,
+                    depth_max=self.depth_max,
+                    trunc_mult=self.trunc_mult,
                     stride=stride,
                     split_file=str(self.split_file),
                     quick=self.quick
@@ -363,13 +379,15 @@ class SearchEngine:
                     print(f"⏭️ Mesh & PCD 재사용: {mesh_out.name}")
                     self._log_decision("Phase B (TSDF)", cand_name, "REUSED_MESH", "Reused existing 5mm mesh & PCD")
                 else:
-                    stride = max(3, len(self.dataset) // 300) if self.quick else (max(2, len(self.dataset) // 1000) if self.mode != "full" else max(1, len(self.dataset) // 2000))
+                    stride = self._stride()
                     w_res = run_tsdf_worker(
                         dataset_dir=str(self.dataset.dataset_dir),
                         traj_file=best_traj,
                         mesh_path=str(mesh_out),
                         pcd_path=str(pcd_out),
                         voxel=v,
+                        depth_max=self.depth_max,
+                        trunc_mult=self.trunc_mult,
                         stride=stride,
                         split_file=str(self.split_file),
                         quick=self.quick
@@ -474,6 +492,9 @@ class SearchEngine:
                 mesh_path=None,
                 pcd_path=str(best_pcd),
                 voxel=best_voxel_m,
+                depth_max=self.depth_max,
+                trunc_mult=self.trunc_mult,
+                stride=self._stride(),
                 split_file=str(self.split_file),
                 quick=self.quick
             )
@@ -530,6 +551,9 @@ class SearchEngine:
                         mesh_path=str(mesh_out),
                         pcd_path=None,
                         voxel=best_voxel_m,
+                        depth_max=self.depth_max,
+                        trunc_mult=self.trunc_mult,
+                        stride=self._stride(),
                         split_file=str(self.split_file),
                         quick=self.quick
                     )

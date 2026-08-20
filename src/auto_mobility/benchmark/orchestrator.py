@@ -41,11 +41,30 @@ SLAM_TRAJ_FILES = {
     "stella_rgbd": lambda n: TRAJECTORY_DIR / f"stella_{n}_trajectory.txt",
 }
 
+
+def _trajectory_candidates(key: str, bag_name: str) -> List[Path]:
+    """Return accepted trajectory artifacts in preference order.
+
+    Dense RTAB is the offline benchmark profile.  ``run_slam.sh --dense``
+    writes a distinct filename so that a live/legacy RTAB result cannot
+    silently replace it; accept the legacy name only as a compatibility
+    fallback for already migrated datasets.
+    """
+    if key == "rtab_rgbd":
+        return [
+            TRAJECTORY_DIR / f"rtab_dense_{bag_name}_trajectory.txt",
+            SLAM_TRAJ_FILES[key](bag_name),
+        ]
+    return [SLAM_TRAJ_FILES[key](bag_name)]
+
 SLAM_RUN_ARGS = {
-    "rtab_rgbd": "rtab",
-    "orb_rgbd": "orb_rgbd",
-    "orb_rgbdi": "orb_rgbdi",
-    "stella_rgbd": "stella_rgbd",
+    # The benchmark's RTAB candidate is the offline dense profile.  This is
+    # deliberately distinct from the live-view profile: a reconstruction
+    # benchmark needs continuous poses, not sparse map visualization nodes.
+    "rtab_rgbd": ("--slam=rtab", "--dense", "--rate=0.5"),
+    "orb_rgbd": ("--slam=orb_rgbd",),
+    "orb_rgbdi": ("--slam=orb_rgbdi",),
+    "stella_rgbd": ("--slam=stella_rgbd",),
 }
 
 
@@ -111,7 +130,8 @@ class BenchmarkOrchestrator:
         traj_metrics: Dict[str, dict] = {}
 
         for key, path_fn in SLAM_TRAJ_FILES.items():
-            traj_file = path_fn(self.bag_name)
+            traj_candidates = _trajectory_candidates(key, self.bag_name)
+            traj_file = next((p for p in traj_candidates if p.exists() and p.stat().st_size > 0), traj_candidates[0])
 
             if traj_file.exists() and traj_file.stat().st_size > 0:
                 print(f"📍 궤적 재사용: {traj_file.name}")
@@ -138,17 +158,18 @@ class BenchmarkOrchestrator:
                         print(f"⚠️ RTAB-Map 궤적 추출 실패: {e}")
 
             if self.run_slam:
-                print(f"⚙️ SLAM 실행 (--run-slam): {key} → run_slam.sh --slam={SLAM_RUN_ARGS[key]}")
+                print(f"⚙️ SLAM 실행 (--run-slam): {key} → run_slam.sh {' '.join(SLAM_RUN_ARGS[key])}")
                 script = PROJECT_DIR / "scripts" / "pipeline" / "run_slam.sh"
-                subprocess.run(["bash", str(script), self.bag_name, f"--slam={SLAM_RUN_ARGS[key]}"], check=False)
-                if traj_file.exists() and traj_file.stat().st_size > 0:
-                    trajectories[key] = str(traj_file)
-                    traj_metrics[key] = Trajectory.from_tum_file(str(traj_file)).compute_metrics()
+                subprocess.run(["bash", str(script), self.bag_name, *SLAM_RUN_ARGS[key]], check=False)
+                generated = next((p for p in traj_candidates if p.exists() and p.stat().st_size > 0), None)
+                if generated:
+                    trajectories[key] = str(generated)
+                    traj_metrics[key] = Trajectory.from_tum_file(str(generated)).compute_metrics()
                     traj_metrics[key]["slam_backend"] = key
                 else:
                     print(f"⚠️ SLAM {key} 실행 실패 → 후보 제외")
             else:
-                print(f"ℹ️ {key} 궤적 없음 (스킵). 생성 명령: ./scripts/pipeline/run_slam.sh {self.bag_name} --slam={SLAM_RUN_ARGS[key]}")
+                print(f"ℹ️ {key} 궤적 없음 (스킵). 생성 명령: ./scripts/pipeline/run_slam.sh {self.bag_name} {' '.join(SLAM_RUN_ARGS[key])}")
 
         return trajectories, traj_metrics
 
