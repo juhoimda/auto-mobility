@@ -19,6 +19,20 @@ from auto_mobility.dataset.frame_dataset import FrameDataset, CameraIntrinsics
 from auto_mobility.trajectory.io import Trajectory
 
 
+def convert_stella_trajectory_to_tum(input_path: str, output_path: str) -> str:
+    """Convert stella_vslam raw output format to standard TUM trajectory format."""
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    with open(input_path, "r", encoding="utf-8") as f_in, open(output_path, "w", encoding="utf-8") as f_out:
+        for line in f_in:
+            line_str = line.strip()
+            if not line_str or line_str.startswith("#"):
+                continue
+            parts = line_str.split()
+            if len(parts) >= 8:
+                f_out.write(f"{float(parts[0]):.6f} {float(parts[1]):.6f} {float(parts[2]):.6f} {float(parts[3]):.6f} {float(parts[4]):.6f} {float(parts[5]):.6f} {float(parts[6]):.6f} {float(parts[7]):.6f}\n")
+    return output_path
+
+
 def generate_stella_config(
     intrinsics: Optional[CameraIntrinsics] = None,
     output_path: Optional[str] = None,

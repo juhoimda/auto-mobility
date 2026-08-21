@@ -1,5 +1,5 @@
 """
-orchestrator.py — Benchmark Execution Control, Dependency DAG, and Lifecycle Management.
+orchestrator.py — Benchmark Execution Control, Dependency DAG, and Beam Search Lifecycle Management.
 """
 
 import os
@@ -27,6 +27,7 @@ from auto_mobility.diagnostics.frame_quality import analyze_frame_quality
 
 from auto_mobility.benchmark.artifacts import ArtifactManager
 from auto_mobility.benchmark.search import SearchEngine
+from auto_mobility.benchmark.scoring import rank_candidate_summaries
 from auto_mobility.benchmark.manifest import (
     BenchmarkManifestExporter,
     get_system_hardware_info,
@@ -35,7 +36,10 @@ from auto_mobility.benchmark.manifest import (
 )
 
 SLAM_TRAJ_FILES = {
-    "rtab_rgbd": lambda n: TRAJECTORY_DIR / f"rtab_{n}_trajectory.txt",
+    "rtab_dense_rate0.5": lambda n: TRAJECTORY_DIR / f"rtab_dense_rate0.5_{n}_trajectory.txt",
+    "rtab_dense_rate1.0": lambda n: TRAJECTORY_DIR / f"rtab_dense_rate1.0_{n}_trajectory.txt",
+    "rtab_normal_rate0.5": lambda n: TRAJECTORY_DIR / f"rtab_rate0.5_{n}_trajectory.txt",
+    "rtab_normal_rate1.0": lambda n: TRAJECTORY_DIR / f"rtab_rate1.0_{n}_trajectory.txt",
     "orb_rgbd": lambda n: TRAJECTORY_DIR / f"orb_rgbd_{n}_trajectory.txt",
     "orb_rgbdi": lambda n: TRAJECTORY_DIR / f"orb_rgbdi_{n}_trajectory.txt",
     "stella_rgbd": lambda n: TRAJECTORY_DIR / f"stella_{n}_trajectory.txt",
@@ -43,25 +47,35 @@ SLAM_TRAJ_FILES = {
 
 
 def _trajectory_candidates(key: str, bag_name: str) -> List[Path]:
-    """Return accepted trajectory artifacts in preference order.
-
-    Dense RTAB is the offline benchmark profile.  ``run_slam.sh --dense``
-    writes a distinct filename so that a live/legacy RTAB result cannot
-    silently replace it; accept the legacy name only as a compatibility
-    fallback for already migrated datasets.
-    """
-    if key == "rtab_rgbd":
+    """Return accepted trajectory artifacts in preference order."""
+    if key == "rtab_dense_rate0.5":
         return [
+            TRAJECTORY_DIR / f"rtab_dense_rate0.5_{bag_name}_trajectory.txt",
             TRAJECTORY_DIR / f"rtab_dense_{bag_name}_trajectory.txt",
-            SLAM_TRAJ_FILES[key](bag_name),
+            TRAJECTORY_DIR / f"rtab_{bag_name}_trajectory.txt",
         ]
-    return [SLAM_TRAJ_FILES[key](bag_name)]
+    if key == "rtab_dense_rate1.0":
+        return [
+            TRAJECTORY_DIR / f"rtab_dense_rate1.0_{bag_name}_trajectory.txt",
+            TRAJECTORY_DIR / f"rtab_dense_{bag_name}_trajectory.txt",
+        ]
+    if key == "rtab_normal_rate1.0":
+        return [
+            TRAJECTORY_DIR / f"rtab_rate1.0_{bag_name}_trajectory.txt",
+            TRAJECTORY_DIR / f"rtab_{bag_name}_trajectory.txt",
+        ]
+    if key == "rtab_normal_rate0.5":
+        return [
+            TRAJECTORY_DIR / f"rtab_rate0.5_{bag_name}_trajectory.txt",
+        ]
+    return [SLAM_TRAJ_FILES.get(key, lambda n: TRAJECTORY_DIR / f"{key}_{n}_trajectory.txt")(bag_name)]
+
 
 SLAM_RUN_ARGS = {
-    # The benchmark's RTAB candidate is the offline dense profile.  This is
-    # deliberately distinct from the live-view profile: a reconstruction
-    # benchmark needs continuous poses, not sparse map visualization nodes.
-    "rtab_rgbd": ("--slam=rtab", "--dense", "--rate=0.5"),
+    "rtab_dense_rate0.5": ("--slam=rtab", "--dense", "--rate=0.5"),
+    "rtab_dense_rate1.0": ("--slam=rtab", "--dense", "--rate=1.0"),
+    "rtab_normal_rate0.5": ("--slam=rtab", "--rate=0.5"),
+    "rtab_normal_rate1.0": ("--slam=rtab", "--rate=1.0"),
     "orb_rgbd": ("--slam=orb_rgbd",),
     "orb_rgbdi": ("--slam=orb_rgbdi",),
     "stella_rgbd": ("--slam=stella_rgbd",),
@@ -69,7 +83,7 @@ SLAM_RUN_ARGS = {
 
 
 class BenchmarkOrchestrator:
-    """Orchestrates the modular SLAM & 3D Reconstruction benchmark workflow."""
+    """Orchestrates the modular SLAM & 3D Reconstruction benchmark workflow with Beam Search."""
 
     def __init__(
         self,
@@ -121,7 +135,6 @@ class BenchmarkOrchestrator:
             return BAG_DIR / bag_input
         if p.exists():
             return p.resolve()
-        # Fallback to BAG_DIR/bag_input even if not yet created (e.g. synthetic test)
         return BAG_DIR / bag_input
 
     def load_trajectories(self) -> Tuple[Dict[str, str], Dict[str, dict]]:
@@ -129,12 +142,15 @@ class BenchmarkOrchestrator:
         trajectories: Dict[str, str] = {}
         traj_metrics: Dict[str, dict] = {}
 
-        for key, path_fn in SLAM_TRAJ_FILES.items():
-            traj_candidates = _trajectory_candidates(key, self.bag_name)
-            traj_file = next((p for p in traj_candidates if p.exists() and p.stat().st_size > 0), traj_candidates[0])
+        # Default keys to evaluate in standard mode
+        active_keys = list(SLAM_TRAJ_FILES.keys()) if self.full else ["rtab_dense_rate0.5", "orb_rgbd", "stella_rgbd", "orb_rgbdi"]
 
-            if traj_file.exists() and traj_file.stat().st_size > 0:
-                print(f"📍 궤적 재사용: {traj_file.name}")
+        for key in active_keys:
+            traj_candidates = _trajectory_candidates(key, self.bag_name)
+            traj_file = next((p for p in traj_candidates if p.exists() and p.stat().st_size > 0), None)
+
+            if traj_file:
+                print(f"📍 궤적 재사용: {key} → {traj_file.name}")
                 trajectories[key] = str(traj_file)
                 try:
                     traj_metrics[key] = Trajectory.from_tum_file(str(traj_file)).compute_metrics()
@@ -143,21 +159,22 @@ class BenchmarkOrchestrator:
                     traj_metrics[key] = {"slam_backend": key}
                 continue
 
-            # RTAB-Map: DB exist -> export trajectory
-            if key == "rtab_rgbd":
+            # RTAB-Map DB fallback export
+            if "rtab" in key:
                 db = DB_DIR / f"{self.bag_name}.db"
                 if db.exists():
+                    target_traj = traj_candidates[0]
                     try:
-                        print(f"⚙️ RTAB-Map DB 존재 → 궤적 추출: {traj_file.name}")
-                        export_from_db(str(db), str(traj_file), opt=0)
-                        trajectories[key] = str(traj_file)
-                        traj_metrics[key] = Trajectory.from_tum_file(str(traj_file)).compute_metrics()
+                        print(f"⚙️ RTAB-Map DB 존재 → 궤적 추출: {target_traj.name}")
+                        export_from_db(str(db), str(target_traj), opt=0)
+                        trajectories[key] = str(target_traj)
+                        traj_metrics[key] = Trajectory.from_tum_file(str(target_traj)).compute_metrics()
                         traj_metrics[key]["slam_backend"] = key
                         continue
                     except Exception as e:
                         print(f"⚠️ RTAB-Map 궤적 추출 실패: {e}")
 
-            if self.run_slam:
+            if self.run_slam and key in SLAM_RUN_ARGS:
                 print(f"⚙️ SLAM 실행 (--run-slam): {key} → run_slam.sh {' '.join(SLAM_RUN_ARGS[key])}")
                 script = PROJECT_DIR / "scripts" / "pipeline" / "run_slam.sh"
                 subprocess.run(["bash", str(script), self.bag_name, *SLAM_RUN_ARGS[key]], check=False)
@@ -169,12 +186,20 @@ class BenchmarkOrchestrator:
                 else:
                     print(f"⚠️ SLAM {key} 실행 실패 → 후보 제외")
             else:
-                print(f"ℹ️ {key} 궤적 없음 (스킵). 생성 명령: ./scripts/pipeline/run_slam.sh {self.bag_name} {' '.join(SLAM_RUN_ARGS[key])}")
+                pass
+
+        # Fallback if no specific keys matched: check if legacy rtab trajectory exists
+        if not trajectories:
+            legacy_rtab = TRAJECTORY_DIR / f"rtab_{self.bag_name}_trajectory.txt"
+            if legacy_rtab.exists() and legacy_rtab.stat().st_size > 0:
+                print(f"📍 Legacy RTAB 궤적 발견: {legacy_rtab.name}")
+                trajectories["rtab_dense_rate0.5"] = str(legacy_rtab)
+                traj_metrics["rtab_dense_rate0.5"] = Trajectory.from_tum_file(str(legacy_rtab)).compute_metrics()
 
         return trajectories, traj_metrics
 
     def run(self) -> dict:
-        """Executes the full multi-axis benchmark pipeline with mode and search trace."""
+        """Executes the full multi-axis benchmark pipeline with Beam Search and Full Rebuild."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print("\n==========================================================")
         print(" 🏁 Autonomous Mobility Multi-Axis 3D SLAM & Reconstruction Benchmark")
@@ -223,9 +248,7 @@ class BenchmarkOrchestrator:
         # 2. Trajectories
         trajectories, traj_metrics = self.load_trajectories()
 
-        # Diagnose frame↔trajectory connectivity before spending time on TSDF
-        # and surface candidates.  A downstream mesh cannot be trusted when
-        # the trajectory covers only a small fraction of the RGB-D sequence.
+        # Diagnose frame↔trajectory connectivity
         pose_diagnostics: Dict[str, dict] = {}
         frame_timestamps = dataset.get_timestamps(use_rgb=True)
         for slam_name, traj_path in trajectories.items():
@@ -245,82 +268,51 @@ class BenchmarkOrchestrator:
                     "error": str(exc),
                     "warnings": ["Trajectory could not be parsed"],
                 }
-        if pose_diagnostics:
-            for name, diag in pose_diagnostics.items():
-                print(
-                    f"📐 Pose alignment [{name}]: {diag.get('status')} "
-                    f"coverage={diag.get('pose_coverage_ratio', 0.0) * 100:.1f}% "
-                    f"cause={diag.get('cause', 'UNKNOWN')}"
-                )
 
-        sensor_diagnostics: dict = {}
-        sensor_manifest = self.bag_path / "dataset_manifest.json"
-        if sensor_manifest.exists():
-            try:
-                with open(sensor_manifest, "r", encoding="utf-8") as f:
-                    sensor_diagnostics = json.load(f)
-                # validate_bag manifests do not have an overall_status field;
-                # derive it from required checks and retain all raw evidence.
-                if "overall_status" not in sensor_diagnostics:
-                    checks = sensor_diagnostics.get("checks", {})
-                    sensor_diagnostics["overall_status"] = (
-                        "FAIL" if any(not c.get("pass", False) for c in checks.values())
-                        else ("WARN" if sensor_diagnostics.get("warnings") else "PASS")
-                    )
-            except Exception as exc:
-                sensor_diagnostics = {
-                    "overall_status": "WARN",
-                    "warnings": [f"Sensor manifest could not be read: {exc}"],
-                }
-
-        # Previous state restoration for Resume
+        sensor_diagnostics = {}
         prev_manifest = {}
-        if self.resume:
-            manifest_p = self.report_dir / "experiment_manifest.json"
-            if manifest_p.exists():
-                try:
-                    with open(manifest_p, "r", encoding="utf-8") as f:
-                        prev_manifest = json.load(f)
-                    print("📄 [Resume] 기존 manifest 로드 완료")
-                except Exception as e:
-                    print(f"⚠️ [Resume] manifest 로드 실패: {e}")
+        if self.resume and (self.report_dir / "experiment_manifest.json").exists():
+            try:
+                with open(self.report_dir / "experiment_manifest.json", "r", encoding="utf-8") as f:
+                    prev_manifest = json.load(f)
+            except Exception:
+                prev_manifest = {}
 
-        slam_eval_results = prev_manifest.get("phase_a_slam_results", [])
-        tsdf_eval_results = prev_manifest.get("phase_b_tsdf_results", [])
-        surface_eval_results = prev_manifest.get("phase_c_surface_results", [])
+        slam_eval_results: List[dict] = prev_manifest.get("phase_a_slam_results", [])
+        fusion_eval_results: List[dict] = prev_manifest.get("phase_b_tsdf_results", [])
+        surface_eval_results: List[dict] = prev_manifest.get("phase_c_surface_results", [])
+        final_rebuilt_rankings: List[dict] = []
+        overall_winner: Optional[dict] = None
 
-        best_slam = list(trajectories.keys())[0] if trajectories else "rtab_rgbd"
-        best_traj = trajectories.get(best_slam, "")
-        best_voxel_m = 0.010
-        best_pcd = self.artifact_mgr.get_pcd_path(best_slam, 10)
-        best_tsdf_mesh = self.artifact_mgr.get_mesh_path(best_slam, 10)
-        best_tsdf_summary = {}
-
-        # ── PHASE A ──
+        # ── PHASE A (SLAM Screening, Beam Width = Top 2~3) ──
         if self.phase in ("all", "a", "slam"):
-            slam_eval_results, best_slam, best_traj = search_engine.run_phase_a(
+            slam_eval_results, top_slams = search_engine.run_phase_a(
                 trajectories, traj_metrics, pose_diagnostics=pose_diagnostics
             )
         else:
             if slam_eval_results:
-                from auto_mobility.benchmark.scoring import rank_candidate_summaries
                 ranked_a = rank_candidate_summaries(slam_eval_results)
                 valid_a = [r for r in ranked_a if r.get("hard_gate_pass", False)]
-                if valid_a:
-                    best_slam = valid_a[0]["candidate_name"].replace("_voxel10mm", "")
-                    print(f"📄 [Resume] Phase A winner 복원: `{best_slam}` (Score: {valid_a[0]['composite_score']:.1f})")
-            best_traj = trajectories.get(best_slam, list(trajectories.values())[0] if trajectories else "")
+                top_slams = []
+                for item in (valid_a if valid_a else ranked_a)[:search_engine.beam_width_slam]:
+                    cand_n = item["candidate_name"]
+                    slam_name = cand_n.replace("_tsdf10mm", "").replace("_voxel10mm", "")
+                    t_file = trajectories.get(slam_name, "")
+                    if t_file:
+                        top_slams.append((slam_name, t_file))
+                if not top_slams and trajectories:
+                    top_slams = [(k, v) for k, v in list(trajectories.items())[:search_engine.beam_width_slam]]
+            else:
+                top_slams = [(k, v) for k, v in list(trajectories.items())[:search_engine.beam_width_slam]]
 
-        # ── PHASE B ──
-        # Do not attribute a bad pose stream to TSDF or surface code.  The
-        # phase remains represented in the manifest as BLOCKED for auditability.
+        # ── PHASE B (Fusion Screening on surviving SLAMs) ──
         pose_gate_failed = (not trajectories) or (
             bool(pose_diagnostics)
             and not any(d.get("status") in ("PASS", "WARN") for d in pose_diagnostics.values())
         )
         if pose_gate_failed and self.phase in ("all", "b", "tsdf", "fusion"):
-            tsdf_eval_results = [{
-                "candidate_name": f"{best_slam}_tsdf",
+            fusion_eval_results = [{
+                "candidate_name": f"{top_slams[0][0] if top_slams else 'none'}_fusion",
                 "status": "BLOCKED",
                 "overall_status": "BLOCKED",
                 "blocked_by": "POSE_ALIGNMENT",
@@ -328,33 +320,25 @@ class BenchmarkOrchestrator:
                 "geometry": {},
                 "mesh": {},
             }]
-            best_tsdf_summary = tsdf_eval_results[0]
-            best_pcd = self.artifact_mgr.get_pcd_path(best_slam, 10)
-            best_tsdf_mesh = self.artifact_mgr.get_mesh_path(best_slam, 10)
+            top_fusion_pipelines = []
             print("⛔ Phase B BLOCKED: all trajectories failed pose alignment gate")
         elif self.phase in ("all", "b", "tsdf", "fusion"):
-            tsdf_eval_results, best_voxel_m, best_pcd, best_tsdf_mesh, best_tsdf_summary = search_engine.run_phase_b(
-                best_slam=best_slam,
-                best_traj=best_traj,
+            fusion_eval_results, top_fusion_pipelines = search_engine.run_phase_b(
+                top_slams=top_slams,
                 phase_a_results=slam_eval_results
             )
         else:
-            if tsdf_eval_results:
-                from auto_mobility.benchmark.scoring import rank_candidate_summaries
-                ranked_b = rank_candidate_summaries(tsdf_eval_results)
+            if fusion_eval_results:
+                ranked_b = rank_candidate_summaries(fusion_eval_results)
                 valid_b = [r for r in ranked_b if r.get("hard_gate_pass", False)]
-                if valid_b:
-                    best_voxel_m = valid_b[0]["summary_data"].get("voxel_size_m", 0.010)
-                    best_tsdf_summary = valid_b[0]["summary_data"]
-                    print(f"📄 [Resume] Phase B winner 복원: voxel={best_voxel_m*1000:.1f}mm (Score: {valid_b[0]['composite_score']:.1f})")
-            best_v_mm = int(round(best_voxel_m * 1000))
-            best_pcd = self.artifact_mgr.get_pcd_path(best_slam, best_v_mm)
-            best_tsdf_mesh = self.artifact_mgr.get_mesh_path(best_slam, best_v_mm)
+                top_fusion_pipelines = [item["summary_data"] for item in (valid_b if valid_b else ranked_b)[:search_engine.beam_width_fusion]]
+            else:
+                top_fusion_pipelines = [slam_eval_results[0]] if slam_eval_results else []
 
-        # ── PHASE C ──
+        # ── PHASE C (Surface Screening on surviving Fusion Pipelines) ──
         if pose_gate_failed and self.phase in ("all", "c", "surface", "mesh"):
             surface_eval_results = [{
-                "candidate_name": f"{best_slam}_surface",
+                "candidate_name": f"{top_slams[0][0] if top_slams else 'none'}_surface",
                 "status": "BLOCKED",
                 "overall_status": "BLOCKED",
                 "blocked_by": "POSE_ALIGNMENT",
@@ -362,33 +346,40 @@ class BenchmarkOrchestrator:
                 "geometry": {},
                 "mesh": {},
             }]
+            finalists = []
             print("⛔ Phase C BLOCKED: all trajectories failed pose alignment gate")
         elif self.phase in ("all", "c", "surface", "mesh"):
-            surface_eval_results, winner_c = search_engine.run_phase_c(
-                best_slam=best_slam,
-                best_traj=best_traj,
-                best_voxel_m=best_voxel_m,
-                best_pcd=best_pcd,
-                best_tsdf_mesh=best_tsdf_mesh,
-                best_tsdf_summary=best_tsdf_summary
+            surface_eval_results, finalists = search_engine.run_phase_c(
+                top_fusion_pipelines=top_fusion_pipelines,
+                trajectories=trajectories
             )
+        else:
+            finalists = [top_fusion_pipelines[0]] if top_fusion_pipelines else []
 
-        # ── Overall Ranking & Deliverables ──
-        overall_rankings, overall_winner = search_engine.compute_overall_rankings(
-            slam_eval_results,
-            tsdf_eval_results,
-            surface_eval_results
-        )
+        # ── PHASE D (FULL REBUILD & Full-Fidelity Evaluation on Top Finalists) ──
+        if finalists and self.phase in ("all", "d", "rebuild", "final"):
+            final_rebuilt_rankings, overall_winner = search_engine.run_full_rebuild(
+                finalists=finalists,
+                trajectories=trajectories
+            )
+            overall_rankings = final_rebuilt_rankings
+        else:
+            all_summaries = slam_eval_results + fusion_eval_results + surface_eval_results
+            overall_rankings = rank_candidate_summaries(all_summaries)
+            valid_ranked = [r for r in overall_rankings if r.get("hard_gate_pass", False)]
+            overall_winner = valid_ranked[0] if valid_ranked else (overall_rankings[0] if overall_rankings else None)
+
         sensor_evidence = dict(sensor_diagnostics)
         if frame_quality.get("overall_status") != "PASS" or not sensor_evidence:
             sensor_evidence = frame_quality
         else:
             sensor_evidence["frame_quality"] = frame_quality
+
         pipeline_diagnosis = diagnose_pipeline(
             sensor_input=sensor_evidence,
             pose_alignment=pose_diagnostics,
             phase_a=slam_eval_results,
-            phase_b=tsdf_eval_results,
+            phase_b=fusion_eval_results,
             phase_c=surface_eval_results,
         )
 
@@ -413,8 +404,9 @@ class BenchmarkOrchestrator:
             "summary_stats": search_engine.stats,
             "decision_trace": search_engine.decision_trace,
             "phase_a_slam_results": slam_eval_results,
-            "phase_b_tsdf_results": tsdf_eval_results,
+            "phase_b_tsdf_results": fusion_eval_results,
             "phase_c_surface_results": surface_eval_results,
+            "phase_d_rebuild_results": [r.get("summary_data", {}) for r in final_rebuilt_rankings],
             "winner": overall_winner.get("candidate_name") if overall_winner else None
         }
 

@@ -83,12 +83,13 @@ elif [ "$SLAM_TYPE" == "stella" ] || [ "$SLAM_TYPE" == "stella_rgbd" ]; then
 else
     # RTAB-Map
     if [ "$DENSE_MAPPING" = "true" ]; then
-        # Preserve standard outputs for reproducible before/after comparison.
         DB_PATH="$DB_DIR/${BAG_NAME}_dense.db"
-        OUT_TRAJ="$TRAJECTORY_DIR/rtab_dense_${BAG_NAME}_trajectory.txt"
+        OUT_TRAJ="$TRAJECTORY_DIR/rtab_dense_rate${RATE}_${BAG_NAME}_trajectory.txt"
+        ALT_TRAJ="$TRAJECTORY_DIR/rtab_dense_${BAG_NAME}_trajectory.txt"
     else
         DB_PATH="$DB_DIR/${BAG_NAME}.db"
-        OUT_TRAJ="$TRAJECTORY_DIR/rtab_${BAG_NAME}_trajectory.txt"
+        OUT_TRAJ="$TRAJECTORY_DIR/rtab_rate${RATE}_${BAG_NAME}_trajectory.txt"
+        ALT_TRAJ="$TRAJECTORY_DIR/rtab_${BAG_NAME}_trajectory.txt"
     fi
     
     echo "▶️ RTAB-Map 백그라운드 시작..."
@@ -119,6 +120,7 @@ else
         echo "❌ RTAB-Map trajectory export produced fewer than two poses: $OUT_TRAJ" >&2
         exit 1
     fi
+    cp "$OUT_TRAJ" "$ALT_TRAJ"
     
     echo "✅ RTAB-Map 완료 -> DB: $DB_PATH | Trajectory: $OUT_TRAJ"
 fi

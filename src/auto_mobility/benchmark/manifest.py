@@ -194,7 +194,7 @@ class BenchmarkManifestExporter:
             lines.append("")
 
         # 1. SLAM Ranking
-        lines.append("## 1. [SLAM Ranking] Trajectory & Downstream Consistency\n")
+        lines.append("## 1. [SLAM Screening] Trajectory & Downstream Consistency\n")
         lines.append("| Backend | Status | Quality Score | Tracking Frames | Coverage | Depth MAE | Depth P95 | Free-Space | Runtime |")
         lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
         for s in manifest.get("phase_a_slam_results", []):
@@ -213,14 +213,17 @@ class BenchmarkManifestExporter:
             sc = compute_absolute_scores(s)
             lines.append(f"| **{s['candidate_name']}** | ✅ | {sc['quality_score']:.1f} | {tm.get('num_frames', 'N/A')} | {cov} | {mae} | {p95} | {fs} | {runtime:.2f}s |")
 
-        # 2. TSDF Ranking
-        lines.append("\n## 2. [TSDF Ranking] Fusion Resolution & Memory\n")
-        lines.append("| Voxel Size | Status | Quality Score | Depth MAE | Coverage | Completeness | Triangles | Runtime |")
-        lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
+        # 2. Fusion Ranking (TSDF vs Direct Point Cloud)
+        lines.append("\n## 2. [Fusion Screening] TSDF vs Direct Point Cloud Fusion\n")
+        lines.append("| Candidate | Fusion Backend | Voxel Size | Status | Quality Score | Depth MAE | Coverage | Completeness | Triangles | Runtime |")
+        lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
         for s in manifest.get("phase_b_tsdf_results", []):
             status = s.get("status") or s.get("overall_status", "UNKNOWN")
+            fusion_backend = s.get("fusion_method", "tsdf").upper()
+            v_m = s.get("voxel_size_m", 0.010)
+            v_str = f"{v_m*1000:.1f}mm" if v_m else "10.0mm"
             if status in ("FAIL", "FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "FAIL_EXCEPTION", "SKIPPED_UNAVAILABLE", "PRUNED", "BLOCKED", "NOT_EVALUATED"):
-                lines.append(f"| **{s['candidate_name']}** | ❌ {status} | - | FAIL | FAIL | FAIL | 0 | 0.0s |")
+                lines.append(f"| **{s['candidate_name']}** | {fusion_backend} | {v_str} | ❌ {status} | - | FAIL | FAIL | FAIL | 0 | 0.0s |")
                 continue
             gm = s.get("geometry", {})
             mm = s.get("mesh", {})
@@ -231,16 +234,17 @@ class BenchmarkManifestExporter:
             runtime = s.get("runtime_sec") or s.get("performance", {}).get("runtime_sec", 0)
             from auto_mobility.benchmark.scoring import compute_absolute_scores
             sc = compute_absolute_scores(s)
-            lines.append(f"| **{s['candidate_name']}** | ✅ | {sc['quality_score']:.1f} | {mae} | {cov} | {compl} | {tri} | {runtime:.2f}s |")
+            lines.append(f"| **{s['candidate_name']}** | {fusion_backend} | {v_str} | ✅ | {sc['quality_score']:.1f} | {mae} | {cov} | {compl} | {tri} | {runtime:.2f}s |")
 
         # 3. Surface Ranking
-        lines.append("\n## 3. [Surface Ranking] Surface Representation & Topology\n")
-        lines.append("| Method | Status | Quality Score | Depth MAE | Point-Mesh P95 | Free-Space | Non-Manifold | Triangles | Runtime |")
-        lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
+        lines.append("\n## 3. [Surface Screening] Surface Representation & Topology\n")
+        lines.append("| Candidate | Surface Method | Status | Quality Score | Depth MAE | Point-Mesh P95 | Free-Space | Non-Manifold | Triangles | Runtime |")
+        lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
         for s in manifest.get("phase_c_surface_results", []):
             status = s.get("status") or s.get("overall_status", "UNKNOWN")
+            surf_method = s.get("surface_method", "tsdf_direct")
             if status in ("FAIL", "FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "FAIL_EXCEPTION", "SKIPPED_UNAVAILABLE", "PRUNED", "BLOCKED", "NOT_EVALUATED"):
-                lines.append(f"| **{s['candidate_name']}** | ❌ {status} | - | - | - | - | - | - | - |")
+                lines.append(f"| **{s['candidate_name']}** | {surf_method} | ❌ {status} | - | - | - | - | - | - | - |")
                 continue
             gm = s.get("geometry", {})
             mm = s.get("mesh", {})
@@ -252,19 +256,21 @@ class BenchmarkManifestExporter:
             runtime = s.get("runtime_sec") or s.get("performance", {}).get("runtime_sec", 0)
             from auto_mobility.benchmark.scoring import compute_absolute_scores
             sc = compute_absolute_scores(s)
-            lines.append(f"| **{s['candidate_name']}** | ✅ | {sc['quality_score']:.1f} | {mae} | {p95} | {fs} | {nm} | {tri} | {runtime:.2f}s |")
+            lines.append(f"| **{s['candidate_name']}** | {surf_method} | ✅ | {sc['quality_score']:.1f} | {mae} | {p95} | {fs} | {nm} | {tri} | {runtime:.2f}s |")
 
-        # 4. Overall Joint Ranking
+        # 4. Overall Rebuilt Finalists & Joint Ranking
         if overall_rankings:
-            lines.append("\n## 4. Overall Multi-Axis Joint Ranking\n")
-            lines.append("| Rank | Candidate | Quality Score | Cost Score | Composite Score | Status | Depth MAE | Coverage | Triangles |")
-            lines.append("| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
+            lines.append("\n## 4. Overall Multi-Axis Joint Ranking (Top Finalists Rebuilt with stride=1)\n")
+            lines.append("| Rank | Candidate | Quality Score | Cost Score | Composite Score | Status | Depth MAE | Depth P95 | Coverage | Triangles | Full Rebuild |")
+            lines.append("| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
             for r in overall_rankings:
                 raw = r.get("raw_metrics", {})
                 mae_str = f"{raw.get('depth_mae_mm', 0):.2f} mm" if raw.get('depth_mae_mm') is not None else "N/A"
+                p95_str = f"{raw.get('depth_p95_mm', 0):.2f} mm" if raw.get('depth_p95_mm') is not None else "N/A"
                 cov_str = f"{raw.get('depth_coverage_ratio', 0)*100:.1f}%" if raw.get('depth_coverage_ratio') is not None else "N/A"
                 tri_str = f"{r.get('summary_data', {}).get('mesh', {}).get('num_triangles', 'N/A')}"
-                lines.append(f"| {r.get('rank')} | **{r.get('candidate_name')}** | {r.get('quality_score', 0):.1f} | {r.get('cost_score', 0):.1f} | {r.get('composite_score', 0):.1f} | {r.get('status')} | {mae_str} | {cov_str} | {tri_str} |")
+                is_rb = "✅ Full (stride=1)" if r.get('summary_data', {}).get('is_full_rebuild') else "Screening"
+                lines.append(f"| {r.get('rank')} | **{r.get('candidate_name')}** | {r.get('quality_score', 0):.1f} | {r.get('cost_score', 0):.1f} | {r.get('composite_score', 0):.1f} | {r.get('status')} | {mae_str} | {p95_str} | {cov_str} | {tri_str} | {is_rb} |")
 
         # 5. Search Decision Trace
         trace = manifest.get("decision_trace", [])

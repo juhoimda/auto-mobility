@@ -46,7 +46,7 @@ class AssociationSummary:
 def associate_trajectory_to_frames(
     frame_timestamps: Union[np.ndarray, List[float]],
     trajectory: Trajectory,
-    max_pose_gap_ms: float = 500.0,
+    max_pose_gap_ms: float = 50.0,
     enable_interpolation: bool = True
 ) -> Tuple[Dict[int, np.ndarray], List[PoseAssociationResult], AssociationSummary]:
     """Frame timestamps와 Trajectory 간 timestamp 매칭 및 SLERP 보간 수행.

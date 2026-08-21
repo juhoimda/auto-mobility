@@ -61,9 +61,9 @@ class TestCompareAlgorithmsUnit(unittest.TestCase):
             self.assertTrue(md_path.exists())
             with open(md_path, "r", encoding="utf-8") as f:
                 content = f.read()
-            self.assertIn("[SLAM Ranking]", content)
-            self.assertIn("[TSDF Ranking]", content)
-            self.assertIn("[Surface Ranking]", content)
+            self.assertIn("[SLAM", content)
+            self.assertIn("[Fusion", content)
+            self.assertIn("[Surface", content)
             self.assertIn("rtab_rgbd", content)
             self.assertIn("tsdf_10mm", content)
 

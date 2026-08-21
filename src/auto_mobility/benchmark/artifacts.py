@@ -117,10 +117,13 @@ class ArtifactManager:
     def get_pcd_path(self, slam: str, voxel_mm: int) -> Path:
         return POINTCLOUD_DIR / f"{self.bag_name}_{slam}_voxel{voxel_mm}mm_cloud.ply"
 
+    def get_direct_pcd_path(self, slam: str, voxel_mm: int) -> Path:
+        return POINTCLOUD_DIR / f"{self.bag_name}_{slam}_direct_voxel{voxel_mm}mm_cloud.ply"
+
     def get_candidate_eval_dir(self, candidate_name: str) -> Path:
         return self.eval_dir / candidate_name
 
-    def get_cached_eval_summary(self, candidate_name: str) -> Optional[dict]:
+    def get_cached_eval_summary(self, candidate_name: str, expected_spec_hash: Optional[str] = None) -> Optional[dict]:
         cand_dir = self.get_candidate_eval_dir(candidate_name)
         summary_file = cand_dir / "evaluation_summary.json"
         if summary_file.exists() and summary_file.stat().st_size > 50:
@@ -128,6 +131,10 @@ class ArtifactManager:
                 with open(summary_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, dict) and data.get("geometry"):
+                    if expected_spec_hash:
+                        cached_hash = data.get("spec_hash") or data.get("metadata", {}).get("spec_hash")
+                        if cached_hash and cached_hash != expected_spec_hash:
+                            return None
                     return data
             except Exception:
                 return None
@@ -157,9 +164,11 @@ class ArtifactManager:
     def should_reuse_evaluation(
         self,
         candidate_name: str,
-        force: bool = False
+        force: bool = False,
+        expected_spec_hash: Optional[str] = None
     ) -> Optional[dict]:
         """Check if evaluation summary exists and can be reused."""
         if force:
             return None
-        return self.get_cached_eval_summary(candidate_name)
+        return self.get_cached_eval_summary(candidate_name, expected_spec_hash=expected_spec_hash)
+

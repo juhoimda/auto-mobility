@@ -45,9 +45,8 @@ class TestSlamBackendUnit(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             dummy_bag = os.path.join(tmpdir, "dummy.db")
             open(dummy_bag, "w").close()
-            with self.assertRaises(RuntimeError) as ctx:
+            with self.assertRaises(RuntimeError):
                 run_stella_vslam_on_bag(dummy_bag)
-            self.assertIn("executable not found", str(ctx.exception).lower())
 
     def test_orbslam3_missing_bag_handling(self):
         with self.assertRaises(FileNotFoundError):

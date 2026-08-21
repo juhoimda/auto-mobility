@@ -36,6 +36,7 @@ from auto_mobility.evaluation.split import create_holdout_split, save_split_json
 from auto_mobility.evaluation.render_depth import create_raycasting_scene, render_depth_map
 from auto_mobility.evaluation.geometry_metrics import (
     compute_depth_metrics,
+    aggregate_depth_metrics,
     backproject_depth_to_world_points,
     compute_point_to_mesh_metrics,
     generate_error_visualization
@@ -255,6 +256,7 @@ def evaluate_reconstruction(
 
     frame_metrics_list = []
     all_world_points = []
+    pooled_errors_list = []
 
     # Visualization sample indices (disabled in cheap mode)
     actual_render_samples = 0 if is_cheap else render_samples
@@ -274,7 +276,15 @@ def evaluate_reconstruction(
             depth_min_m=depth_min_m, depth_max_m=depth_max_m
         )
 
-        f_metrics = compute_depth_metrics(real_depth, rend_depth, depth_min_m*1000.0, depth_max_m*1000.0)
+        f_metrics = compute_depth_metrics(real_depth, rend_depth, depth_min_m*1000.0, depth_max_m*1000.0, return_errors=True)
+        raw_errs = f_metrics.pop("errors", None)
+        if raw_errs is not None and len(raw_errs) > 0:
+            if len(raw_errs) > 5000:
+                step_sub = len(raw_errs) // 5000
+                pooled_errors_list.append(raw_errs[::step_sub])
+            else:
+                pooled_errors_list.append(raw_errs)
+
         f_metrics["frame_id"] = f_idx
         f_metrics["timestamp"] = dataset.frames[f_idx].rgb_timestamp
         frame_metrics_list.append(f_metrics)
@@ -312,16 +322,9 @@ def evaluate_reconstruction(
             for fm in frame_metrics_list:
                 writer.writerow(fm)
 
-    # Aggregate Geometry Metrics across all holdout frames
-    valid_maes = [m["depth_mae_mm"] for m in frame_metrics_list if m["depth_mae_mm"] is not None]
-    valid_p95s = [m["depth_p95_mm"] for m in frame_metrics_list if m["depth_p95_mm"] is not None]
-    valid_covs = [m["depth_coverage_ratio"] for m in frame_metrics_list]
-    valid_w20s = [m["within_20mm_ratio"] for m in frame_metrics_list]
-    valid_w10s = [m["within_10mm_ratio"] for m in frame_metrics_list]
-    valid_w50s = [m["within_50mm_ratio"] for m in frame_metrics_list]
-    valid_compl = [m.get("observed_surface_completeness", 0.0) for m in frame_metrics_list]
-    valid_fs_viol = [m.get("free_space_violation_ratio", 0.0) for m in frame_metrics_list]
-    valid_fs_corr = [m.get("free_space_correctness_ratio", 1.0) for m in frame_metrics_list]
+    # Aggregate Geometry Metrics across all holdout frames using pooled residual statistics
+    pooled_errors = np.concatenate(pooled_errors_list) if pooled_errors_list else None
+    geometry_summary = aggregate_depth_metrics(frame_metrics_list, pooled_errors=pooled_errors)
 
     # Point-to-Mesh Distance
     max_pts = 5000 if is_cheap else 50000
@@ -331,21 +334,7 @@ def evaluate_reconstruction(
     else:
         p2m_metrics = compute_point_to_mesh_metrics(scene, np.empty((0, 3)))
 
-    geometry_summary = {
-        "depth_mae_mm": round(float(np.mean(valid_maes)), 2) if valid_maes else None,
-        "depth_rmse_mm": round(float(np.sqrt(np.mean(np.array(valid_maes)**2))), 2) if valid_maes else None,
-        "depth_median_error_mm": round(float(np.median(valid_maes)), 2) if valid_maes else None,
-        "depth_p90_mm": round(float(np.percentile(valid_p95s, 90)), 2) if valid_p95s else None,
-        "depth_p95_mm": round(float(np.mean(valid_p95s)), 2) if valid_p95s else None,
-        "depth_coverage_ratio": round(float(np.mean(valid_covs)), 4) if valid_covs else 0.0,
-        "observed_surface_completeness": round(float(np.mean(valid_compl)), 4) if valid_compl else 0.0,
-        "free_space_violation_ratio": round(float(np.mean(valid_fs_viol)), 4) if valid_fs_viol else 0.0,
-        "free_space_correctness_ratio": round(float(np.mean(valid_fs_corr)), 4) if valid_fs_corr else 1.0,
-        "within_10mm_ratio": round(float(np.mean(valid_w10s)), 4) if valid_w10s else 0.0,
-        "within_20mm_ratio": round(float(np.mean(valid_w20s)), 4) if valid_w20s else 0.0,
-        "within_50mm_ratio": round(float(np.mean(valid_w50s)), 4) if valid_w50s else 0.0,
-        **p2m_metrics
-    }
+    geometry_summary.update(p2m_metrics)
 
     # 7. Mesh Topology & Quality
     mesh_summary = compute_mesh_quality_metrics(mesh)

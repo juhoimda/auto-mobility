@@ -212,9 +212,10 @@ def test_resume_restores_actual_phase_a_winner_not_hardcoded(synthetic_benchmark
 
     slam_used_for_phase_b = []
 
-    def capture_phase_b(self_arg, best_slam, best_traj, phase_a_results):
-        slam_used_for_phase_b.append(best_slam)
-        return [], 0.010, env["tmp_path"] / "p.ply", env["tmp_path"] / "m.obj", {}
+    def capture_phase_b(self_arg, top_slams, phase_a_results):
+        for s_name, _ in top_slams:
+            slam_used_for_phase_b.append(s_name)
+        return [], []
 
     orchestrator = BenchmarkOrchestrator(
         bag_input=bag_name,
@@ -232,7 +233,7 @@ def test_resume_restores_actual_phase_a_winner_not_hardcoded(synthetic_benchmark
         orchestrator.run()
 
     # Must use orb_rgbd (actual winner from Phase A), NOT rtab_rgbd (hardcoded default)
-    assert len(slam_used_for_phase_b) == 1
+    assert len(slam_used_for_phase_b) >= 1
     assert slam_used_for_phase_b[0] == "orb_rgbd", (
         f"Expected orb_rgbd to propagate as best_slam from Phase A resume, got: {slam_used_for_phase_b[0]}"
     )

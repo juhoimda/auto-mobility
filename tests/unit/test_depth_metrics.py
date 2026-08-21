@@ -6,7 +6,7 @@ Unit tests for depth reprojection error metrics (MAE, RMSE, Median, P95, Coverag
 
 import numpy as np
 import pytest
-from auto_mobility.evaluation.geometry_metrics import compute_depth_metrics
+from auto_mobility.evaluation.geometry_metrics import compute_depth_metrics, aggregate_depth_metrics
 
 
 def test_depth_metrics_exact_match():
@@ -94,4 +94,35 @@ def test_surface_completeness():
     assert metrics["within_50mm_ratio"] == 1.0
     # Observed surface completeness = coverage * within_50mm_ratio = 0.80 * 1.0 = 0.80
     assert metrics["observed_surface_completeness"] == 0.80
+
+
+def test_aggregate_depth_metrics_exact_pooling():
+    # Frame 1: 100 pixels, all error = 10mm
+    r1 = np.full((10, 10), 1000.0, dtype=np.float32)
+    p1 = np.full((10, 10), 1010.0, dtype=np.float32)
+    m1 = compute_depth_metrics(r1, p1, return_errors=True)
+    err1 = m1.pop("errors")
+
+    # Frame 2: 300 pixels, all error = 30mm
+    r2 = np.full((10, 30), 1000.0, dtype=np.float32)
+    p2 = np.full((10, 30), 1030.0, dtype=np.float32)
+    m2 = compute_depth_metrics(r2, p2, return_errors=True)
+    err2 = m2.pop("errors")
+
+    # Total pixels = 400 (100 @ 10mm, 300 @ 30mm)
+    # Expected pooled MAE = (100*10 + 300*30) / 400 = (1000 + 9000)/400 = 25.0 mm
+    # Expected pooled RMSE = sqrt((100*100 + 300*900)/400) = sqrt((10000 + 270000)/400) = sqrt(700) = 26.4575... mm
+    # Expected pooled median = 30.0 mm
+    # Expected pooled P95 = 30.0 mm
+    pooled = np.concatenate([err1, err2])
+    agg = aggregate_depth_metrics([m1, m2], pooled_errors=pooled)
+
+    assert agg["depth_mae_mm"] == 25.0
+    assert abs(agg["depth_rmse_mm"] - 26.46) <= 0.02
+    assert agg["depth_median_error_mm"] == 30.0
+    assert agg["depth_p95_mm"] == 30.0
+    assert agg["depth_coverage_ratio"] == 1.0
+    assert agg["within_10mm_ratio"] == 0.25
+    assert agg["within_50mm_ratio"] == 1.0
+
 

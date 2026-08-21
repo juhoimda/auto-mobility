@@ -265,3 +265,91 @@ def run_surface_worker(
             runtime_sec=runtime,
             error_message=str(e)
         )
+
+
+def run_direct_fusion_worker(
+    dataset_dir: str,
+    traj_file: str,
+    pcd_path: str,
+    voxel: float = 0.010,
+    depth_min: float = 0.3,
+    depth_max: float = 3.0,
+    stride: int = 1,
+    split_file: Optional[str] = None,
+    no_color: bool = False,
+    orient: str = "centroid",
+    timeout: int = 1800,
+    env: Optional[Dict[str, str]] = None
+) -> WorkerResult:
+    """Run Direct Point Cloud Fusion in an isolated subprocess."""
+    worker_script = PROJECT_DIR / "src" / "auto_mobility" / "mesh" / "direct_fusion.py"
+    cmd = [
+        sys.executable, "-u", str(worker_script),
+        dataset_dir,
+        traj_file,
+        f"--output={pcd_path}",
+        f"--voxel={voxel}",
+        f"--depth-min={depth_min}",
+        f"--depth-max={depth_max}",
+        f"--stride={stride}",
+        f"--orient={orient}"
+    ]
+    if split_file:
+        cmd.append(f"--split={split_file}")
+    if no_color:
+        cmd.append("--no-color")
+
+    worker_env = os.environ.copy()
+    worker_env.setdefault("OMP_NUM_THREADS", "8")
+    worker_env.setdefault("OPENBLAS_NUM_THREADS", "8")
+    worker_env.setdefault("MKL_NUM_THREADS", "8")
+    worker_env.setdefault("NUMEXPR_NUM_THREADS", "8")
+    worker_env.setdefault("VECLIB_MAXIMUM_THREADS", "8")
+    if "LD_LIBRARY_PATH" in worker_env:
+        cleaned_ld = [p for p in worker_env["LD_LIBRARY_PATH"].split(":") if "/opt/ros" not in p and p]
+        if cleaned_ld:
+            worker_env["LD_LIBRARY_PATH"] = ":".join(cleaned_ld)
+        else:
+            worker_env.pop("LD_LIBRARY_PATH", None)
+    if env:
+        worker_env.update(env)
+
+    t0 = time.time()
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=worker_env
+        )
+        runtime = time.time() - t0
+        status = _classify_returncode(proc.returncode, proc.stderr, proc.stdout)
+        err_msg = proc.stderr.strip() if proc.returncode != 0 else None
+        return WorkerResult(
+            status=status,
+            returncode=proc.returncode,
+            runtime_sec=runtime,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+            error_message=err_msg
+        )
+    except subprocess.TimeoutExpired as te:
+        runtime = time.time() - t0
+        return WorkerResult(
+            status=WorkerStatus.FAIL_TIMEOUT,
+            returncode=-15,
+            runtime_sec=runtime,
+            stdout=te.stdout.decode() if te.stdout else "",
+            stderr=te.stderr.decode() if te.stderr else "",
+            error_message=f"Timed out after {timeout}s"
+        )
+    except Exception as e:
+        runtime = time.time() - t0
+        return WorkerResult(
+            status=WorkerStatus.FAIL_EXCEPTION,
+            returncode=1,
+            runtime_sec=runtime,
+            error_message=str(e)
+        )
+

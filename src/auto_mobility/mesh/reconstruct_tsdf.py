@@ -172,7 +172,7 @@ def reconstruct(
     block_count: int = 0,
     no_color: bool = False,
     no_gpu: bool = False,
-    max_pose_gap_ms: float = 500.0,
+    max_pose_gap_ms: float = 50.0,
     stride: int = 1
 ) -> Tuple[o3d.geometry.TriangleMesh, o3d.geometry.PointCloud]:
     """Canonical Dataset과 Trajectory를 받아 Open3D TSDF로 3D Mesh 및 Point Cloud를 재구성한다.
