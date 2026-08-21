@@ -82,7 +82,7 @@ def test_phase_a_winner_selection_propagates_best_slam(mock_search_env):
         assert top_slams[0][1] == trajectories["orb_rgbd"]
 
 
-def test_phase_b_reuses_phase_a_10mm_result(mock_search_env):
+def test_phase_b_fair_common_adapter_evaluation(mock_search_env):
     engine, artifact_mgr, tmp_path = mock_search_env
 
     top_slams = [("orb_rgbd", str(tmp_path / "orb.txt"))]
@@ -98,11 +98,12 @@ def test_phase_b_reuses_phase_a_10mm_result(mock_search_env):
 
     with patch("auto_mobility.benchmark.search.run_tsdf_worker") as mock_worker, \
          patch("auto_mobility.benchmark.search.run_direct_fusion_worker", return_value=WorkerResult(WorkerStatus.SUCCESS, 0, 1.0)), \
-         patch("auto_mobility.benchmark.search.run_surface_worker", return_value=WorkerResult(WorkerStatus.SUCCESS, 0, 1.0)), \
+         patch("auto_mobility.benchmark.search.run_surface_worker") as mock_surf_worker, \
          patch("auto_mobility.benchmark.search.evaluate_reconstruction") as mock_eval, \
          patch("auto_mobility.benchmark.search.is_artifact_valid", return_value=True):
         
         mock_worker.return_value = WorkerResult(WorkerStatus.SUCCESS, 0, 2.0)
+        mock_surf_worker.return_value = WorkerResult(WorkerStatus.SUCCESS, 0, 1.0)
         mock_eval.return_value = {
             "candidate_name": "orb_rgbd_tsdf20mm",
             "overall_status": "PASS",
@@ -111,15 +112,19 @@ def test_phase_b_reuses_phase_a_10mm_result(mock_search_env):
             "performance": {"runtime_sec": 2.0}
         }
 
-        # In quick mode: 10mm and 20mm
+        # In quick mode: 10mm and 20mm TSDF + 10mm Direct
         results, top_pipes = engine.run_phase_b(
             top_slams=top_slams,
             phase_a_results=phase_a_results
         )
 
-        # Worker should only be called once for TSDF (for 20mm), because 10mm is directly reused from Phase A!
-        assert mock_worker.call_count == 1
         assert len(results) >= 2
+        # Poisson surface adapter MUST be invoked for fair surface baseline comparison
+        assert mock_surf_worker.call_count >= 1
+        for call_args in mock_surf_worker.call_args_list:
+            assert call_args.kwargs.get("method") == "poisson"
+            assert call_args.kwargs.get("depth") == 8
+            assert call_args.kwargs.get("no_simplify") is True
 
 
 def test_phase_c_reuses_phase_b_tsdf_direct(mock_search_env):
@@ -134,9 +139,19 @@ def test_phase_c_reuses_phase_b_tsdf_direct(mock_search_env):
         "candidate_name": "orb_rgbd_tsdf10mm",
         "overall_status": "PASS",
         "mesh_path": str(best_mesh),
+        "direct_tsdf_mesh_path": str(best_mesh),
         "pcd_path": str(best_pcd),
         "fusion_method": "tsdf",
         "voxel_size_m": 0.010,
+        "spec": {
+            "requested_params": {
+                "slam_backend": "orb_rgbd",
+                "slam_profile": "normal",
+                "replay_rate": 1.0,
+                "fusion_method": "tsdf",
+                "fusion_params": {"voxel_size_m": 0.010}
+            }
+        },
         "geometry": {"depth_mae_mm": 10.0, "depth_coverage_ratio": 0.95, "depth_p95_mm": 20.0, "point_to_mesh_p95_mm": 15.0, "within_20mm_ratio": 0.90},
         "mesh": {"num_triangles": 30000},
         "performance": {"runtime_sec": 1.5}

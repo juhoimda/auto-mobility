@@ -160,6 +160,7 @@ def load_trajectory_metadata(trajectory_path: Union[str, Path]) -> Optional[dict
 def verify_trajectory_provenance(
     trajectory_path: Union[str, Path],
     requested_spec: SlamProfileSpec,
+    expected_bag_fingerprint: Optional[str] = None,
     strict: bool = True
 ) -> Tuple[bool, str, dict]:
     """Verifies that the trajectory file matches the requested SLAM profile and rate.
@@ -185,8 +186,12 @@ def verify_trajectory_provenance(
 
     current_sha = compute_file_sha256(traj_path)
     sha_match = (meta.get("trajectory_sha256") == current_sha)
+    
+    fp_match = True
+    if expected_bag_fingerprint and meta.get("bag_fingerprint"):
+        fp_match = (meta.get("bag_fingerprint") == expected_bag_fingerprint)
 
-    if backend_match and profile_match and rate_match and sha_match:
+    if backend_match and profile_match and rate_match and sha_match and fp_match:
         return True, "VERIFIED", meta
 
     diffs = []
@@ -198,6 +203,8 @@ def verify_trajectory_provenance(
         diffs.append(f"rate mismatch ({meta.get('replay_rate')} != {requested_spec.replay_rate})")
     if not sha_match:
         diffs.append("file modified after metadata creation")
+    if not fp_match:
+        diffs.append(f"bag fingerprint mismatch ({meta.get('bag_fingerprint')} != {expected_bag_fingerprint})")
 
     return False, "PROVENANCE_MISMATCH", {"reasons": diffs, "stored_meta": meta}
 
@@ -240,6 +247,11 @@ class ArtifactManager:
     def get_direct_pcd_path(self, slam: str, voxel_mm: int) -> Path:
         return POINTCLOUD_DIR / f"{self.bag_name}_{slam}_direct_voxel{voxel_mm}mm_cloud.ply"
 
+    def get_artifact_meta_path(self, artifact_path: Union[str, Path]) -> Path:
+        """Returns standard metadata file path adjacent to an artifact."""
+        p = Path(artifact_path)
+        return p.parent / f"{p.stem}.meta.json"
+
     def save_artifact_metadata(
         self,
         meta_path: Union[str, Path],
@@ -276,7 +288,11 @@ class ArtifactManager:
         meta_path: Optional[Path] = None,
         force: bool = False
     ) -> bool:
-        """Strict content-aware cache validation for reconstruction artifacts."""
+        """Strict content-aware cache validation for reconstruction artifacts.
+        
+        If validation criteria are supplied, metadata file is strictly required.
+        Missing or mismatched metadata causes a CACHE MISS.
+        """
         if force:
             return False
 
@@ -285,19 +301,28 @@ class ArtifactManager:
         if pcd_path and not is_artifact_valid(pcd_path):
             return False
 
-        # If metadata path is provided, validate content hashes
-        if meta_path and meta_path.exists():
+        # If strict content validation criteria are supplied:
+        has_content_checks = (
+            isinstance(candidate_spec, CandidateSpec) or
+            dataset_fingerprint is not None or
+            trajectory_sha256 is not None or
+            split_hash is not None or
+            meta_path is not None
+        )
+        if has_content_checks:
+            if not meta_path or not Path(meta_path).exists():
+                return False
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
                 if candidate_spec and isinstance(candidate_spec, CandidateSpec):
                     if meta.get("candidate_spec_hash") != candidate_spec.compute_spec_hash():
                         return False
-                if dataset_fingerprint and meta.get("dataset_fingerprint") != dataset_fingerprint:
+                if dataset_fingerprint is not None and meta.get("dataset_fingerprint") != dataset_fingerprint:
                     return False
-                if trajectory_sha256 and meta.get("trajectory_sha256") != trajectory_sha256:
+                if trajectory_sha256 is not None and meta.get("trajectory_sha256") != trajectory_sha256:
                     return False
-                if split_hash and meta.get("split_hash") != split_hash:
+                if split_hash is not None and meta.get("split_hash") != split_hash:
                     return False
             except Exception:
                 return False
@@ -322,17 +347,17 @@ class ArtifactManager:
                 with open(summary_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, dict) and data.get("geometry"):
-                    if expected_spec_hash:
+                    if expected_spec_hash is not None:
                         cached_hash = data.get("spec_hash") or data.get("spec", {}).get("spec_hash")
-                        if cached_hash and cached_hash != expected_spec_hash:
+                        if cached_hash != expected_spec_hash:
                             return None
-                    if dataset_fingerprint:
+                    if dataset_fingerprint is not None:
                         cached_ds = data.get("dataset_fingerprint")
-                        if cached_ds and cached_ds != dataset_fingerprint:
+                        if cached_ds != dataset_fingerprint:
                             return None
-                    if split_hash:
+                    if split_hash is not None:
                         cached_sp = data.get("split_hash")
-                        if cached_sp and cached_sp != split_hash:
+                        if cached_sp != split_hash:
                             return None
                     return data
             except Exception:

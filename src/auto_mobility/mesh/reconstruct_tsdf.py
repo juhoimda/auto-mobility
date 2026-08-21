@@ -118,6 +118,53 @@ def _estimate_block_count(
     return max(min_blocks, n_blocks)
 
 
+def estimate_vbg_memory_gb(
+    trajectory_or_poses: Union[Trajectory, str, Path, Dict[int, np.ndarray]],
+    voxel_size: float,
+    depth_max: float = 3.0,
+    no_color: bool = False,
+    block_resolution: int = 16,
+    safety_factor: float = 1.5,
+    min_blocks: int = 65536,
+) -> float:
+    """Estimates the memory required in GB for VoxelBlockGrid TSDF reconstruction."""
+    if isinstance(trajectory_or_poses, dict):
+        poses = trajectory_or_poses
+    elif isinstance(trajectory_or_poses, (str, Path)):
+        try:
+            traj_obj = Trajectory.from_tum_file(str(trajectory_or_poses))
+            poses = {i: traj_obj.interpolated_pose_at(ts) for i, ts in enumerate(traj_obj.timestamps)}
+        except Exception:
+            poses = {}
+    elif isinstance(trajectory_or_poses, Trajectory):
+        poses = {i: trajectory_or_poses.interpolated_pose_at(ts) for i, ts in enumerate(trajectory_or_poses.timestamps)}
+    else:
+        poses = {}
+
+    positions = []
+    for T in poses.values():
+        if T is not None and getattr(T, "shape", None) == (4, 4):
+            positions.append(T[:3, 3])
+    if not positions:
+        return round((min_blocks * _bytes_per_block(no_color, block_resolution)) / 1e9, 3)
+
+    pos = np.asarray(positions, dtype=np.float64)
+    if len(pos) >= 20:
+        lo = np.percentile(pos, 1, axis=0) - depth_max
+        hi = np.percentile(pos, 99, axis=0) + depth_max
+    else:
+        lo = pos.min(axis=0) - depth_max
+        hi = pos.max(axis=0) + depth_max
+    ext = np.maximum(hi - lo, voxel_size * block_resolution)
+
+    block_size = voxel_size * block_resolution
+    n_blocks = int(np.ceil(ext[0] / block_size) * np.ceil(ext[1] / block_size) * np.ceil(ext[2] / block_size))
+    n_blocks = max(min_blocks, int(n_blocks * safety_factor))
+
+    bytes_total = n_blocks * _bytes_per_block(no_color, block_resolution)
+    return round(bytes_total / 1e9, 3)
+
+
 import queue
 import concurrent.futures
 

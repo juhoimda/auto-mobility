@@ -92,16 +92,16 @@ def compute_absolute_scores(summary: Dict[str, Any], weights: Optional[Dict[str,
     ranking_cfg = cfg.get("evaluation", {}).get("ranking", {})
     qw = cfg.get("quality_weights", {})
 
-    w_acc = weights.get("geometry_accuracy", qw.get("geometry_accuracy", 0.40)) if weights else qw.get("geometry_accuracy", 0.40)
-    w_cov = weights.get("geometry_coverage", qw.get("geometry_coverage", 0.25)) if weights else qw.get("geometry_coverage", 0.25)
-    w_art = weights.get("artifact_penalty", qw.get("artifact_penalty", 0.20)) if weights else qw.get("artifact_penalty", 0.20)
-    w_top = weights.get("topology", qw.get("topology", 0.15)) if weights else qw.get("topology", 0.15)
-    w_perf = weights.get("performance", qw.get("performance", 0.10)) if weights else qw.get("performance", 0.10)
+    w_acc = weights.get("geometry_accuracy", qw.get("geometry_accuracy", ranking_cfg.get("geometry_accuracy_weight", 0.40))) if weights else qw.get("geometry_accuracy", ranking_cfg.get("geometry_accuracy_weight", 0.40))
+    w_cov = weights.get("geometry_coverage", qw.get("geometry_coverage", ranking_cfg.get("coverage_weight", 0.25))) if weights else qw.get("geometry_coverage", ranking_cfg.get("coverage_weight", 0.25))
+    w_art = weights.get("artifact_penalty", qw.get("artifact_penalty", ranking_cfg.get("artifact_weight", 0.20))) if weights else qw.get("artifact_penalty", ranking_cfg.get("artifact_weight", 0.20))
+    w_top = weights.get("topology", qw.get("topology", ranking_cfg.get("topology_weight", 0.15))) if weights else qw.get("topology", ranking_cfg.get("topology_weight", 0.15))
+    w_perf = weights.get("performance", qw.get("performance", ranking_cfg.get("performance_weight", 0.10))) if weights else qw.get("performance", ranking_cfg.get("performance_weight", 0.10))
 
     geom = summary.get("geometry", {})
     mesh_m = summary.get("mesh", {})
     perf = summary.get("performance", {})
-    planes = summary.get("plane_analysis", {})
+    planes = summary.get("planes") or geom.get("planes") or summary.get("plane_analysis", {})
 
     # 1. Geometry Accuracy (w_acc)
     s_mae = _score_lower_better(geom.get("depth_mae_mm"), p100=0.0, p80=20.0, p50=40.0, p0=120.0)
@@ -122,7 +122,7 @@ def compute_absolute_scores(summary: Dict[str, Any], weights: Optional[Dict[str,
 
     # 4. Topology & Structural Quality (w_top)
     s_deg = _score_lower_better(mesh_m.get("degenerate_triangle_ratio"), p100=0.0, p80=0.001, p50=0.01, p0=0.05)
-    plane_res = planes.get("dominant_plane_residual_mean_mm") or planes.get("mean_residual_mm")
+    plane_res = planes.get("plane_residual_mean_mm") or planes.get("dominant_plane_residual_mean_mm") or planes.get("mean_residual_mm")
     s_plane = _score_lower_better(plane_res, p100=0.0, p80=15.0, p50=30.0, p0=80.0) if plane_res is not None else 85.0
     topology_score = (s_deg + s_plane) / 2.0
 
@@ -179,6 +179,7 @@ def rank_candidate_summaries(
         cand_name = s.get("candidate_name", "unknown")
         status = s.get("status") or s.get("overall_status", "PASS" if is_valid else "FAIL")
 
+        planes_dict = s.get("planes") or s.get("geometry", {}).get("planes") or s.get("plane_analysis", {})
         raw_dict = {
             "depth_mae_mm": s.get("geometry", {}).get("depth_mae_mm"),
             "depth_rmse_mm": s.get("geometry", {}).get("depth_rmse_mm"),
@@ -193,8 +194,8 @@ def rank_candidate_summaries(
             "observed_surface_completeness": s.get("geometry", {}).get("observed_surface_completeness"),
             "free_space_correctness_ratio": s.get("geometry", {}).get("free_space_correctness_ratio", 1.0),
             "small_component_ratio": s.get("mesh", {}).get("small_component_area_ratio"),
-            "plane_residual_mm": s.get("plane_analysis", {}).get("dominant_plane_residual_mean_mm") or s.get("plane_analysis", {}).get("mean_residual_mm"),
-            "plane_inlier_ratio": s.get("plane_analysis", {}).get("mean_inlier_ratio"),
+            "plane_residual_mm": planes_dict.get("plane_residual_mean_mm") or planes_dict.get("dominant_plane_residual_mean_mm") or planes_dict.get("mean_residual_mm"),
+            "plane_inlier_ratio": planes_dict.get("plane_inlier_ratio") or planes_dict.get("mean_inlier_ratio"),
             "degenerate_ratio": s.get("mesh", {}).get("degenerate_triangle_ratio"),
             "non_manifold_ratio": s.get("mesh", {}).get("non_manifold_edge_ratio"),
             "num_vertices": s.get("mesh", {}).get("num_vertices"),

@@ -69,35 +69,41 @@ echo " 🛠️ 엔진   : $SLAM_TYPE"
 echo "=========================================================="
 
 if [ "$SLAM_TYPE" == "orb_rgbdi" ] || [ "$SLAM_TYPE" == "rgbdi" ]; then
-    OUT_TRAJ="$TRAJECTORY_DIR/orb_rgbdi_${BAG_NAME}_trajectory.txt"
+    KEY="orb_rgbdi_rate${RATE}"
+    OUT_TRAJ="$TRAJECTORY_DIR/orb_rgbdi_rate${RATE}_${BAG_NAME}_trajectory.txt"
     python3 "$PROJECT_DIR/src/auto_mobility/slam/run_orbslam3_bag.py" "$BAG_PATH" --out "$OUT_TRAJ" --mode rgbdi --rate "$RATE"
+    python3 -c "from auto_mobility.benchmark.artifacts import save_trajectory_metadata; from auto_mobility.benchmark.candidate import SlamProfileSpec; save_trajectory_metadata('$OUT_TRAJ', SlamProfileSpec(candidate_key='$KEY', backend='orb_rgbdi', profile='normal', replay_rate=float('$RATE')))" 2>/dev/null || true
     echo "✅ ORB-SLAM3 RGB-D-I 완료 -> $OUT_TRAJ"
 elif [ "$SLAM_TYPE" == "orb" ] || [ "$SLAM_TYPE" == "orbslam" ] || [ "$SLAM_TYPE" == "orbslam3" ] || [ "$SLAM_TYPE" == "orb_rgbd" ]; then
-    OUT_TRAJ="$TRAJECTORY_DIR/orb_rgbd_${BAG_NAME}_trajectory.txt"
+    KEY="orb_rgbd_rate${RATE}"
+    OUT_TRAJ="$TRAJECTORY_DIR/orb_rgbd_rate${RATE}_${BAG_NAME}_trajectory.txt"
     python3 "$PROJECT_DIR/src/auto_mobility/slam/run_orbslam3_bag.py" "$BAG_PATH" --out "$OUT_TRAJ" --mode rgbd --rate "$RATE"
+    python3 -c "from auto_mobility.benchmark.artifacts import save_trajectory_metadata; from auto_mobility.benchmark.candidate import SlamProfileSpec; save_trajectory_metadata('$OUT_TRAJ', SlamProfileSpec(candidate_key='$KEY', backend='orb_rgbd', profile='normal', replay_rate=float('$RATE')))" 2>/dev/null || true
     echo "✅ ORB-SLAM3 RGB-D 완료 -> $OUT_TRAJ"
 elif [ "$SLAM_TYPE" == "stella" ] || [ "$SLAM_TYPE" == "stella_rgbd" ]; then
-    OUT_TRAJ="$TRAJECTORY_DIR/stella_${BAG_NAME}_trajectory.txt"
+    KEY="stella_rgbd_rate${RATE}"
+    OUT_TRAJ="$TRAJECTORY_DIR/stella_rgbd_rate${RATE}_${BAG_NAME}_trajectory.txt"
     python3 "$PROJECT_DIR/src/auto_mobility/slam/run_stella_bag.py" "$BAG_PATH" --out "$OUT_TRAJ" --rate "$RATE"
+    python3 -c "from auto_mobility.benchmark.artifacts import save_trajectory_metadata; from auto_mobility.benchmark.candidate import SlamProfileSpec; save_trajectory_metadata('$OUT_TRAJ', SlamProfileSpec(candidate_key='$KEY', backend='stella_rgbd', profile='normal', replay_rate=float('$RATE')))" 2>/dev/null || true
     echo "✅ stella_vslam RGB-D 완료 -> $OUT_TRAJ"
 else
     # RTAB-Map
     if [ "$DENSE_MAPPING" = "true" ]; then
-        DB_PATH="$DB_DIR/${BAG_NAME}_dense.db"
+        PROFILE="dense"
+        KEY="rtab_dense_rate${RATE}"
+        DB_PATH="$DB_DIR/${BAG_NAME}_rtab_dense_rate${RATE}.db"
         OUT_TRAJ="$TRAJECTORY_DIR/rtab_dense_rate${RATE}_${BAG_NAME}_trajectory.txt"
         ALT_TRAJ="$TRAJECTORY_DIR/rtab_dense_${BAG_NAME}_trajectory.txt"
     else
-        DB_PATH="$DB_DIR/${BAG_NAME}.db"
-        OUT_TRAJ="$TRAJECTORY_DIR/rtab_rate${RATE}_${BAG_NAME}_trajectory.txt"
+        PROFILE="normal"
+        KEY="rtab_normal_rate${RATE}"
+        DB_PATH="$DB_DIR/${BAG_NAME}_rtab_normal_rate${RATE}.db"
+        OUT_TRAJ="$TRAJECTORY_DIR/rtab_normal_rate${RATE}_${BAG_NAME}_trajectory.txt"
         ALT_TRAJ="$TRAJECTORY_DIR/rtab_${BAG_NAME}_trajectory.txt"
     fi
     
     echo "▶️ RTAB-Map 백그라운드 시작..."
-    if [ "$DENSE_MAPPING" = "true" ]; then
-        SLAM_LOG="$LOG_DIR/rtab_${BAG_NAME}_dense.log"
-    else
-        SLAM_LOG="$LOG_DIR/rtab_${BAG_NAME}.log"
-    fi
+    SLAM_LOG="$LOG_DIR/rtab_${BAG_NAME}_${PROFILE}_rate${RATE}.log"
     setsid ros2 launch auto_mobility rtab_bag.launch.py \
         database_path:="$DB_PATH" \
         dense_mapping:="$DENSE_MAPPING" \
@@ -120,6 +126,7 @@ else
         echo "❌ RTAB-Map trajectory export produced fewer than two poses: $OUT_TRAJ" >&2
         exit 1
     fi
+    python3 -c "from auto_mobility.benchmark.artifacts import save_trajectory_metadata; from auto_mobility.benchmark.candidate import SlamProfileSpec; save_trajectory_metadata('$OUT_TRAJ', SlamProfileSpec(candidate_key='$KEY', backend='rtab', profile='$PROFILE', replay_rate=float('$RATE')))" 2>/dev/null || true
     cp "$OUT_TRAJ" "$ALT_TRAJ"
     
     echo "✅ RTAB-Map 완료 -> DB: $DB_PATH | Trajectory: $OUT_TRAJ"

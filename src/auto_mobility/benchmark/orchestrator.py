@@ -32,7 +32,9 @@ from auto_mobility.benchmark.candidate import (
     CandidateSpec,
     SlamProfileSpec,
     STANDARD_SLAM_PROFILES,
-    get_slam_profile_spec
+    get_slam_profile_spec,
+    get_trajectory_filename,
+    get_rtab_db_filename
 )
 from auto_mobility.benchmark.artifacts import (
     ArtifactManager,
@@ -50,16 +52,8 @@ from auto_mobility.benchmark.manifest import (
 )
 
 SLAM_TRAJ_FILES = {
-    "rtab_dense_rate0.5": lambda n: TRAJECTORY_DIR / f"rtab_dense_rate0.5_{n}_trajectory.txt",
-    "rtab_dense_rate1.0": lambda n: TRAJECTORY_DIR / f"rtab_dense_rate1.0_{n}_trajectory.txt",
-    "rtab_normal_rate0.5": lambda n: TRAJECTORY_DIR / f"rtab_rate0.5_{n}_trajectory.txt",
-    "rtab_normal_rate1.0": lambda n: TRAJECTORY_DIR / f"rtab_rate1.0_{n}_trajectory.txt",
-    "orb_rgbd_rate0.5": lambda n: TRAJECTORY_DIR / f"orb_rgbd_rate0.5_{n}_trajectory.txt",
-    "orb_rgbd_rate1.0": lambda n: TRAJECTORY_DIR / f"orb_rgbd_{n}_trajectory.txt",
-    "orb_rgbdi_rate0.5": lambda n: TRAJECTORY_DIR / f"orb_rgbdi_rate0.5_{n}_trajectory.txt",
-    "orb_rgbdi_rate1.0": lambda n: TRAJECTORY_DIR / f"orb_rgbdi_{n}_trajectory.txt",
-    "stella_rgbd_rate0.5": lambda n: TRAJECTORY_DIR / f"stella_rate0.5_{n}_trajectory.txt",
-    "stella_rgbd_rate1.0": lambda n: TRAJECTORY_DIR / f"stella_{n}_trajectory.txt",
+    key: (lambda n, k=key: TRAJECTORY_DIR / get_trajectory_filename(n, k))
+    for key in STANDARD_SLAM_PROFILES.keys()
 }
 
 SLAM_RUN_ARGS = {
@@ -130,31 +124,36 @@ class BenchmarkOrchestrator:
             return p.resolve()
         return BAG_DIR / bag_input
 
-    def load_trajectories(self) -> Tuple[Dict[str, str], Dict[str, dict]]:
+    def load_trajectories(self, dataset_fingerprint: Optional[str] = None) -> Tuple[Dict[str, str], Dict[str, dict]]:
         """Finds or generates TUM trajectories for available SLAM backends with provenance verification."""
         trajectories: Dict[str, str] = {}
         traj_metrics: Dict[str, dict] = {}
+        expected_fp = dataset_fingerprint or getattr(self, "dataset_fingerprint", None)
 
-        active_keys = list(SLAM_TRAJ_FILES.keys()) if self.full else [
-            "rtab_dense_rate0.5", "rtab_normal_rate1.0", "orb_rgbd_rate1.0", "orb_rgbdi_rate1.0", "stella_rgbd_rate1.0"
+        active_keys = list(STANDARD_SLAM_PROFILES.keys()) if (self.mode != "quick") else [
+            "rtab_normal_rate1.0", "orb_rgbd_rate1.0", "orb_rgbdi_rate1.0", "stella_rgbd_rate1.0"
         ]
 
         for key in active_keys:
             spec = get_slam_profile_spec(key)
-            traj_fn = SLAM_TRAJ_FILES.get(key, lambda n: TRAJECTORY_DIR / f"{key}_{n}_trajectory.txt")
+            traj_fn = SLAM_TRAJ_FILES.get(key, lambda n: TRAJECTORY_DIR / get_trajectory_filename(n, key))
             traj_file = traj_fn(self.bag_name)
 
             if traj_file.exists() and traj_file.stat().st_size > 0 and not self.force:
-                print(f"📍 궤적 발견: {key} → {traj_file.name}")
-                trajectories[key] = str(traj_file)
-                try:
-                    traj_metrics[key] = Trajectory.from_tum_file(str(traj_file)).compute_metrics()
-                    traj_metrics[key]["slam_backend"] = spec.backend
-                    traj_metrics[key]["slam_profile"] = spec.profile
-                    traj_metrics[key]["replay_rate"] = spec.replay_rate
-                except Exception:
-                    traj_metrics[key] = {"slam_backend": spec.backend}
-                continue
+                is_valid, status, meta = verify_trajectory_provenance(traj_file, spec, expected_bag_fingerprint=expected_fp, strict=False)
+                if is_valid:
+                    print(f"📍 궤적 발견 & 검증 통과: {key} → {traj_file.name}")
+                    trajectories[key] = str(traj_file)
+                    try:
+                        traj_metrics[key] = Trajectory.from_tum_file(str(traj_file)).compute_metrics()
+                        traj_metrics[key]["slam_backend"] = spec.backend
+                        traj_metrics[key]["slam_profile"] = spec.profile
+                        traj_metrics[key]["replay_rate"] = spec.replay_rate
+                    except Exception:
+                        traj_metrics[key] = {"slam_backend": spec.backend}
+                    continue
+                else:
+                    print(f"⚠️ 궤적 검증 경고 ({status}): {traj_file.name}")
 
             # Check legacy naming conventions if primary file is missing
             legacy_candidates = [
@@ -176,12 +175,17 @@ class BenchmarkOrchestrator:
 
             # RTAB-Map DB export if db exists
             if "rtab" in key:
-                db_name = f"{self.bag_name}_dense.db" if spec.profile == "dense" else f"{self.bag_name}.db"
+                db_name = get_rtab_db_filename(self.bag_name, spec.profile, spec.replay_rate)
                 db = DB_DIR / db_name
+                if not db.exists():
+                    db_legacy_name = f"{self.bag_name}_dense.db" if spec.profile == "dense" else f"{self.bag_name}.db"
+                    if (DB_DIR / db_legacy_name).exists():
+                        db = DB_DIR / db_legacy_name
                 if db.exists():
                     try:
                         print(f"⚙️ RTAB-Map DB 존재 → 궤적 추출: {traj_file.name}")
                         export_from_db(str(db), str(traj_file), opt=0)
+                        save_trajectory_metadata(traj_file, spec, bag_fingerprint=expected_fp)
                         trajectories[key] = str(traj_file)
                         traj_metrics[key] = Trajectory.from_tum_file(str(traj_file)).compute_metrics()
                         traj_metrics[key]["slam_backend"] = spec.backend
@@ -197,6 +201,7 @@ class BenchmarkOrchestrator:
                 script = PROJECT_DIR / "scripts" / "pipeline" / "run_slam.sh"
                 subprocess.run(["bash", str(script), self.bag_name, *SLAM_RUN_ARGS[key]], check=False)
                 if traj_file.exists() and traj_file.stat().st_size > 0:
+                    save_trajectory_metadata(traj_file, spec, bag_fingerprint=expected_fp)
                     trajectories[key] = str(traj_file)
                     traj_metrics[key] = Trajectory.from_tum_file(str(traj_file)).compute_metrics()
                     traj_metrics[key]["slam_backend"] = spec.backend
@@ -238,6 +243,7 @@ class BenchmarkOrchestrator:
             split_data = load_split_json(str(split_file))
 
         dataset_fingerprint = compute_dataset_fingerprint(frame_out_dir)
+        self.dataset_fingerprint = dataset_fingerprint
 
         # 1. Initialize Search Engine
         search_engine = SearchEngine(
@@ -252,7 +258,7 @@ class BenchmarkOrchestrator:
         )
 
         # 2. Load Trajectories
-        raw_trajectories, traj_metrics = self.load_trajectories()
+        raw_trajectories, traj_metrics = self.load_trajectories(dataset_fingerprint=dataset_fingerprint)
 
         # 3. PHASE A0: Trajectory Health Gate
         healthy_trajectories, health_diagnostics = search_engine.run_phase_a0(raw_trajectories)

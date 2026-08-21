@@ -9,7 +9,7 @@ Provides:
 """
 
 from dataclasses import dataclass, field, asdict
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 import hashlib
 import json
 
@@ -27,6 +27,36 @@ class SlamProfileSpec:
         d = asdict(self)
         s = json.dumps(d, sort_keys=True)
         return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
+
+
+@dataclass
+class SlamChampion:
+    profile_spec: SlamProfileSpec
+    trajectory_path: str
+    trajectory_sha256: str
+    phase_a_summary: dict
+
+    def __getitem__(self, idx: int):
+        if idx == 0:
+            return self.profile_spec.candidate_key
+        elif idx == 1:
+            return self.trajectory_path
+        elif idx == 2:
+            return self.trajectory_sha256
+        elif idx == 3:
+            return self.phase_a_summary
+        raise IndexError(f"SlamChampion index out of range: {idx}")
+
+
+def get_trajectory_filename(bag_name: str, key_or_spec: Union[str, SlamProfileSpec]) -> str:
+    """Returns deterministic standard trajectory filename for any SLAM profile."""
+    spec = get_slam_profile_spec(key_or_spec) if isinstance(key_or_spec, str) else key_or_spec
+    return f"{spec.candidate_key}_{bag_name}_trajectory.txt"
+
+
+def get_rtab_db_filename(bag_name: str, profile: str = "normal", rate: float = 1.0) -> str:
+    """Returns deterministic standard RTAB database filename."""
+    return f"{bag_name}_rtab_{profile}_rate{rate:g}.db"
 
 
 # Standard SLAM Profile Registry
@@ -182,7 +212,7 @@ class CandidateSpec:
 
     def compute_candidate_id(self, include_hash: bool = False) -> str:
         """Compute a human-readable unique identifier."""
-        parts = [self.slam_backend]
+        parts = [str(self.slam_backend or "slam")]
         if self.slam_profile and self.slam_profile != "normal":
             parts.append(self.slam_profile)
         if self.replay_rate != 1.0:

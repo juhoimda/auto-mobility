@@ -398,13 +398,8 @@ class BenchmarkManifestExporter:
             traj_p = winner_summary.get("trajectory_path", "")
             traj_sha = compute_file_sha256(Path(traj_p)) if traj_p and Path(traj_p).exists() else "N/A"
 
-            rebuild_cmd = (
-                f"python3 -m auto_mobility.mesh.reconstruct_tsdf {manifest_data.get('bag_name')} "
-                f"--trajectory={traj_p} --voxel={fusion_params.get('voxel_size_m', 0.01)} "
-                f"--depth-max={fusion_params.get('depth_max_m', 3.0)} --stride=1"
-                if fusion_method == "tsdf"
-                else f"python3 -m auto_mobility.mesh.direct_fusion {manifest_data.get('bag_name')} {traj_p} --voxel={fusion_params.get('voxel_size_m', 0.01)} --stride=1"
-            )
+            best_config_file = final_dir / "best_config.json"
+            rebuild_cmd = f"python3 -m auto_mobility.benchmark.rebuild --config {best_config_file}"
 
             best_config = {
                 "dataset": manifest_data.get("bag_name"),

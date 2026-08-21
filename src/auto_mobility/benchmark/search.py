@@ -25,13 +25,16 @@ from typing import Dict, List, Any, Optional, Tuple, Union
 from auto_mobility.config import MESH_DIR, POINTCLOUD_DIR, EVALUATION_DIR, get_evaluation_config
 from auto_mobility.dataset.frame_dataset import FrameDataset
 from auto_mobility.evaluation.evaluator import evaluate_reconstruction
-from auto_mobility.benchmark.candidate import CandidateSpec, SlamProfileSpec, get_slam_profile_spec
+from auto_mobility.benchmark.candidate import (
+    CandidateSpec,
+    SlamProfileSpec,
+    SlamChampion,
+    get_slam_profile_spec
+)
 from auto_mobility.benchmark.artifacts import (
     ArtifactManager,
     is_artifact_valid,
-    compute_file_sha256,
-    save_trajectory_metadata,
-    verify_trajectory_provenance
+    compute_file_sha256
 )
 from auto_mobility.diagnostics.trajectory_health import check_trajectory_health, TrajectoryHealthResult
 from auto_mobility.benchmark.workers import (
@@ -41,6 +44,7 @@ from auto_mobility.benchmark.workers import (
     WorkerStatus
 )
 from auto_mobility.benchmark.scoring import rank_candidate_summaries, HardGateFilter, compute_absolute_scores
+from auto_mobility.mesh.reconstruct_tsdf import estimate_vbg_memory_gb
 
 
 class SearchEngine:
@@ -195,7 +199,7 @@ class SearchEngine:
         traj_metrics: Dict[str, dict],
         pose_diagnostics: Optional[Dict[str, dict]] = None,
         health_diagnostics: Optional[Dict[str, dict]] = None
-    ) -> Tuple[List[dict], List[Tuple[str, str]]]:
+    ) -> Tuple[List[dict], List[SlamChampion]]:
         """Runs Phase A1 profile calibration and Phase A2 backend screening."""
         print("\n==========================================================")
         print(f" 🚀 [PHASE A] SLAM Profile Calibration & Backend Screening (Beam Width: Top {self.beam_width_slam}, Mode: {self.mode.upper()})")
@@ -211,7 +215,7 @@ class SearchEngine:
             backend_families.setdefault(spec_prof.backend, []).append(cand_key)
 
         # 2. Phase A1: Evaluate and select Backend Champions
-        backend_champions: List[Tuple[str, str]] = []
+        backend_champions: List[SlamChampion] = []
 
         for backend_name, profile_keys in backend_families.items():
             print(f"\n🔬 [Phase A1: Profile Calibration] Backend `{backend_name}` ({len(profile_keys)} profiles)")
@@ -221,16 +225,13 @@ class SearchEngine:
                 traj_file = trajectories[prof_key]
                 traj_sha = compute_file_sha256(traj_file)
                 traj_sha_map[prof_key] = traj_sha
-
                 prof_spec = get_slam_profile_spec(prof_key)
-                save_trajectory_metadata(
-                    traj_file, prof_spec, bag_fingerprint=self.dataset_fingerprint, pose_count=len(self.dataset)
-                )
 
                 self.stats["total_candidates"] += 1
                 cand_name = f"{prof_key}_tsdf10mm"
                 mesh_out = self.artifact_mgr.get_mesh_path(prof_key, 10)
                 pcd_out = self.artifact_mgr.get_pcd_path(prof_key, 10)
+                meta_out = self.artifact_mgr.get_artifact_meta_path(mesh_out)
                 eval_dir = self.artifact_mgr.get_candidate_eval_dir(cand_name)
 
                 spec = CandidateSpec(
@@ -255,6 +256,9 @@ class SearchEngine:
                     self.stats["cached_count"] += 1
                     self._log_decision("Phase A (SLAM)", cand_name, "REUSED_CACHE", "Reused evaluation from cache")
                     cached_summary["trajectory_metrics"] = traj_metrics.get(prof_key, {})
+                    cached_summary["trajectory_path"] = traj_file
+                    cached_summary["mesh_path"] = str(mesh_out)
+                    cached_summary["pcd_path"] = str(pcd_out)
                     cached_summary["spec"] = spec.to_metadata_dict()
                     slam_eval_results.append(cached_summary)
                     family_results.append(cached_summary)
@@ -263,7 +267,7 @@ class SearchEngine:
                 recon_t = 0.0
                 if self.artifact_mgr.should_reuse_reconstruction(
                     mesh_out, pcd_out, candidate_spec=spec, dataset_fingerprint=self.dataset_fingerprint,
-                    trajectory_sha256=traj_sha, split_hash=self.split_hash, force=self.force
+                    trajectory_sha256=traj_sha, split_hash=self.split_hash, meta_path=meta_out, force=self.force
                 ):
                     print(f"⏭️ Mesh & PCD 재사용: {mesh_out.name}")
                     self._log_decision("Phase A (SLAM)", cand_name, "REUSED_MESH", "Reused existing mesh/pcd")
@@ -288,9 +292,15 @@ class SearchEngine:
                         self._log_decision("Phase A (SLAM)", cand_name, "FAILED", f"TSDF worker failed: {w_res.status}")
                         fail_rec = self._fail_summary(cand_name, w_res.error_message or "worker crash", status=w_res.status)
                         fail_rec["spec"] = spec.to_metadata_dict()
+                        fail_rec["trajectory_path"] = traj_file
                         slam_eval_results.append(fail_rec)
                         family_results.append(fail_rec)
                         continue
+
+                    # Save artifact metadata on successful worker generation
+                    self.artifact_mgr.save_artifact_metadata(
+                        meta_out, spec, self.dataset_fingerprint, traj_sha, self.split_hash
+                    )
 
                 try:
                     summary = evaluate_reconstruction(
@@ -305,6 +315,9 @@ class SearchEngine:
                         max_holdout_samples=self.stage1_samples
                     )
                     summary["trajectory_metrics"] = traj_metrics.get(prof_key, {})
+                    summary["trajectory_path"] = traj_file
+                    summary["mesh_path"] = str(mesh_out)
+                    summary["pcd_path"] = str(pcd_out)
                     summary["spec"] = spec.to_metadata_dict()
                     summary["spec_hash"] = spec_hash
                     summary["dataset_fingerprint"] = self.dataset_fingerprint
@@ -318,6 +331,7 @@ class SearchEngine:
                     self._log_decision("Phase A (SLAM)", cand_name, "FAILED", f"Evaluation exception: {str(e)}")
                     fail_rec = self._fail_summary(cand_name, str(e), status="FAIL_EXCEPTION")
                     fail_rec["spec"] = spec.to_metadata_dict()
+                    fail_rec["trajectory_path"] = traj_file
                     slam_eval_results.append(fail_rec)
                     family_results.append(fail_rec)
 
@@ -328,16 +342,24 @@ class SearchEngine:
                 champ_summary = valid_fam[0]["summary_data"]
                 champ_cand_name = champ_summary.get("candidate_name")
                 champ_key = champ_cand_name.replace("_tsdf10mm", "").replace("_voxel10mm", "")
+                champ_spec = get_slam_profile_spec(champ_key)
                 champ_traj = trajectories.get(champ_key, "")
-                backend_champions.append((champ_key, champ_traj))
+                champ_sha = traj_sha_map.get(champ_key, compute_file_sha256(champ_traj))
+                champ_obj = SlamChampion(
+                    profile_spec=champ_spec,
+                    trajectory_path=champ_traj,
+                    trajectory_sha256=champ_sha,
+                    phase_a_summary=champ_summary
+                )
+                backend_champions.append(champ_obj)
                 self._log_decision("Phase A1 (SLAM Profile)", champ_key, "SELECTED_BACKEND_CHAMPION", f"Selected as {backend_name} champion (Quality: {valid_fam[0].get('quality_score', 0):.1f})")
                 print(f"👑 [{backend_name} Champion] `{champ_key}` (Quality: {valid_fam[0].get('quality_score', 0):.1f})")
             elif family_results:
-                # No passing candidate for this backend
                 print(f"⚠️ No valid candidate passed for backend `{backend_name}`")
 
         # 3. Phase A2: Compare Backend Champions & Adaptive Evaluation
-        champ_names = [f"{c[0]}_tsdf10mm" for c in backend_champions]
+        champ_keys = [c.profile_spec.candidate_key for c in backend_champions]
+        champ_names = [f"{k}_tsdf10mm" for k in champ_keys]
         champ_summaries = [s for s in slam_eval_results if s.get("candidate_name") in champ_names]
         ranked_champs = rank_candidate_summaries(champ_summaries)
         valid_champs = [r for r in ranked_champs if r.get("hard_gate_pass", False)]
@@ -368,9 +390,10 @@ class SearchEngine:
                             max_holdout_samples=self.stage2_samples
                         )
                         exp_summary["trajectory_metrics"] = traj_metrics.get(c_key, {})
+                        exp_summary["trajectory_path"] = t_path
+                        exp_summary["mesh_path"] = str(m_path)
                         exp_summary["spec"] = c_sum.get("spec", {})
                         self._log_decision("Phase A2 (Backend)", c_name, "ADAPTIVE_EXPANDED_EVAL", f"Expanded evaluation with {self.stage2_samples} samples")
-                        # Update summary in results
                         for idx, el in enumerate(slam_eval_results):
                             if el.get("candidate_name") == c_name:
                                 slam_eval_results[idx] = exp_summary
@@ -383,13 +406,13 @@ class SearchEngine:
                 valid_champs = [r for r in ranked_champs if r.get("hard_gate_pass", False)]
 
         # Select Top-K SLAMs
-        top_slams: List[Tuple[str, str]] = []
+        top_slams: List[SlamChampion] = []
         for item in valid_champs[:self.beam_width_slam]:
             cand_n = item["candidate_name"]
             slam_name = cand_n.replace("_tsdf10mm", "").replace("_voxel10mm", "")
-            t_file = trajectories.get(slam_name, "")
-            if t_file and (slam_name, t_file) not in top_slams:
-                top_slams.append((slam_name, t_file))
+            champ_obj = next((c for c in backend_champions if c.profile_spec.candidate_key == slam_name), None)
+            if champ_obj and champ_obj not in top_slams:
+                top_slams.append(champ_obj)
                 self._log_decision("Phase A (SLAM)", slam_name, "SELECTED_BEAM", f"Selected in Top {self.beam_width_slam} SLAM beam (Quality: {item.get('quality_score', 0):.1f})")
                 print(f"🌟 [Phase A Winner] SLAM: `{slam_name}` (Quality: {item.get('quality_score', 0):.1f}, Score: {item.get('composite_score', 0):.1f})")
 
@@ -400,16 +423,31 @@ class SearchEngine:
     # ───────────────────────────────────────────────────────────
     def run_phase_b(
         self,
-        top_slams: List[Tuple[str, str]],
+        top_slams: Union[List[SlamChampion], List[Tuple[str, str]]],
         phase_a_results: List[dict]
     ) -> Tuple[List[dict], List[dict]]:
         """Runs Phase B Fusion exploration with common surface adapter to eliminate surface confound."""
+        # Normalize top_slams to SlamChampion objects
+        normalized_champions: List[SlamChampion] = []
+        for elem in top_slams:
+            if isinstance(elem, SlamChampion):
+                normalized_champions.append(elem)
+            elif isinstance(elem, (tuple, list)) and len(elem) >= 2:
+                s_key, t_path = elem[0], elem[1]
+                prof_spec = get_slam_profile_spec(s_key)
+                t_sha = compute_file_sha256(t_path)
+                normalized_champions.append(SlamChampion(
+                    profile_spec=prof_spec,
+                    trajectory_path=t_path,
+                    trajectory_sha256=t_sha,
+                    phase_a_summary={}
+                ))
+
         print("\n==========================================================")
-        print(f" 🚀 [PHASE B] Fusion Exploration (TSDF vs DirectCloud across {len(top_slams)} SLAMs, Mode: {self.mode.upper()})")
+        print(f" 🚀 [PHASE B] Fusion Exploration (TSDF vs DirectCloud across {len(normalized_champions)} SLAMs, Mode: {self.mode.upper()})")
         print("==========================================================")
 
         fusion_eval_results: List[dict] = []
-        phase_a_by_cand = {s.get("candidate_name"): s for s in phase_a_results}
 
         # TSDF resolutions to evaluate
         if self.mode == "quick":
@@ -420,47 +458,41 @@ class SearchEngine:
             # Standard mode
             voxel_options = [0.020, 0.010, 0.008]
 
-        for slam_name, traj_path in top_slams:
-            traj_sha = compute_file_sha256(traj_path)
+        for champ in normalized_champions:
+            prof_spec = champ.profile_spec
+            slam_name = prof_spec.candidate_key
+            traj_path = champ.trajectory_path
+            traj_sha = champ.trajectory_sha256
 
             # 1. TSDF Resolution Search
             for v in voxel_options:
                 v_mm = int(round(v * 1000))
                 cand_name = f"{slam_name}_tsdf{v_mm}mm"
-                mesh_out = self.artifact_mgr.get_mesh_path(slam_name, v_mm)
-                pcd_out = self.artifact_mgr.get_pcd_path(slam_name, v_mm)
+                mesh_tsdf = self.artifact_mgr.get_mesh_path(slam_name, v_mm)
+                pcd_tsdf = self.artifact_mgr.get_pcd_path(slam_name, v_mm)
+                meta_tsdf = self.artifact_mgr.get_artifact_meta_path(mesh_tsdf)
+                
+                # Common surface adapter mesh (Poisson depth=8, no simplification) for fair fusion comparison
+                adapter_mesh = self.artifact_mgr.get_mesh_path(f"{slam_name}_tsdf", v_mm, method="poisson")
+                adapter_meta = self.artifact_mgr.get_artifact_meta_path(adapter_mesh)
                 eval_dir = self.artifact_mgr.get_candidate_eval_dir(cand_name)
 
                 spec = CandidateSpec(
                     dataset_name=self.bag_name,
-                    slam_backend=slam_name,
+                    slam_backend=prof_spec.backend,
+                    slam_profile=prof_spec.profile,
+                    replay_rate=prof_spec.replay_rate,
                     fusion_method="tsdf",
-                    fusion_params={"voxel_size_m": v, "depth_min_m": self.depth_min, "depth_max_m": self.depth_max, "trunc_mult": self.trunc_mult},
-                    surface_method="tsdf_direct",
+                    fusion_params={"voxel_size_m": v, "depth_min_m": self.depth_min, "depth_max_m": self.depth_max, "trunc_mult": self.trunc_mult, "weight_threshold": 1.5},
+                    surface_method="poisson",
+                    surface_params={"depth": 8},
+                    postprocess_params={"clean_density": True, "simplify_target": 0.0},
                     frame_stride=self._screening_stride()
                 )
                 spec_hash = spec.compute_spec_hash()
 
-                print(f"▶️ Evaluating TSDF Voxel: {cand_name} ({v_mm}mm)")
+                print(f"▶️ Evaluating TSDF Voxel: {cand_name} ({v_mm}mm) with common Poisson adapter")
                 self.stats["total_candidates"] += 1
-
-                # Check if 10mm result exists from Phase A
-                cand_10mm_a = f"{slam_name}_tsdf10mm"
-                if v_mm == 10 and cand_10mm_a in phase_a_by_cand:
-                    existing = phase_a_by_cand.get(cand_10mm_a)
-                    if existing and existing.get("status") not in ("FAIL", "FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM"):
-                        print(f"♻️ Phase A 10mm 결과 직접 재사용: {cand_name}")
-                        existing_copy = copy.deepcopy(existing)
-                        existing_copy["candidate_name"] = cand_name
-                        existing_copy["fusion_method"] = "tsdf"
-                        existing_copy["voxel_size_m"] = v
-                        existing_copy["pcd_path"] = str(pcd_out)
-                        existing_copy["mesh_path"] = str(mesh_out)
-                        existing_copy["spec"] = spec.to_metadata_dict()
-                        self.stats["cached_count"] += 1
-                        self._log_decision("Phase B (Fusion)", cand_name, "REUSED_PHASE_A", "Reused Phase A 10mm TSDF directly")
-                        fusion_eval_results.append(existing_copy)
-                        continue
 
                 cached_summary = self.artifact_mgr.should_reuse_evaluation(
                     cand_name, self.force, expected_spec_hash=spec_hash,
@@ -470,8 +502,10 @@ class SearchEngine:
                     print(f"⏭️ Evaluation 재사용: {cand_name}")
                     cached_summary["fusion_method"] = "tsdf"
                     cached_summary["voxel_size_m"] = v
-                    cached_summary["pcd_path"] = str(pcd_out)
-                    cached_summary["mesh_path"] = str(mesh_out)
+                    cached_summary["pcd_path"] = str(pcd_tsdf)
+                    cached_summary["mesh_path"] = str(adapter_mesh)
+                    cached_summary["direct_tsdf_mesh_path"] = str(mesh_tsdf)
+                    cached_summary["trajectory_path"] = traj_path
                     cached_summary["spec"] = spec.to_metadata_dict()
                     self.stats["cached_count"] += 1
                     self._log_decision("Phase B (Fusion)", cand_name, "REUSED_CACHE", "Reused evaluation from cache")
@@ -479,19 +513,20 @@ class SearchEngine:
                     continue
 
                 recon_t = 0.0
+                # Check TSDF PCD reuse
                 if self.artifact_mgr.should_reuse_reconstruction(
-                    mesh_out, pcd_out, candidate_spec=spec, dataset_fingerprint=self.dataset_fingerprint,
-                    trajectory_sha256=traj_sha, split_hash=self.split_hash, force=self.force
+                    None, pcd_tsdf, candidate_spec=spec, dataset_fingerprint=self.dataset_fingerprint,
+                    trajectory_sha256=traj_sha, split_hash=self.split_hash, meta_path=meta_tsdf, force=self.force
                 ):
-                    print(f"⏭️ Mesh & PCD 재사용: {mesh_out.name}")
-                    self._log_decision("Phase B (Fusion)", cand_name, "REUSED_MESH", "Reused existing mesh & PCD files")
+                    print(f"⏭️ TSDF PCD 재사용: {pcd_tsdf.name}")
+                    self._log_decision("Phase B (Fusion)", cand_name, "REUSED_PCD", "Reused existing TSDF PCD")
                 else:
                     stride = self._screening_stride()
                     w_res = run_tsdf_worker(
                         dataset_dir=str(self.dataset.dataset_dir),
                         traj_file=traj_path,
-                        mesh_path=str(mesh_out),
-                        pcd_path=str(pcd_out),
+                        mesh_path=str(mesh_tsdf),
+                        pcd_path=str(pcd_tsdf),
                         voxel=v,
                         depth_max=self.depth_max,
                         trunc_mult=self.trunc_mult,
@@ -499,8 +534,8 @@ class SearchEngine:
                         split_file=str(self.split_file),
                         quick=self.quick
                     )
-                    recon_t = w_res.runtime_sec
-                    self.stats["total_runtime_sec"] += recon_t
+                    recon_t += w_res.runtime_sec
+                    self.stats["total_runtime_sec"] += w_res.runtime_sec
                     if not w_res.is_success:
                         print(f"  ❌ TSDF {v_mm}mm reconstruct 실패: {w_res.status} ({w_res.error_message})")
                         self._log_decision("Phase B (Fusion)", cand_name, "FAILED", f"Worker failure: {w_res.status}")
@@ -508,14 +543,47 @@ class SearchEngine:
                         fail_rec["fusion_method"] = "tsdf"
                         fail_rec["voxel_size_m"] = v
                         fail_rec["spec"] = spec.to_metadata_dict()
+                        fail_rec["trajectory_path"] = traj_path
                         fusion_eval_results.append(fail_rec)
                         continue
+
+                    # Save TSDF artifact metadata
+                    self.artifact_mgr.save_artifact_metadata(
+                        meta_tsdf, spec, self.dataset_fingerprint, traj_sha, self.split_hash
+                    )
+
+                # Run Common Surface Adapter (Poisson depth=8, no simplification) on TSDF PCD
+                if not is_artifact_valid(adapter_mesh) or self.force:
+                    w_surf = run_surface_worker(
+                        input_ply=str(pcd_tsdf),
+                        output_mesh=str(adapter_mesh),
+                        method="poisson",
+                        voxel=v,
+                        depth=8,
+                        simplify=0.0,
+                        no_simplify=True
+                    )
+                    recon_t += w_surf.runtime_sec
+                    self.stats["total_runtime_sec"] += w_surf.runtime_sec
+                    if not w_surf.is_success:
+                        print(f"  ❌ TSDF common adapter failed: {w_surf.status}")
+                        fail_rec = self._fail_summary(cand_name, w_surf.error_message or "adapter failure", status=w_surf.status)
+                        fail_rec["fusion_method"] = "tsdf"
+                        fail_rec["voxel_size_m"] = v
+                        fail_rec["spec"] = spec.to_metadata_dict()
+                        fail_rec["trajectory_path"] = traj_path
+                        fusion_eval_results.append(fail_rec)
+                        continue
+
+                    self.artifact_mgr.save_artifact_metadata(
+                        adapter_meta, spec, self.dataset_fingerprint, traj_sha, self.split_hash
+                    )
 
                 try:
                     summary = evaluate_reconstruction(
                         dataset_input=self.dataset,
                         trajectory_input=traj_path,
-                        mesh_input=str(mesh_out),
+                        mesh_input=str(adapter_mesh),
                         output_dir=eval_dir,
                         candidate_name=cand_name,
                         split_json=str(self.split_file),
@@ -525,14 +593,16 @@ class SearchEngine:
                     )
                     summary["fusion_method"] = "tsdf"
                     summary["voxel_size_m"] = v
-                    summary["pcd_path"] = str(pcd_out)
-                    summary["mesh_path"] = str(mesh_out)
+                    summary["pcd_path"] = str(pcd_tsdf)
+                    summary["mesh_path"] = str(adapter_mesh)
+                    summary["direct_tsdf_mesh_path"] = str(mesh_tsdf)
+                    summary["trajectory_path"] = traj_path
                     summary["spec"] = spec.to_metadata_dict()
                     summary["spec_hash"] = spec_hash
                     summary["dataset_fingerprint"] = self.dataset_fingerprint
                     summary["split_hash"] = self.split_hash
                     self.stats["evaluated_count"] += 1
-                    self._log_decision("Phase B (Fusion)", cand_name, "EXECUTED", "Evaluated TSDF voxel candidate")
+                    self._log_decision("Phase B (Fusion)", cand_name, "EXECUTED", "Evaluated TSDF candidate with common adapter")
                     fusion_eval_results.append(summary)
                 except Exception as e:
                     print(f"❌ Phase B {v_mm}mm 평가 실패: {e}")
@@ -541,21 +611,28 @@ class SearchEngine:
                     fail_rec["fusion_method"] = "tsdf"
                     fail_rec["voxel_size_m"] = v
                     fail_rec["spec"] = spec.to_metadata_dict()
+                    fail_rec["trajectory_path"] = traj_path
                     fusion_eval_results.append(fail_rec)
 
-            # 2. Direct Point Cloud Fusion (with common surface adapter for fair comparison)
+            # 2. Direct Point Cloud Fusion (with identical common surface adapter)
             direct_v_mm = 10
             direct_cand_name = f"{slam_name}_direct{direct_v_mm}mm"
             direct_pcd_out = self.artifact_mgr.get_direct_pcd_path(slam_name, direct_v_mm)
+            direct_pcd_meta = self.artifact_mgr.get_artifact_meta_path(direct_pcd_out)
             direct_mesh_out = self.artifact_mgr.get_mesh_path(f"{slam_name}_direct", direct_v_mm, method="poisson")
+            direct_mesh_meta = self.artifact_mgr.get_artifact_meta_path(direct_mesh_out)
             direct_eval_dir = self.artifact_mgr.get_candidate_eval_dir(direct_cand_name)
 
             spec_direct = CandidateSpec(
                 dataset_name=self.bag_name,
-                slam_backend=slam_name,
+                slam_backend=prof_spec.backend,
+                slam_profile=prof_spec.profile,
+                replay_rate=prof_spec.replay_rate,
                 fusion_method="direct_pointcloud",
                 fusion_params={"voxel_size_m": 0.010, "depth_min_m": self.depth_min, "depth_max_m": self.depth_max},
                 surface_method="poisson",
+                surface_params={"depth": 8},
+                postprocess_params={"clean_density": True, "simplify_target": 0.0},
                 frame_stride=self._screening_stride()
             )
             spec_dir_hash = spec_direct.compute_spec_hash()
@@ -563,6 +640,7 @@ class SearchEngine:
             print(f"▶️ Evaluating Direct Point Cloud Fusion Baseline: {direct_cand_name}")
             self.stats["total_candidates"] += 1
 
+            dir_recon_t = 0.0
             if not is_artifact_valid(direct_pcd_out) or self.force:
                 w_res = run_direct_fusion_worker(
                     dataset_dir=str(self.dataset.dataset_dir),
@@ -574,11 +652,15 @@ class SearchEngine:
                     stride=self._screening_stride(),
                     split_file=str(self.split_file)
                 )
+                dir_recon_t += w_res.runtime_sec
                 self.stats["total_runtime_sec"] += w_res.runtime_sec
                 if not w_res.is_success:
                     print(f"  ❌ Direct fusion failed: {w_res.status} ({w_res.error_message})")
                     self._log_decision("Phase B (Fusion)", direct_cand_name, "FAILED", f"Direct fusion failed: {w_res.status}")
                 else:
+                    self.artifact_mgr.save_artifact_metadata(
+                        direct_pcd_meta, spec_direct, self.dataset_fingerprint, traj_sha, self.split_hash
+                    )
                     self._log_decision("Phase B (Fusion)", direct_cand_name, "EXECUTED", "Generated direct point cloud")
 
             # Common surface adapter (Poisson depth=8, no simplification)
@@ -592,6 +674,7 @@ class SearchEngine:
                     cached_dir_eval["voxel_size_m"] = 0.010
                     cached_dir_eval["pcd_path"] = str(direct_pcd_out)
                     cached_dir_eval["mesh_path"] = str(direct_mesh_out)
+                    cached_dir_eval["trajectory_path"] = traj_path
                     cached_dir_eval["spec"] = spec_direct.to_metadata_dict()
                     fusion_eval_results.append(cached_dir_eval)
                 else:
@@ -604,7 +687,12 @@ class SearchEngine:
                         simplify=0.0,
                         no_simplify=True
                     )
+                    dir_recon_t += w_surf.runtime_sec
+                    self.stats["total_runtime_sec"] += w_surf.runtime_sec
                     if w_surf.is_success:
+                        self.artifact_mgr.save_artifact_metadata(
+                            direct_mesh_meta, spec_direct, self.dataset_fingerprint, traj_sha, self.split_hash
+                        )
                         try:
                             dir_summary = evaluate_reconstruction(
                                 dataset_input=self.dataset,
@@ -613,7 +701,7 @@ class SearchEngine:
                                 output_dir=direct_eval_dir,
                                 candidate_name=direct_cand_name,
                                 split_json=str(self.split_file),
-                                runtime_sec=w_surf.runtime_sec,
+                                runtime_sec=dir_recon_t,
                                 cheap=True,
                                 max_holdout_samples=self.stage1_samples
                             )
@@ -621,6 +709,7 @@ class SearchEngine:
                             dir_summary["voxel_size_m"] = 0.010
                             dir_summary["pcd_path"] = str(direct_pcd_out)
                             dir_summary["mesh_path"] = str(direct_mesh_out)
+                            dir_summary["trajectory_path"] = traj_path
                             dir_summary["spec"] = spec_direct.to_metadata_dict()
                             dir_summary["spec_hash"] = spec_dir_hash
                             dir_summary["dataset_fingerprint"] = self.dataset_fingerprint
@@ -630,45 +719,60 @@ class SearchEngine:
                         except Exception as e:
                             print(f"⚠️ Direct fusion eval notice: {e}")
 
-        # 3. Adaptive Fine Voxel (5mm) Check on Quality Gain & Plateau Detection (Section 19)
+        # 3. Adaptive Fine Voxel (5mm) Check with Strict Memory Gate
         if self.mode != "quick":
             valid_b_curr = [r for r in rank_candidate_summaries(fusion_eval_results) if r.get("hard_gate_pass", False)]
             if valid_b_curr:
                 best_item = valid_b_curr[0]
-                best_slam = best_item["summary_data"].get("spec", {}).get("requested_params", {}).get("slam_backend") or top_slams[0][0]
-                best_traj = next((t[1] for t in top_slams if t[0] == best_slam), top_slams[0][1])
+                best_spec = best_item["summary_data"].get("spec", {}).get("requested_params", {})
+                best_backend = best_spec.get("slam_backend") or normalized_champions[0].profile_spec.backend
+                best_profile = best_spec.get("slam_profile") or normalized_champions[0].profile_spec.profile
+                best_rate = float(best_spec.get("replay_rate", 1.0))
+                best_traj = best_item["summary_data"].get("trajectory_path") or normalized_champions[0].trajectory_path
+                best_slam_key = next((c.profile_spec.candidate_key for c in normalized_champions if c.trajectory_path == best_traj), f"{best_backend}_{best_profile}_rate{best_rate:g}")
 
                 # Check 10mm vs 8mm quality gain
                 q_10mm = None
                 q_8mm = None
                 for r in valid_b_curr:
                     c_n = r["candidate_name"]
-                    if f"{best_slam}_tsdf10mm" in c_n:
+                    if f"{best_slam_key}_tsdf10mm" in c_n:
                         q_10mm = r.get("quality_score", 0.0)
-                    elif f"{best_slam}_tsdf8mm" in c_n:
+                    elif f"{best_slam_key}_tsdf8mm" in c_n:
                         q_8mm = r.get("quality_score", 0.0)
 
                 quality_gain = (q_8mm - q_10mm) if (q_8mm is not None and q_10mm is not None) else 0.0
+                est_mem_5mm = estimate_vbg_memory_gb(best_traj, voxel_size=0.005, depth_max=self.depth_max)
 
+                cand_5mm_name = f"{best_slam_key}_tsdf5mm"
                 if q_8mm is not None and quality_gain < self.min_quality_gain_5mm:
                     print(f"⏭️ [Adaptive 5mm Skipped] Quality gain from 10mm to 8mm is {quality_gain:+.2f} pts (< {self.min_quality_gain_5mm} threshold) -> Plateau reached.")
-                    self._log_decision("Phase B (Fusion)", f"{best_slam}_tsdf5mm", "SKIPPED_PLATEAU", f"8mm quality gain vs 10mm = +{quality_gain:.2f} < threshold {self.min_quality_gain_5mm}")
+                    self._log_decision("Phase B (Fusion)", cand_5mm_name, "SKIPPED_PLATEAU", f"8mm quality gain vs 10mm = +{quality_gain:.2f} < threshold {self.min_quality_gain_5mm}")
+                elif est_mem_5mm > self.max_memory_gb_5mm:
+                    print(f"⏭️ [Adaptive 5mm Skipped] Estimated memory {est_mem_5mm:.1f}GB exceeds limit {self.max_memory_gb_5mm:.1f}GB.")
+                    self._log_decision("Phase B (Fusion)", cand_5mm_name, "SKIPPED_RESOURCE", f"Estimated memory {est_mem_5mm:.1f}GB > {self.max_memory_gb_5mm:.1f}GB")
                 else:
-                    cand_5mm_name = f"{best_slam}_tsdf5mm"
-                    mesh_5mm = self.artifact_mgr.get_mesh_path(best_slam, 5)
-                    pcd_5mm = self.artifact_mgr.get_pcd_path(best_slam, 5)
+                    mesh_5mm = self.artifact_mgr.get_mesh_path(best_slam_key, 5)
+                    pcd_5mm = self.artifact_mgr.get_pcd_path(best_slam_key, 5)
+                    meta_5mm = self.artifact_mgr.get_artifact_meta_path(mesh_5mm)
+                    adapter_5mm = self.artifact_mgr.get_mesh_path(f"{best_slam_key}_tsdf", 5, method="poisson")
+                    adapter_5mm_meta = self.artifact_mgr.get_artifact_meta_path(adapter_5mm)
                     eval_5mm_dir = self.artifact_mgr.get_candidate_eval_dir(cand_5mm_name)
 
                     spec_5mm = CandidateSpec(
                         dataset_name=self.bag_name,
-                        slam_backend=best_slam,
+                        slam_backend=best_backend,
+                        slam_profile=best_profile,
+                        replay_rate=best_rate,
                         fusion_method="tsdf",
-                        fusion_params={"voxel_size_m": 0.005, "depth_min_m": self.depth_min, "depth_max_m": self.depth_max, "trunc_mult": self.trunc_mult},
-                        surface_method="tsdf_direct",
+                        fusion_params={"voxel_size_m": 0.005, "depth_min_m": self.depth_min, "depth_max_m": self.depth_max, "trunc_mult": self.trunc_mult, "weight_threshold": 1.5},
+                        surface_method="poisson",
+                        surface_params={"depth": 8},
+                        postprocess_params={"clean_density": True, "simplify_target": 0.0},
                         frame_stride=self._screening_stride()
                     )
 
-                    print(f"▶️ Adaptive Fine Voxel (5mm) Execution: {cand_5mm_name} (Gain was {quality_gain:+.2f} >= {self.min_quality_gain_5mm})")
+                    print(f"▶️ Adaptive Fine Voxel (5mm) Execution: {cand_5mm_name} (Gain was {quality_gain:+.2f} >= {self.min_quality_gain_5mm}, EstMem: {est_mem_5mm:.1f}GB)")
                     self.stats["total_candidates"] += 1
                     w_res = run_tsdf_worker(
                         dataset_dir=str(self.dataset.dataset_dir),
@@ -683,40 +787,137 @@ class SearchEngine:
                         quick=self.quick
                     )
                     if w_res.is_success:
-                        try:
-                            sum_5mm = evaluate_reconstruction(
-                                dataset_input=self.dataset,
-                                trajectory_input=best_traj,
-                                mesh_input=str(mesh_5mm),
-                                output_dir=eval_5mm_dir,
-                                candidate_name=cand_5mm_name,
-                                split_json=str(self.split_file),
-                                runtime_sec=w_res.runtime_sec,
-                                cheap=True,
-                                max_holdout_samples=self.stage1_samples
+                        self.artifact_mgr.save_artifact_metadata(
+                            meta_5mm, spec_5mm, self.dataset_fingerprint, compute_file_sha256(best_traj), self.split_hash
+                        )
+                        w_surf = run_surface_worker(
+                            input_ply=str(pcd_5mm),
+                            output_mesh=str(adapter_5mm),
+                            method="poisson",
+                            voxel=0.005,
+                            depth=8,
+                            simplify=0.0,
+                            no_simplify=True
+                        )
+                        if w_surf.is_success:
+                            self.artifact_mgr.save_artifact_metadata(
+                                adapter_5mm_meta, spec_5mm, self.dataset_fingerprint, compute_file_sha256(best_traj), self.split_hash
                             )
-                            sum_5mm["fusion_method"] = "tsdf"
-                            sum_5mm["voxel_size_m"] = 0.005
-                            sum_5mm["pcd_path"] = str(pcd_5mm)
-                            sum_5mm["mesh_path"] = str(mesh_5mm)
-                            sum_5mm["spec"] = spec_5mm.to_metadata_dict()
-                            sum_5mm["spec_hash"] = spec_5mm.compute_spec_hash()
-                            fusion_eval_results.append(sum_5mm)
-                            self._log_decision("Phase B (Fusion)", cand_5mm_name, "EXECUTED", "Evaluated 5mm TSDF candidate")
-                        except Exception as e:
-                            print(f"⚠️ 5mm eval notice: {e}")
+                            try:
+                                sum_5mm = evaluate_reconstruction(
+                                    dataset_input=self.dataset,
+                                    trajectory_input=best_traj,
+                                    mesh_input=str(adapter_5mm),
+                                    output_dir=eval_5mm_dir,
+                                    candidate_name=cand_5mm_name,
+                                    split_json=str(self.split_file),
+                                    runtime_sec=w_res.runtime_sec + w_surf.runtime_sec,
+                                    cheap=True,
+                                    max_holdout_samples=self.stage1_samples
+                                )
+                                sum_5mm["fusion_method"] = "tsdf"
+                                sum_5mm["voxel_size_m"] = 0.005
+                                sum_5mm["pcd_path"] = str(pcd_5mm)
+                                sum_5mm["mesh_path"] = str(adapter_5mm)
+                                sum_5mm["direct_tsdf_mesh_path"] = str(mesh_5mm)
+                                sum_5mm["trajectory_path"] = best_traj
+                                sum_5mm["spec"] = spec_5mm.to_metadata_dict()
+                                sum_5mm["spec_hash"] = spec_5mm.compute_spec_hash()
+                                fusion_eval_results.append(sum_5mm)
+                                self._log_decision("Phase B (Fusion)", cand_5mm_name, "EXECUTED", "Evaluated 5mm TSDF candidate")
+                            except Exception as e:
+                                print(f"⚠️ 5mm eval notice: {e}")
                     else:
                         self._log_decision("Phase B (Fusion)", cand_5mm_name, "FAILED", f"5mm worker failed: {w_res.status}")
+
+        # 4. Phase B2: Truncation Multiplier Refinement on Top TSDF Candidates
+        if self.mode != "quick":
+            valid_b_tsdf = [r for r in rank_candidate_summaries(fusion_eval_results) if r.get("hard_gate_pass", False) and r["summary_data"].get("fusion_method") == "tsdf"]
+            if valid_b_tsdf:
+                top_tsdf_summary = valid_b_tsdf[0]["summary_data"]
+                top_tsdf_spec_dict = top_tsdf_summary.get("spec", {}).get("requested_params", {})
+                v_m = top_tsdf_spec_dict.get("fusion_params", {}).get("voxel_size_m", 0.008)
+                v_mm = int(round(v_m * 1000))
+                s_key = f"{top_tsdf_spec_dict.get('slam_backend')}_{top_tsdf_spec_dict.get('slam_profile')}_rate{float(top_tsdf_spec_dict.get('replay_rate', 1.0)):g}"
+                t_path = top_tsdf_summary.get("trajectory_path")
+
+                # Test trunc_mult options [3.0, 6.0]
+                for t_mult in [3.0, 6.0]:
+                    refine_cand_name = f"{s_key}_tsdf{v_mm}mm_trunc{int(t_mult)}"
+                    refine_mesh = self.artifact_mgr.get_candidate_artifact_dir(refine_cand_name) / f"mesh.obj"
+                    refine_pcd = self.artifact_mgr.get_candidate_artifact_dir(refine_cand_name) / f"cloud.ply"
+                    refine_adapter = self.artifact_mgr.get_candidate_artifact_dir(refine_cand_name) / f"adapter.obj"
+                    refine_eval_dir = self.artifact_mgr.get_candidate_eval_dir(refine_cand_name)
+
+                    refine_spec = CandidateSpec(
+                        dataset_name=self.bag_name,
+                        slam_backend=top_tsdf_spec_dict.get("slam_backend"),
+                        slam_profile=top_tsdf_spec_dict.get("slam_profile", "normal"),
+                        replay_rate=float(top_tsdf_spec_dict.get("replay_rate", 1.0)),
+                        fusion_method="tsdf",
+                        fusion_params={"voxel_size_m": v_m, "depth_min_m": self.depth_min, "depth_max_m": self.depth_max, "trunc_mult": t_mult, "weight_threshold": 1.5},
+                        surface_method="poisson",
+                        surface_params={"depth": 8},
+                        postprocess_params={"clean_density": True, "simplify_target": 0.0},
+                        frame_stride=self._screening_stride()
+                    )
+
+                    w_res = run_tsdf_worker(
+                        dataset_dir=str(self.dataset.dataset_dir),
+                        traj_file=t_path,
+                        mesh_path=str(refine_mesh),
+                        pcd_path=str(refine_pcd),
+                        voxel=v_m,
+                        depth_max=self.depth_max,
+                        trunc_mult=t_mult,
+                        stride=self._screening_stride(),
+                        split_file=str(self.split_file),
+                        quick=self.quick
+                    )
+                    if w_res.is_success:
+                        w_surf = run_surface_worker(
+                            input_ply=str(refine_pcd),
+                            output_mesh=str(refine_adapter),
+                            method="poisson",
+                            voxel=v_m,
+                            depth=8,
+                            simplify=0.0,
+                            no_simplify=True
+                        )
+                        if w_surf.is_success:
+                            try:
+                                ref_sum = evaluate_reconstruction(
+                                    dataset_input=self.dataset,
+                                    trajectory_input=t_path,
+                                    mesh_input=str(refine_adapter),
+                                    output_dir=refine_eval_dir,
+                                    candidate_name=refine_cand_name,
+                                    split_json=str(self.split_file),
+                                    runtime_sec=w_res.runtime_sec + w_surf.runtime_sec,
+                                    cheap=True,
+                                    max_holdout_samples=self.stage1_samples
+                                )
+                                ref_sum["fusion_method"] = "tsdf"
+                                ref_sum["voxel_size_m"] = v_m
+                                ref_sum["pcd_path"] = str(refine_pcd)
+                                ref_sum["mesh_path"] = str(refine_adapter)
+                                ref_sum["direct_tsdf_mesh_path"] = str(refine_mesh)
+                                ref_sum["trajectory_path"] = t_path
+                                ref_sum["spec"] = refine_spec.to_metadata_dict()
+                                ref_sum["spec_hash"] = refine_spec.compute_spec_hash()
+                                fusion_eval_results.append(ref_sum)
+                                self._log_decision("Phase B2 (Refinement)", refine_cand_name, "EXECUTED", f"Evaluated truncation multiplier {t_mult}")
+                            except Exception:
+                                pass
 
         # Rank Phase B candidates to select Top-K Fusion pipelines with diversity retention
         ranked_b = rank_candidate_summaries(fusion_eval_results)
         valid_b = [r for r in ranked_b if r.get("hard_gate_pass", False)]
 
         top_pipelines: List[dict] = []
-        # Diversity retention: ensure each surviving SLAM has at least 1 fusion pipeline in beam if valid
         seen_slams = set()
         for item in valid_b:
-            cand_slam = item["summary_data"].get("spec", {}).get("requested_params", {}).get("slam_backend") or item["candidate_name"].split("_")[0]
+            cand_slam = item["summary_data"].get("spec", {}).get("requested_params", {}).get("slam_backend")
             if cand_slam not in seen_slams and len(top_pipelines) < self.beam_width_fusion:
                 seen_slams.add(cand_slam)
                 top_pipelines.append(item["summary_data"])
@@ -755,12 +956,15 @@ class SearchEngine:
         for pipe_summary in top_fusion_pipelines:
             cand_base = pipe_summary.get("candidate_name", "candidate")
             spec_info = pipe_summary.get("spec", {}).get("requested_params", {})
-            slam_name = spec_info.get("slam_backend") or cand_base.split("_")[0]
-            traj_path = pipe_summary.get("trajectory_path") or trajectories.get(slam_name, "")
-            fusion_method = pipe_summary.get("fusion_method", "tsdf")
-            voxel_m = pipe_summary.get("voxel_size_m", 0.010)
+            slam_backend = spec_info.get("slam_backend")
+            slam_profile = spec_info.get("slam_profile", "normal")
+            replay_rate = float(spec_info.get("replay_rate", 1.0))
+            traj_path = pipe_summary.get("trajectory_path") or trajectories.get(slam_backend, "")
+            fusion_method = spec_info.get("fusion_method") or pipe_summary.get("fusion_method", "tsdf")
+            fusion_params = spec_info.get("fusion_params", {})
+            voxel_m = float(fusion_params.get("voxel_size_m", pipe_summary.get("voxel_size_m", 0.010)))
             v_mm = int(round(voxel_m * 1000))
-            pcd_file = pipe_summary.get("pcd_path") or str(self.artifact_mgr.get_pcd_path(slam_name, v_mm))
+            pcd_file = pipe_summary.get("pcd_path") or str(self.artifact_mgr.get_pcd_path(slam_backend, v_mm))
 
             for sm in all_methods:
                 if fusion_method == "direct_pointcloud" and sm == "tsdf_direct":
@@ -768,17 +972,19 @@ class SearchEngine:
 
                 cand_name = f"{cand_base}_{sm}"
                 self.stats["total_candidates"] += 1
-                mesh_out = self.artifact_mgr.get_mesh_path(f"{slam_name}_{fusion_method}", v_mm, method=sm)
+                mesh_out = self.artifact_mgr.get_mesh_path(f"{slam_backend}_{slam_profile}_rate{replay_rate:g}_{fusion_method}", v_mm, method=sm)
+                meta_out = self.artifact_mgr.get_artifact_meta_path(mesh_out)
                 eval_dir = self.artifact_mgr.get_candidate_eval_dir(cand_name)
 
                 spec = CandidateSpec(
                     dataset_name=self.bag_name,
-                    slam_backend=slam_name,
-                    slam_profile=spec_info.get("slam_profile", "normal"),
-                    replay_rate=spec_info.get("replay_rate", 1.0),
+                    slam_backend=slam_backend,
+                    slam_profile=slam_profile,
+                    replay_rate=replay_rate,
                     fusion_method=fusion_method,
-                    fusion_params=spec_info.get("fusion_params", {"voxel_size_m": voxel_m, "depth_min_m": self.depth_min, "depth_max_m": self.depth_max}),
+                    fusion_params=copy.deepcopy(fusion_params),
                     surface_method=sm,
+                    surface_params={"depth": 8, "alpha_factor": 3.0, "orient": "centroid"},
                     postprocess_params={"clean_density": True, "simplify_target": 0.0},
                     frame_stride=self._screening_stride()
                 )
@@ -786,14 +992,15 @@ class SearchEngine:
 
                 print(f"▶️ Evaluating Surface Method: {cand_name}")
 
-                # If TSDF direct, reuse Phase B mesh directly
-                if sm == "tsdf_direct" and pipe_summary.get("mesh_path") and Path(pipe_summary["mesh_path"]).exists():
+                # If TSDF direct, use TSDF direct mesh directly
+                if sm == "tsdf_direct" and pipe_summary.get("direct_tsdf_mesh_path") and Path(pipe_summary["direct_tsdf_mesh_path"]).exists():
                     tsdf_dir_summary = copy.deepcopy(pipe_summary)
                     tsdf_dir_summary["candidate_name"] = cand_name
                     tsdf_dir_summary["surface_method"] = "tsdf_direct"
+                    tsdf_dir_summary["mesh_path"] = pipe_summary["direct_tsdf_mesh_path"]
                     tsdf_dir_summary["spec"] = spec.to_metadata_dict()
                     self.stats["cached_count"] += 1
-                    self._log_decision("Phase C (Surface)", cand_name, "REUSED_PHASE_B", "Reused TSDF Direct mesh from Phase B")
+                    self._log_decision("Phase C (Surface)", cand_name, "REUSED_TSDF_DIRECT", "Reused direct TSDF mesh")
                     surface_eval_results.append(tsdf_dir_summary)
                     continue
 
@@ -807,13 +1014,17 @@ class SearchEngine:
                     cached_summary["fusion_method"] = fusion_method
                     cached_summary["voxel_size_m"] = voxel_m
                     cached_summary["spec"] = spec.to_metadata_dict()
+                    cached_summary["trajectory_path"] = traj_path
                     self.stats["cached_count"] += 1
                     self._log_decision("Phase C (Surface)", cand_name, "REUSED_CACHE", "Reused evaluation from cache")
                     surface_eval_results.append(cached_summary)
                     continue
 
                 surf_t = 0.0
-                if is_artifact_valid(mesh_out) and not self.force:
+                if self.artifact_mgr.should_reuse_reconstruction(
+                    mesh_out, None, candidate_spec=spec, dataset_fingerprint=self.dataset_fingerprint,
+                    trajectory_sha256=compute_file_sha256(traj_path), split_hash=self.split_hash, meta_path=meta_out, force=self.force
+                ):
                     print(f"⏭️ Mesh 재사용: {mesh_out.name}")
                     self._log_decision("Phase C (Surface)", cand_name, "REUSED_MESH", "Reused existing surface mesh")
                 else:
@@ -840,8 +1051,13 @@ class SearchEngine:
                         fail_rec["fusion_method"] = fusion_method
                         fail_rec["voxel_size_m"] = voxel_m
                         fail_rec["spec"] = spec.to_metadata_dict()
+                        fail_rec["trajectory_path"] = traj_path
                         surface_eval_results.append(fail_rec)
                         continue
+
+                    self.artifact_mgr.save_artifact_metadata(
+                        meta_out, spec, self.dataset_fingerprint, compute_file_sha256(traj_path), self.split_hash
+                    )
 
                 try:
                     summary = evaluate_reconstruction(
@@ -860,6 +1076,7 @@ class SearchEngine:
                     summary["voxel_size_m"] = voxel_m
                     summary["pcd_path"] = str(pcd_file)
                     summary["mesh_path"] = str(mesh_out)
+                    summary["trajectory_path"] = traj_path
                     summary["spec"] = spec.to_metadata_dict()
                     summary["spec_hash"] = spec_hash
                     summary["dataset_fingerprint"] = self.dataset_fingerprint
@@ -875,6 +1092,7 @@ class SearchEngine:
                     fail_rec["fusion_method"] = fusion_method
                     fail_rec["voxel_size_m"] = voxel_m
                     fail_rec["spec"] = spec.to_metadata_dict()
+                    fail_rec["trajectory_path"] = traj_path
                     surface_eval_results.append(fail_rec)
 
         # Rank Phase C candidates to select Top-3 Finalists for Full Rebuild
@@ -908,14 +1126,17 @@ class SearchEngine:
             cand_name = f_summary.get("candidate_name", f"finalist_{rank_idx}")
             rebuild_cand_name = f"{cand_name}_fullrebuild"
 
-            # Reconstruct CandidateSpec preserving all exact params
+            # Clone finalist CandidateSpec preserving all exact effective params
             spec_info = f_summary.get("spec", {}).get("requested_params", {})
             slam_backend = spec_info.get("slam_backend") or cand_name.split("_")[0]
             slam_profile = spec_info.get("slam_profile", "normal")
             replay_rate = float(spec_info.get("replay_rate", 1.0))
             fusion_method = spec_info.get("fusion_method") or f_summary.get("fusion_method", "tsdf")
             surface_method = spec_info.get("surface_method") or f_summary.get("surface_method", "tsdf_direct")
-            voxel_m = float(spec_info.get("fusion_params", {}).get("voxel_size_m", f_summary.get("voxel_size_m", 0.010)))
+            fusion_params = copy.deepcopy(spec_info.get("fusion_params") or {"voxel_size_m": f_summary.get("voxel_size_m", 0.010), "depth_min_m": self.depth_min, "depth_max_m": self.depth_max, "trunc_mult": self.trunc_mult})
+            surface_params = copy.deepcopy(spec_info.get("surface_params") or {"depth": 8, "alpha_factor": 3.0, "orient": "centroid"})
+            postprocess_params = copy.deepcopy(spec_info.get("postprocess_params") or {"clean_density": True, "simplify_target": 0.0})
+            voxel_m = float(fusion_params.get("voxel_size_m", 0.010))
             v_mm = int(round(voxel_m * 1000))
 
             traj_path = f_summary.get("trajectory_path") or trajectories.get(slam_backend, "")
@@ -926,20 +1147,22 @@ class SearchEngine:
                 slam_profile=slam_profile,
                 replay_rate=replay_rate,
                 fusion_method=fusion_method,
-                fusion_params={"voxel_size_m": voxel_m, "depth_min_m": self.depth_min, "depth_max_m": self.depth_max, "trunc_mult": self.trunc_mult},
+                fusion_params=fusion_params,
                 surface_method=surface_method,
-                postprocess_params={"clean_density": True, "simplify_target": 0.0},
+                surface_params=surface_params,
+                postprocess_params=postprocess_params,
                 frame_stride=1,
                 is_full_rebuild=True,
                 evaluation_profile="full"
             )
             full_spec_hash = full_spec.compute_spec_hash()
-            full_candidate_id = full_spec.compute_candidate_id()
+            full_candidate_id = full_spec.compute_candidate_id(include_hash=True)
 
-            # Unique isolated directory per finalist
+            # Unique isolated directory per finalist including hash to prevent collision
             cand_artifact_dir = self.artifact_mgr.get_candidate_artifact_dir(full_candidate_id)
             rebuild_pcd = cand_artifact_dir / f"{self.bag_name}_{full_candidate_id}_cloud.ply"
             rebuild_mesh = cand_artifact_dir / f"{self.bag_name}_{full_candidate_id}.obj"
+            rebuild_meta = self.artifact_mgr.get_artifact_meta_path(rebuild_mesh)
             rebuild_eval_dir = self.artifact_mgr.get_candidate_eval_dir(rebuild_cand_name)
 
             print(f"\n🔨 [Full Rebuild #{rank_idx}] Candidate: `{rebuild_cand_name}`")
@@ -969,7 +1192,7 @@ class SearchEngine:
                     output_mesh=str(rebuild_mesh),
                     method=surface_method,
                     voxel=voxel_m,
-                    depth=8,
+                    depth=surface_params.get("depth", 8),
                     simplify=0.0,
                     no_simplify=True
                 )
@@ -978,6 +1201,7 @@ class SearchEngine:
                     continue
             else:
                 # TSDF Full Rebuild (stride=1, Train frames only)
+                t_mult = float(fusion_params.get("trunc_mult", self.trunc_mult))
                 w_res = run_tsdf_worker(
                     dataset_dir=str(self.dataset.dataset_dir),
                     traj_file=traj_path,
@@ -985,7 +1209,7 @@ class SearchEngine:
                     pcd_path=str(rebuild_pcd),
                     voxel=voxel_m,
                     depth_max=self.depth_max,
-                    trunc_mult=self.trunc_mult,
+                    trunc_mult=t_mult,
                     stride=1,
                     split_file=str(self.split_file),
                     quick=False
@@ -1000,7 +1224,7 @@ class SearchEngine:
                         output_mesh=str(rebuild_mesh),
                         method=surface_method,
                         voxel=voxel_m,
-                        depth=8,
+                        depth=surface_params.get("depth", 8),
                         simplify=0.0,
                         no_simplify=True
                     )
@@ -1011,6 +1235,10 @@ class SearchEngine:
             rb_runtime = time.time() - t_rb_start
             self.stats["total_runtime_sec"] += rb_runtime
             self.stats["rebuilt_count"] += 1
+
+            self.artifact_mgr.save_artifact_metadata(
+                rebuild_meta, full_spec, self.dataset_fingerprint, compute_file_sha256(traj_path), self.split_hash
+            )
 
             # 2. Full-Fidelity Evaluation
             try:
@@ -1030,6 +1258,7 @@ class SearchEngine:
                 full_summary["voxel_size_m"] = voxel_m
                 full_summary["pcd_path"] = str(rebuild_pcd)
                 full_summary["mesh_path"] = str(rebuild_mesh)
+                full_summary["trajectory_path"] = traj_path
                 full_summary["is_full_rebuild"] = True
                 full_summary["trajectory_metrics"] = f_summary.get("trajectory_metrics", {})
                 full_summary["spec"] = full_spec.to_metadata_dict()

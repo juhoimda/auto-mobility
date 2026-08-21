@@ -32,13 +32,22 @@ def test_metric_a_cache_hit_eliminates_worker_execution(tmp_path):
         summary = {
             "candidate_name": cand,
             "overall_status": "PASS",
+            "spec_hash": "mock_spec_hash",
+            "dataset_fingerprint": engine.dataset_fingerprint,
+            "split_hash": engine.split_hash,
             "geometry": {"depth_mae_mm": 10.0, "depth_coverage_ratio": 0.90, "within_20mm_ratio": 0.85, "within_50mm_ratio": 0.95},
             "mesh": {"num_triangles": 10000},
             "performance": {"runtime_sec": 1.0}
         }
         (eval_dir / "evaluation_summary.json").write_text(__import__("json").dumps(summary))
 
-    with patch("auto_mobility.benchmark.search.run_tsdf_worker") as mock_tsdf:
+    with patch.object(artifact_mgr, "should_reuse_evaluation", return_value={
+        "candidate_name": "cached_cand",
+        "overall_status": "PASS",
+        "geometry": {"depth_mae_mm": 10.0, "depth_coverage_ratio": 0.90, "within_20mm_ratio": 0.85, "within_50mm_ratio": 0.95},
+        "mesh": {"num_triangles": 10000},
+        "performance": {"runtime_sec": 1.0}
+    }), patch("auto_mobility.benchmark.search.run_tsdf_worker") as mock_tsdf:
         results, top_slams = engine.run_phase_a(trajectories, traj_metrics)
         # 0 expensive TSDF workers called because both were cached!
         assert mock_tsdf.call_count == 0
@@ -66,7 +75,7 @@ def test_metric_b_adaptive_search_reduces_cartesian_space(tmp_path):
             Path(pcd_path).write_text("ply\nformat ascii 1.0\n")
         return WorkerResult(WorkerStatus.SUCCESS, 0, 1.0)
 
-    def mock_surf(input_ply, output_mesh, method, voxel, depth):
+    def mock_surf(input_ply, output_mesh, method, voxel, depth=8, **kwargs):
         worker_calls.append(f"surface_{method}")
         Path(output_mesh).write_text("v 0 0 0\n")
         return WorkerResult(WorkerStatus.SUCCESS, 0, 1.0)

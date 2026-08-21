@@ -49,12 +49,13 @@ def test_phase_b_uses_common_surface_adapter(tmp_path):
          patch("auto_mobility.benchmark.search.run_direct_fusion_worker", return_value=WorkerResult(WorkerStatus.SUCCESS, 0, 1.0)), \
          patch("auto_mobility.benchmark.search.run_surface_worker", side_effect=mock_surf_worker), \
          patch("auto_mobility.benchmark.search.evaluate_reconstruction", return_value={"candidate_name": "c", "geometry": {"depth_mae_mm": 10.0}}), \
-         patch("auto_mobility.benchmark.search.is_artifact_valid", return_value=True):
+         patch("auto_mobility.benchmark.search.is_artifact_valid", side_effect=lambda p, **kwargs: str(p).endswith(".ply")):
          
         results, top_pipes = engine.run_phase_b(top_slams, [])
         
-        # Verify direct cloud had surface adapter applied with depth=8 and no simplification
-        assert any(call["method"] == "poisson" and call["depth"] == 8 for call in surface_methods_called)
+        # Verify both TSDF and DirectCloud had surface adapter applied with depth=8 and no simplification
+        assert len(surface_methods_called) >= 2
+        assert all(call["method"] == "poisson" and call["depth"] == 8 and call["no_simplify"] is True for call in surface_methods_called)
 
 
 def test_surface_screening_no_simplification_policy():
