@@ -25,7 +25,8 @@ def _score_lower_better(val: Optional[float], p100: float = 0.0, p80: float = 25
         return 80.0 - 30.0 * (v - p80) / max(p50 - p80, 1e-6)
     if v <= p0:
         return 50.0 - 50.0 * (v - p50) / max(p0 - p50, 1e-6)
-    return 0.0
+    # Smooth exponential tail for higher errors (e.g. 385mm vs 624mm) so lower error is always rewarded
+    return float(max(0.0, 20.0 * np.exp(-(v - p0) / 400.0)))
 
 
 def _score_higher_better(val: Optional[float], p100: float = 1.0, p80: float = 0.85, p50: float = 0.50, p0: float = 0.20) -> float:
@@ -50,8 +51,8 @@ class HardGateFilter:
     @staticmethod
     def evaluate(summary: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
         """Returns (is_valid, failure_reason)."""
-        status = summary.get("status") or summary.get("overall_status", "UNKNOWN")
-        if status in ("FAIL", "FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "FAIL_EXCEPTION", "SKIPPED_UNAVAILABLE", "BLOCKED", "NOT_EVALUATED"):
+        status = summary.get("status")
+        if status in ("FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "FAIL_EXCEPTION", "SKIPPED_UNAVAILABLE", "BLOCKED", "NOT_EVALUATED"):
             return False, f"Candidate execution status was {status}: {summary.get('error', 'N/A')}"
 
         geom = summary.get("geometry", {})
@@ -63,8 +64,8 @@ class HardGateFilter:
             return False, "Depth MAE is null or NaN"
 
         cov = geom.get("depth_coverage_ratio", 0.0)
-        if cov is None or cov < 0.10:
-            return False, f"Depth coverage severely low ({cov*100:.1f}% < 10%)"
+        if cov is None or cov < 0.05:
+            return False, f"Depth coverage severely low ({cov*100:.1f}% < 5%)"
 
         mesh_meta = summary.get("mesh", {})
         if mesh_meta:

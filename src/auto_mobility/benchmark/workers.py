@@ -182,17 +182,6 @@ def run_surface_worker(
     env: Optional[Dict[str, str]] = None
 ) -> WorkerResult:
     """Run Surface Reconstruction (Poisson/BPA/Alpha/CGAL) in an isolated subprocess."""
-    m_lower = method.lower()
-    if m_lower in ("cgal", "cgal_polygonal"):
-        available, msg = is_cgal_available()
-        if not available:
-            return WorkerResult(
-                status=WorkerStatus.SKIPPED_UNAVAILABLE,
-                returncode=2,
-                runtime_sec=0.0,
-                error_message=f"CGAL not available: {msg}"
-            )
-
     worker_script = PROJECT_DIR / "src" / "auto_mobility" / "mesh" / "worker_surface.py"
     cmd = [
         sys.executable, "-u", str(worker_script),

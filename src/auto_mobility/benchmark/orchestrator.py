@@ -149,7 +149,7 @@ class BenchmarkOrchestrator:
             traj_candidates = _trajectory_candidates(key, self.bag_name)
             traj_file = next((p for p in traj_candidates if p.exists() and p.stat().st_size > 0), None)
 
-            if traj_file:
+            if traj_file and not self.force:
                 print(f"📍 궤적 재사용: {key} → {traj_file.name}")
                 trajectories[key] = str(traj_file)
                 try:

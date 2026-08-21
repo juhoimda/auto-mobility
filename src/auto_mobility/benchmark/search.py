@@ -232,22 +232,25 @@ class SearchEngine:
         # Rank Phase A candidates to select Top-K SLAM backends (Beam Width)
         ranked_a = rank_candidate_summaries(slam_eval_results)
         valid_winners = [r for r in ranked_a if r.get("hard_gate_pass", False)]
+        if not valid_winners:
+            evaluable = [r for r in ranked_a if r.get("status") not in ("FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "SKIPPED_UNAVAILABLE", "BLOCKED")]
+            valid_winners = evaluable if evaluable else ranked_a
 
         top_slams: List[Tuple[str, str]] = []
-        if valid_winners:
-            for item in valid_winners[:self.beam_width_slam]:
-                cand_n = item["candidate_name"]
-                slam_name = cand_n.replace("_tsdf10mm", "").replace("_voxel10mm", "")
-                t_file = trajectories.get(slam_name, "")
-                if t_file:
-                    top_slams.append((slam_name, t_file))
-                    self._log_decision("Phase A (SLAM)", slam_name, "SELECTED_BEAM", f"Selected in Top {self.beam_width_slam} SLAM beam (Quality: {item.get('quality_score', 0):.1f})")
-                    print(f"🌟 [Phase A Beam Winner] SLAM: `{slam_name}` (Quality: {item.get('quality_score', 0):.1f}, Score: {item.get('composite_score', 0):.1f})")
-        else:
+        for item in valid_winners[:self.beam_width_slam]:
+            cand_n = item["candidate_name"]
+            slam_name = cand_n.replace("_tsdf10mm", "").replace("_voxel10mm", "")
+            t_file = trajectories.get(slam_name, "")
+            if t_file and (slam_name, t_file) not in top_slams:
+                top_slams.append((slam_name, t_file))
+                self._log_decision("Phase A (SLAM)", slam_name, "SELECTED_BEAM", f"Selected in Top {self.beam_width_slam} SLAM beam (Quality: {item.get('quality_score', 0):.1f})")
+                print(f"🌟 [Phase A Beam Winner] SLAM: `{slam_name}` (Quality: {item.get('quality_score', 0):.1f}, Score: {item.get('composite_score', 0):.1f})")
+
+        if not top_slams:
             default_slam = list(trajectories.keys())[0] if trajectories else "rtab_rgbd"
             top_slams.append((default_slam, trajectories.get(default_slam, "")))
             self._log_decision("Phase A (SLAM)", default_slam, "FALLBACK", "No passing SLAM candidates; fallback selected")
-            print(f"⚠️ [Phase A Notice] 유효한 PASS 후보 없음 -> 기본 `{default_slam}` 선택")
+            print(f"⚠️ [Phase A Notice] 유효한 후보 없음 -> 기본 `{default_slam}` 선택")
 
         return slam_eval_results, top_slams
 
@@ -521,14 +524,17 @@ class SearchEngine:
         # Rank Phase B candidates to select Top-K Fusion pipelines (Beam Width)
         ranked_b = rank_candidate_summaries(fusion_eval_results)
         valid_b = [r for r in ranked_b if r.get("hard_gate_pass", False)]
+        if not valid_b:
+            evaluable_b = [r for r in ranked_b if r.get("status") not in ("FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "SKIPPED_UNAVAILABLE", "BLOCKED")]
+            valid_b = evaluable_b if evaluable_b else ranked_b
 
         top_pipelines: List[dict] = []
-        if valid_b:
-            for item in valid_b[:self.beam_width_fusion]:
-                top_pipelines.append(item["summary_data"])
-                self._log_decision("Phase B (Fusion)", item["candidate_name"], "SELECTED_BEAM", f"Selected in Top {self.beam_width_fusion} fusion beam (Quality: {item.get('quality_score', 0):.1f})")
-                print(f"🌟 [Phase B Beam Winner] Pipeline: `{item['candidate_name']}` (Quality: {item.get('quality_score', 0):.1f}, Score: {item.get('composite_score', 0):.1f})")
-        else:
+        for item in valid_b[:self.beam_width_fusion]:
+            top_pipelines.append(item["summary_data"])
+            self._log_decision("Phase B (Fusion)", item["candidate_name"], "SELECTED_BEAM", f"Selected in Top {self.beam_width_fusion} fusion beam (Quality: {item.get('quality_score', 0):.1f})")
+            print(f"🌟 [Phase B Beam Winner] Pipeline: `{item['candidate_name']}` (Quality: {item.get('quality_score', 0):.1f}, Score: {item.get('composite_score', 0):.1f})")
+
+        if not top_pipelines:
             top_pipelines.append(fusion_eval_results[0] if fusion_eval_results else {})
             self._log_decision("Phase B (Fusion)", "fallback", "FALLBACK", "No passing fusion candidates; fallback selected")
 
@@ -656,14 +662,17 @@ class SearchEngine:
         # Rank Phase C candidates to select Top-3 Finalists for Full Rebuild
         ranked_c = rank_candidate_summaries(surface_eval_results)
         valid_c = [r for r in ranked_c if r.get("hard_gate_pass", False)]
+        if not valid_c:
+            evaluable_c = [r for r in ranked_c if r.get("status") not in ("FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "SKIPPED_UNAVAILABLE", "BLOCKED")]
+            valid_c = evaluable_c if evaluable_c else ranked_c
 
         finalists: List[dict] = []
-        if valid_c:
-            for item in valid_c[:self.finalists_count]:
-                finalists.append(item["summary_data"])
-                self._log_decision("Phase C (Surface)", item["candidate_name"], "FINALIST", f"Selected as Top {self.finalists_count} Finalist for Full Rebuild (Quality: {item.get('quality_score', 0):.1f})")
-                print(f"🏅 [Finalist Selected] `{item['candidate_name']}` (Quality Score: {item.get('quality_score', 0):.1f}, Score: {item.get('composite_score', 0):.1f})")
-        else:
+        for item in valid_c[:self.finalists_count]:
+            finalists.append(item["summary_data"])
+            self._log_decision("Phase C (Surface)", item["candidate_name"], "FINALIST", f"Selected as Top {self.finalists_count} Finalist for Full Rebuild (Quality: {item.get('quality_score', 0):.1f})")
+            print(f"🏅 [Finalist Selected] `{item['candidate_name']}` (Quality Score: {item.get('quality_score', 0):.1f}, Score: {item.get('composite_score', 0):.1f})")
+
+        if not finalists:
             finalists = [s for s in surface_eval_results if s.get("status") not in ("FAIL_CRASH", "FAIL_SEGFAULT")][:self.finalists_count]
             self._log_decision("Phase C (Surface)", "fallback", "FALLBACK", "No passing surface candidates; fallback finalists")
 

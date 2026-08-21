@@ -40,7 +40,7 @@ def generate_stella_config(
     height: int = 480,
     fps: float = 30.0,
     depth_factor: float = 1000.0,
-    depth_threshold: float = 4.0
+    depth_threshold: float = 40.0
 ) -> str:
     """stella_vslam 호환 YAML 설정을 생성하고 저장한다."""
     fx = intrinsics.fx if intrinsics else 385.0

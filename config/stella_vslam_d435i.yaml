@@ -6,17 +6,17 @@ Camera:
   cols: 640
   rows: 480
   fps: 30.0
-  focal_x_baseline: 30.326934814453125
-  fx: 606.5386962890625
-  fy: 606.4935302734375
-  cx: 324.4990539550781
-  cy: 241.70465087890625
+  focal_x_baseline: 30.326935
+  fx: 606.5387
+  fy: 606.4935
+  cx: 324.4991
+  cy: 241.7047
   k1: 0.0
   k2: 0.0
   p1: 0.0
   p2: 0.0
   k3: 0.0
-  depth_threshold: 4.0
+  depth_threshold: 40.0
   depth_factor: 1000.0
 Feature:
   max_num_keypoints: 1200

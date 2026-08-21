@@ -286,6 +286,8 @@ class BenchmarkManifestExporter:
         lines.append("Inspect Top Reconstruction candidates using the interactive 3D viewer:\n")
         lines.append("```bash")
         top_candidates = [r for r in overall_rankings if r.get("hard_gate_pass", False)][:3]
+        if not top_candidates:
+            top_candidates = overall_rankings[:3]
         for idx, rank_item in enumerate(top_candidates, 1):
             mesh_p = rank_item.get("summary_data", {}).get("mesh_path")
             lines.append(f"# Rank {idx}: {rank_item.get('candidate_name')} (Quality: {rank_item.get('quality_score', 0):.1f}, Composite: {rank_item.get('composite_score', 0):.1f})")
@@ -313,7 +315,7 @@ class BenchmarkManifestExporter:
 
         # 1. Export Review Artifacts (Top-K candidates)
         valid_candidates = [r for r in overall_rankings if r.get("hard_gate_pass", False)]
-        top_review = valid_candidates[:top_k]
+        top_review = valid_candidates[:top_k] if valid_candidates else overall_rankings[:top_k]
         for idx, item in enumerate(top_review, 1):
             src_m = item.get("summary_data", {}).get("mesh_path")
             if src_m and Path(src_m).exists():

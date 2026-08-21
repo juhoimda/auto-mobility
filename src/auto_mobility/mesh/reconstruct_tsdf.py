@@ -77,8 +77,8 @@ def _estimate_block_count(
     no_color: bool = False,
     block_resolution: int = 16,
     safety_factor: float = 1.5,
-    min_blocks: int = 2048,
-    memory_budget_gb: float = 2.0,
+    min_blocks: int = 65536,
+    memory_budget_gb: float = 6.0,
 ) -> int:
     """궤적 범위(장면 규모)를 기반으로 VoxelBlockGrid의 block_count를 추정한다.
 
