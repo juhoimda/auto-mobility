@@ -85,6 +85,7 @@ def test_benchmark_orchestrator_end_to_end_deliverables(synthetic_benchmark_env)
     with patch("auto_mobility.benchmark.orchestrator.FRAME_DIR", env["tmp_path"] / "frames"), \
          patch("auto_mobility.benchmark.orchestrator.TRAJECTORY_DIR", env["tmp_path"] / "trajectories"), \
          patch("auto_mobility.benchmark.search.run_tsdf_worker", return_value=WorkerResult(WorkerStatus.SUCCESS, 0, 1.0)), \
+         patch("auto_mobility.benchmark.search.run_direct_fusion_worker", return_value=WorkerResult(WorkerStatus.SUCCESS, 0, 1.0)), \
          patch("auto_mobility.benchmark.search.run_surface_worker", return_value=WorkerResult(WorkerStatus.SUCCESS, 0, 1.0)), \
          patch("auto_mobility.benchmark.search.evaluate_reconstruction", return_value=dummy_summary):
 

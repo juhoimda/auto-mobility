@@ -4,6 +4,7 @@ evaluation:
   # Trajectory & Frame timestamp association
   max_pose_gap_ms: 50.0        # Max allowed timestamp difference (ms) for pose matching
   association_fallback: "nearest"  # "slerp_interp" (preferred) or "nearest"
+  enable_interpolation: true
 
   # Train / Hold-out Frame Split
   holdout:
@@ -13,10 +14,10 @@ evaluation:
     min_train_frames: 10
     min_holdout_frames: 5
 
-  # Depth Raycasting & Reprojection
+  # Depth Raycasting & Reprojection (Unified with Reconstruction depth domain 0.3m ~ 3.0m)
   raycasting:
     depth_min_m: 0.3
-    depth_max_m: 5.0
+    depth_max_m: 3.0
     depth_scale: 1000.0        # 16UC1 mm to meters
     render_samples: 10         # Number of representative holdout frames to render visualization
 
@@ -32,6 +33,27 @@ evaluation:
     ransac_n: 3
     num_iterations: 1000
     max_planes: 5
+
+  # Adaptive Search Triggers & Thresholds
+  adaptive_search:
+    fine_voxel_trigger:
+      min_quality_gain: 1.0     # Min quality improvement from 10mm -> 8mm required to trigger 5mm
+      max_estimated_memory_gb: 12.0
+      allow_if_8mm_failed: false
+    evaluation:
+      stage1_holdout_samples: 12
+      stage2_expanded_samples: 30
+      close_candidate_delta_threshold: 2.0  # Quality score diff <= 2.0 triggers Stage 2
+
+  # Ranking weights & tie break parameters (Single Source of Truth)
+  ranking:
+    geometry_accuracy_weight: 0.40
+    coverage_weight: 0.25
+    artifact_weight: 0.20
+    topology_weight: 0.15
+    performance_weight: 0.10
+    quality_tie_epsilon: 0.5
+    cost_tiebreak_enabled: true
 
 # Quality Thresholds for PASS / WARN / FAIL (Data-driven heuristic defaults)
 quality_thresholds:
@@ -86,6 +108,6 @@ quality_thresholds:
 quality_weights:
   geometry_accuracy: 0.40      # Depth MAE, Depth P95, Point-to-Mesh P95
   geometry_coverage: 0.25      # Depth coverage ratio, within 20mm ratio
-  artifact_penalty: 0.15       # Small component ratio, non-manifold edges
-  topology: 0.10               # Degenerate triangles, component consistency
+  artifact_penalty: 0.20       # Free space correctness, small component ratio
+  topology: 0.15               # Degenerate triangles, dominant plane consistency
   performance: 0.10            # Runtime, Memory

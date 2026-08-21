@@ -1,15 +1,19 @@
 """
-scoring.py — Candidate-Independent Absolute Scoring & Hard Gate Filtering.
+scoring.py — Candidate-Independent Absolute Scoring, Hard Gate Filtering, and Quality Single Source of Truth.
 
 Provides:
   - HardGateFilter: Rejects corrupt/failed candidate artifacts.
-  - compute_absolute_quality_score: Computes deterministic [0, 100] scores independent of candidate set.
+  - compute_absolute_scores: Computes deterministic [0, 100] scores independent of candidate set,
+    reading weights and thresholds directly from config/evaluation.yaml.
   - rank_candidate_summaries: Applies Hard Gate, computes Absolute Quality & Cost scores,
     and sorts candidates (Quality primary, Cost tie-breaker).
+  - explain_winner_decision: Multi-metric explainable rationale.
 """
 
 from typing import Dict, List, Any, Optional, Tuple
 import numpy as np
+
+from auto_mobility.config import get_evaluation_config
 
 
 def _score_lower_better(val: Optional[float], p100: float = 0.0, p80: float = 25.0, p50: float = 50.0, p0: float = 150.0) -> float:
@@ -25,7 +29,7 @@ def _score_lower_better(val: Optional[float], p100: float = 0.0, p80: float = 25
         return 80.0 - 30.0 * (v - p80) / max(p50 - p80, 1e-6)
     if v <= p0:
         return 50.0 - 50.0 * (v - p50) / max(p0 - p50, 1e-6)
-    # Smooth exponential tail for higher errors (e.g. 385mm vs 624mm) so lower error is always rewarded
+    # Smooth exponential tail for higher errors
     return float(max(0.0, 20.0 * np.exp(-(v - p0) / 400.0)))
 
 
@@ -51,8 +55,9 @@ class HardGateFilter:
     @staticmethod
     def evaluate(summary: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
         """Returns (is_valid, failure_reason)."""
-        status = summary.get("status")
-        if status in ("FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "FAIL_EXCEPTION", "SKIPPED_UNAVAILABLE", "BLOCKED", "NOT_EVALUATED"):
+        status = summary.get("status") or summary.get("overall_status")
+        if status in ("FAIL", "FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "FAIL_EXCEPTION",
+                      "FAIL_TRAJECTORY", "FAIL_ALIGNMENT", "FAIL_RESOURCE", "SKIPPED_UNAVAILABLE", "BLOCKED", "NOT_EVALUATED"):
             return False, f"Candidate execution status was {status}: {summary.get('error', 'N/A')}"
 
         geom = summary.get("geometry", {})
@@ -81,42 +86,53 @@ class HardGateFilter:
         return True, None
 
 
-def compute_absolute_scores(summary: Dict[str, Any]) -> Dict[str, Any]:
-    """Computes candidate-independent absolute quality and cost scores for a single evaluation summary."""
+def compute_absolute_scores(summary: Dict[str, Any], weights: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+    """Computes candidate-independent absolute quality and cost scores using config weights."""
+    cfg = get_evaluation_config()
+    ranking_cfg = cfg.get("evaluation", {}).get("ranking", {})
+    qw = cfg.get("quality_weights", {})
+
+    w_acc = weights.get("geometry_accuracy", qw.get("geometry_accuracy", 0.40)) if weights else qw.get("geometry_accuracy", 0.40)
+    w_cov = weights.get("geometry_coverage", qw.get("geometry_coverage", 0.25)) if weights else qw.get("geometry_coverage", 0.25)
+    w_art = weights.get("artifact_penalty", qw.get("artifact_penalty", 0.20)) if weights else qw.get("artifact_penalty", 0.20)
+    w_top = weights.get("topology", qw.get("topology", 0.15)) if weights else qw.get("topology", 0.15)
+    w_perf = weights.get("performance", qw.get("performance", 0.10)) if weights else qw.get("performance", 0.10)
+
     geom = summary.get("geometry", {})
     mesh_m = summary.get("mesh", {})
     perf = summary.get("performance", {})
     planes = summary.get("plane_analysis", {})
 
-    # 1. Geometry Accuracy (40% weight)
+    # 1. Geometry Accuracy (w_acc)
     s_mae = _score_lower_better(geom.get("depth_mae_mm"), p100=0.0, p80=20.0, p50=40.0, p0=120.0)
     s_p95 = _score_lower_better(geom.get("depth_p95_mm"), p100=0.0, p80=50.0, p50=100.0, p0=250.0)
     s_p2m = _score_lower_better(geom.get("point_to_mesh_p95_mm"), p100=0.0, p80=40.0, p50=80.0, p0=200.0)
     accuracy_score = (s_mae + s_p95 + s_p2m) / 3.0
 
-    # 2. Geometry Coverage & Completeness (25% weight)
+    # 2. Geometry Coverage & Completeness (w_cov)
     s_cov = _score_higher_better(geom.get("depth_coverage_ratio"), p100=0.98, p80=0.85, p50=0.60, p0=0.20)
     s_w20 = _score_higher_better(geom.get("within_20mm_ratio"), p100=0.95, p80=0.80, p50=0.55, p0=0.20)
     s_compl = _score_higher_better(geom.get("observed_surface_completeness", geom.get("within_50mm_ratio")), p100=0.90, p80=0.75, p50=0.50, p0=0.15)
     coverage_score = (s_cov + s_w20 + s_compl) / 3.0
 
-    # 3. Free-space & Artifact Penalties (20% weight)
+    # 3. Free-space & Artifact Penalties (w_art)
     s_fs = _score_higher_better(geom.get("free_space_correctness_ratio", 1.0), p100=0.99, p80=0.95, p50=0.80, p0=0.50)
     s_art = _score_lower_better(mesh_m.get("small_component_area_ratio"), p100=0.0, p80=0.03, p50=0.10, p0=0.30)
     freespace_artifact_score = (s_fs * 2.0 + s_art) / 3.0
 
-    # 4. Topology & Structural Quality (15% weight)
+    # 4. Topology & Structural Quality (w_top)
     s_deg = _score_lower_better(mesh_m.get("degenerate_triangle_ratio"), p100=0.0, p80=0.001, p50=0.01, p0=0.05)
     plane_res = planes.get("dominant_plane_residual_mean_mm") or planes.get("mean_residual_mm")
     s_plane = _score_lower_better(plane_res, p100=0.0, p80=15.0, p50=30.0, p0=80.0) if plane_res is not None else 85.0
     topology_score = (s_deg + s_plane) / 2.0
 
     # Quality Score (0 to 100)
+    quality_total_weights = w_acc + w_cov + w_art + w_top
     quality_score = (
-        0.40 * accuracy_score +
-        0.25 * coverage_score +
-        0.20 * freespace_artifact_score +
-        0.15 * topology_score
+        (w_acc * accuracy_score +
+         w_cov * coverage_score +
+         w_art * freespace_artifact_score +
+         w_top * topology_score) / max(quality_total_weights, 1e-6)
     )
 
     # 5. Cost Score (Lower resources -> Higher cost score)
@@ -151,6 +167,10 @@ def rank_candidate_summaries(
     if not summaries:
         return []
 
+    cfg = get_evaluation_config()
+    ranking_cfg = cfg.get("evaluation", {}).get("ranking", {})
+    tie_eps = float(ranking_cfg.get("quality_tie_epsilon", 0.5))
+
     valid_entries = []
     failed_entries = []
 
@@ -159,8 +179,32 @@ def rank_candidate_summaries(
         cand_name = s.get("candidate_name", "unknown")
         status = s.get("status") or s.get("overall_status", "PASS" if is_valid else "FAIL")
 
+        raw_dict = {
+            "depth_mae_mm": s.get("geometry", {}).get("depth_mae_mm"),
+            "depth_rmse_mm": s.get("geometry", {}).get("depth_rmse_mm"),
+            "depth_median_mm": s.get("geometry", {}).get("depth_median_mm"),
+            "depth_p90_mm": s.get("geometry", {}).get("depth_p90_mm"),
+            "depth_p95_mm": s.get("geometry", {}).get("depth_p95_mm"),
+            "point_to_mesh_p95_mm": s.get("geometry", {}).get("point_to_mesh_p95_mm"),
+            "depth_coverage_ratio": s.get("geometry", {}).get("depth_coverage_ratio"),
+            "within_10mm_ratio": s.get("geometry", {}).get("within_10mm_ratio"),
+            "within_20mm_ratio": s.get("geometry", {}).get("within_20mm_ratio"),
+            "within_50mm_ratio": s.get("geometry", {}).get("within_50mm_ratio"),
+            "observed_surface_completeness": s.get("geometry", {}).get("observed_surface_completeness"),
+            "free_space_correctness_ratio": s.get("geometry", {}).get("free_space_correctness_ratio", 1.0),
+            "small_component_ratio": s.get("mesh", {}).get("small_component_area_ratio"),
+            "plane_residual_mm": s.get("plane_analysis", {}).get("dominant_plane_residual_mean_mm") or s.get("plane_analysis", {}).get("mean_residual_mm"),
+            "plane_inlier_ratio": s.get("plane_analysis", {}).get("mean_inlier_ratio"),
+            "degenerate_ratio": s.get("mesh", {}).get("degenerate_triangle_ratio"),
+            "non_manifold_ratio": s.get("mesh", {}).get("non_manifold_edge_ratio"),
+            "num_vertices": s.get("mesh", {}).get("num_vertices"),
+            "num_triangles": s.get("mesh", {}).get("num_triangles"),
+            "runtime_sec": s.get("runtime_sec") or s.get("performance", {}).get("runtime_sec"),
+            "peak_rss_mb": s.get("performance", {}).get("peak_rss_mb")
+        }
+
         if is_valid:
-            scores = compute_absolute_scores(s)
+            scores = compute_absolute_scores(s, weights=weights)
             valid_entries.append({
                 "candidate_name": cand_name,
                 "composite_score": scores["composite_score"],
@@ -169,17 +213,7 @@ def rank_candidate_summaries(
                 "status": status,
                 "hard_gate_pass": True,
                 "component_scores": scores["component_scores"],
-                "raw_metrics": {
-                    "depth_mae_mm": s.get("geometry", {}).get("depth_mae_mm"),
-                    "depth_p95_mm": s.get("geometry", {}).get("depth_p95_mm"),
-                    "point_to_mesh_p95_mm": s.get("geometry", {}).get("point_to_mesh_p95_mm"),
-                    "depth_coverage_ratio": s.get("geometry", {}).get("depth_coverage_ratio"),
-                    "within_20mm_ratio": s.get("geometry", {}).get("within_20mm_ratio"),
-                    "observed_surface_completeness": s.get("geometry", {}).get("observed_surface_completeness"),
-                    "free_space_correctness_ratio": s.get("geometry", {}).get("free_space_correctness_ratio", 1.0),
-                    "small_component_ratio": s.get("mesh", {}).get("small_component_area_ratio"),
-                    "runtime_sec": s.get("runtime_sec") or s.get("performance", {}).get("runtime_sec")
-                },
+                "raw_metrics": raw_dict,
                 "summary_data": s
             })
         else:
@@ -198,26 +232,19 @@ def rank_candidate_summaries(
                     "topology": 0.0,
                     "performance": 0.0
                 },
-                "raw_metrics": {
-                    "depth_mae_mm": s.get("geometry", {}).get("depth_mae_mm"),
-                    "depth_p95_mm": s.get("geometry", {}).get("depth_p95_mm"),
-                    "point_to_mesh_p95_mm": s.get("geometry", {}).get("point_to_mesh_p95_mm"),
-                    "depth_coverage_ratio": s.get("geometry", {}).get("depth_coverage_ratio"),
-                    "within_20mm_ratio": s.get("geometry", {}).get("within_20mm_ratio"),
-                    "small_component_ratio": s.get("mesh", {}).get("small_component_area_ratio"),
-                    "runtime_sec": s.get("runtime_sec") or s.get("performance", {}).get("runtime_sec")
-                },
+                "raw_metrics": raw_dict,
                 "summary_data": s
             })
 
     # Sort valid entries:
-    # Primary: Quality Score (if difference > 0.5)
-    # Secondary / Tie-break: Cost Score (higher is better / lower resources)
+    # 1. Hard Gate (already separated into valid_entries)
+    # 2. Quality Score (primary)
+    # 3. Cost Score (tie-breaker when quality difference <= tie_eps)
+    # 4. Deterministic candidate_name tie-break
     def sort_key(item):
         q = item.get("quality_score", 0.0)
         c = item.get("cost_score", 0.0)
-        # Quantize quality into 0.5 point bins for tie breaking by cost
-        q_bin = round(q * 2.0) / 2.0
+        q_bin = round(q / max(tie_eps, 0.01)) * tie_eps
         return (q_bin, c, item.get("composite_score", 0.0))
 
     valid_entries.sort(key=sort_key, reverse=True)

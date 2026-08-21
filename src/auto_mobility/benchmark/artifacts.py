@@ -1,55 +1,63 @@
 """
-artifacts.py — Artifact Identity, Cache Key, Validation, and Reuse Management.
+artifacts.py — Artifact Identity, Cache Validation, Trajectory Provenance, and Directory Isolation.
+
+Provides:
+  - Strict content-aware cache validation (CandidateSpec hash, dataset fingerprint, trajectory SHA, split hash).
+  - Trajectory metadata storage & provenance verification (no silent profile fallback).
+  - Isolated candidate artifact directories (candidate-id based, preventing full rebuild collisions).
+  - Atomic JSON and text writers.
 """
+
+from __future__ import annotations
 
 import os
 import sys
 import json
+import shutil
 import hashlib
 from pathlib import Path
-from typing import Dict, Any, Optional, Union, List
+from typing import Dict, Any, Optional, Union, List, Tuple
 
 from auto_mobility.config import (
     MESH_DIR, POINTCLOUD_DIR, TRAJECTORY_DIR, EVALUATION_DIR, FRAME_DIR, PROJECT_DIR
 )
+from auto_mobility.benchmark.candidate import CandidateSpec, SlamProfileSpec
 
 
-def _file_hash_or_stat(file_path: Union[str, Path]) -> str:
-    """Return a compact deterministic representation (hash or size+mtime) of a file."""
+def compute_file_sha256(file_path: Union[str, Path]) -> str:
+    """Compute deterministic SHA-256 hash of a file."""
     p = Path(file_path)
-    if not p.exists():
+    if not p.exists() or not p.is_file():
         return "missing"
-    try:
-        st = p.stat()
-        # For fast cache key without reading multi-gigabyte files, use size + mtime_ns
-        return f"{st.st_size}_{st.st_mtime_ns}"
-    except Exception:
-        return "error"
+    sha = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            sha.update(chunk)
+    return sha.hexdigest()
 
 
 def compute_cache_key(
-    stage: str,
-    dataset_name: str,
+    stage: str = "default",
+    dataset_name: str = "default",
     upstream_files: Optional[List[Union[str, Path]]] = None,
     params: Optional[Dict[str, Any]] = None,
-    version: Optional[str] = None
+    version: str = "v1"
 ) -> str:
-    """Compute a deterministic SHA-256 cache key for an artifact generation step."""
-    payload: Dict[str, Any] = {
-        "stage": stage,
-        "dataset": dataset_name,
-        "version": version or "v1",
-        "params": params or {},
-        "upstream": {}
-    }
+    """Computes a deterministic 16-character SHA-256 cache key."""
+    sha = hashlib.sha256()
+    sha.update(stage.encode("utf-8"))
+    sha.update(dataset_name.encode("utf-8"))
+    sha.update(version.encode("utf-8"))
+    if params:
+        sha.update(json.dumps(params, sort_keys=True).encode("utf-8"))
     if upstream_files:
-        for f in upstream_files:
-            fp = Path(f).resolve()
-            # Use absolute path as key to distinguish same-named files in different directories
-            payload["upstream"][str(fp)] = _file_hash_or_stat(fp)
-
-    serialized = json.dumps(payload, sort_keys=True)
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
+        for uf in sorted([str(p) for p in upstream_files]):
+            p = Path(uf)
+            if p.exists():
+                sha.update(p.name.encode("utf-8"))
+                sha.update(str(p.stat().st_size).encode("utf-8"))
+                sha.update(str(p.stat().st_mtime_ns).encode("utf-8"))
+    return sha.hexdigest()[:16]
 
 
 def is_artifact_valid(file_path: Union[str, Path], min_bytes: int = 100) -> bool:
@@ -64,7 +72,7 @@ def atomic_write_json(file_path: Union[str, Path], data: Any, indent: int = 2) -
     """Writes JSON data atomically using a temporary file and atomic rename."""
     p = Path(file_path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = p.with_suffix(f".tmp.{os.getpid()}")
+    tmp_path = p.with_suffix(f".tmp.{os.getpid()}_{id(data)}")
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=indent, ensure_ascii=False)
@@ -84,7 +92,7 @@ def atomic_write_text(file_path: Union[str, Path], text: str) -> None:
     """Writes text data atomically using a temporary file and atomic rename."""
     p = Path(file_path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = p.with_suffix(f".tmp.{os.getpid()}")
+    tmp_path = p.with_suffix(f".tmp.{os.getpid()}_{hash(text) & 0xffffffff}")
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(text)
@@ -100,14 +108,126 @@ def atomic_write_text(file_path: Union[str, Path], text: str) -> None:
         raise
 
 
+# ───────────────────────────────────────────────────────────
+# Trajectory Provenance & Metadata Management
+# ───────────────────────────────────────────────────────────
+
+def get_trajectory_meta_path(trajectory_path: Union[str, Path]) -> Path:
+    p = Path(trajectory_path)
+    return p.parent / f"{p.stem}.meta.json"
+
+
+def save_trajectory_metadata(
+    trajectory_path: Union[str, Path],
+    profile_spec: SlamProfileSpec,
+    bag_fingerprint: str = "unknown",
+    slam_config_hash: str = "unknown",
+    git_commit: str = "unknown",
+    pose_count: int = 0
+) -> Path:
+    """Saves trajectory provenance metadata alongside the TUM trajectory file."""
+    traj_path = Path(trajectory_path)
+    meta_path = get_trajectory_meta_path(traj_path)
+    traj_sha = compute_file_sha256(traj_path) if traj_path.exists() else "missing"
+
+    meta = {
+        "candidate_key": profile_spec.candidate_key,
+        "backend": profile_spec.backend,
+        "profile": profile_spec.profile,
+        "replay_rate": profile_spec.replay_rate,
+        "bag_fingerprint": bag_fingerprint,
+        "slam_config_hash": slam_config_hash,
+        "git_commit": git_commit,
+        "trajectory_sha256": traj_sha,
+        "pose_count": pose_count,
+        "provenance_status": "VERIFIED"
+    }
+    atomic_write_json(meta_path, meta)
+    return meta_path
+
+
+def load_trajectory_metadata(trajectory_path: Union[str, Path]) -> Optional[dict]:
+    meta_path = get_trajectory_meta_path(trajectory_path)
+    if meta_path.exists() and meta_path.stat().st_size > 10:
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+    return None
+
+
+def verify_trajectory_provenance(
+    trajectory_path: Union[str, Path],
+    requested_spec: SlamProfileSpec,
+    strict: bool = True
+) -> Tuple[bool, str, dict]:
+    """Verifies that the trajectory file matches the requested SLAM profile and rate.
+
+    Returns:
+      (is_valid, status_code, metadata_dict)
+    """
+    traj_path = Path(trajectory_path)
+    if not traj_path.exists() or traj_path.stat().st_size == 0:
+        return False, "MISSING_TRAJECTORY", {}
+
+    meta = load_trajectory_metadata(traj_path)
+    if meta is None:
+        if strict:
+            # Unverified legacy trajectory without metadata
+            return False, "LEGACY_UNVERIFIED", {"provenance_status": "LEGACY_UNVERIFIED"}
+        return True, "LEGACY_UNVERIFIED", {"provenance_status": "LEGACY_UNVERIFIED"}
+
+    # Verify fields
+    backend_match = (meta.get("backend") == requested_spec.backend)
+    profile_match = (meta.get("profile") == requested_spec.profile)
+    rate_match = (abs(float(meta.get("replay_rate", 1.0)) - requested_spec.replay_rate) < 1e-3)
+
+    current_sha = compute_file_sha256(traj_path)
+    sha_match = (meta.get("trajectory_sha256") == current_sha)
+
+    if backend_match and profile_match and rate_match and sha_match:
+        return True, "VERIFIED", meta
+
+    diffs = []
+    if not backend_match:
+        diffs.append(f"backend mismatch ({meta.get('backend')} != {requested_spec.backend})")
+    if not profile_match:
+        diffs.append(f"profile mismatch ({meta.get('profile')} != {requested_spec.profile})")
+    if not rate_match:
+        diffs.append(f"rate mismatch ({meta.get('replay_rate')} != {requested_spec.replay_rate})")
+    if not sha_match:
+        diffs.append("file modified after metadata creation")
+
+    return False, "PROVENANCE_MISMATCH", {"reasons": diffs, "stored_meta": meta}
+
+
+# ───────────────────────────────────────────────────────────
+# Artifact Manager & Content-Aware Cache
+# ───────────────────────────────────────────────────────────
+
 class ArtifactManager:
-    """Manages artifact paths, validity checks, and caching for the benchmark."""
+    """Manages isolated artifact directories, deterministic paths, and strict validation."""
 
     def __init__(self, bag_name: str, base_eval_dir: Optional[Path] = None):
         self.bag_name = bag_name
         self.eval_dir = Path(base_eval_dir) if base_eval_dir else (EVALUATION_DIR / bag_name)
         self.eval_dir.mkdir(parents=True, exist_ok=True)
+        self.artifacts_root = self.eval_dir / "artifacts"
+        self.artifacts_root.mkdir(parents=True, exist_ok=True)
 
+    def get_candidate_eval_dir(self, candidate_name: str) -> Path:
+        cand_dir = self.eval_dir / candidate_name
+        cand_dir.mkdir(parents=True, exist_ok=True)
+        return cand_dir
+
+    def get_candidate_artifact_dir(self, candidate_id: str) -> Path:
+        """Returns the isolated directory for a candidate's artifacts."""
+        cand_dir = self.artifacts_root / candidate_id
+        cand_dir.mkdir(parents=True, exist_ok=True)
+        return cand_dir
+
+    # Legacy/compatibility paths
     def get_mesh_path(self, slam: str, voxel_mm: int, method: Optional[str] = None) -> Path:
         base = f"{self.bag_name}_{slam}_voxel{voxel_mm}mm"
         if method:
@@ -120,10 +240,81 @@ class ArtifactManager:
     def get_direct_pcd_path(self, slam: str, voxel_mm: int) -> Path:
         return POINTCLOUD_DIR / f"{self.bag_name}_{slam}_direct_voxel{voxel_mm}mm_cloud.ply"
 
-    def get_candidate_eval_dir(self, candidate_name: str) -> Path:
-        return self.eval_dir / candidate_name
+    def save_artifact_metadata(
+        self,
+        meta_path: Union[str, Path],
+        candidate_spec: CandidateSpec,
+        dataset_fingerprint: str,
+        trajectory_sha256: str,
+        split_hash: str,
+        effective_params: Optional[Dict[str, Any]] = None
+    ) -> Path:
+        """Writes artifact.meta.json for content-aware caching."""
+        p = Path(meta_path)
+        meta = {
+            "candidate_id": candidate_spec.compute_candidate_id(),
+            "candidate_spec_hash": candidate_spec.compute_spec_hash(),
+            "dataset_fingerprint": dataset_fingerprint,
+            "trajectory_sha256": trajectory_sha256,
+            "split_hash": split_hash,
+            "code_version": candidate_spec.code_version,
+            "cache_schema_version": candidate_spec.cache_schema_version,
+            "requested_params": candidate_spec.to_metadata_dict()["requested_params"],
+            "effective_params": effective_params or candidate_spec.to_metadata_dict()["effective_params"]
+        }
+        atomic_write_json(p, meta)
+        return p
 
-    def get_cached_eval_summary(self, candidate_name: str, expected_spec_hash: Optional[str] = None) -> Optional[dict]:
+    def should_reuse_reconstruction(
+        self,
+        mesh_path: Optional[Path],
+        pcd_path: Optional[Path],
+        candidate_spec: Optional[Union[CandidateSpec, str]] = None,
+        dataset_fingerprint: Optional[str] = None,
+        trajectory_sha256: Optional[str] = None,
+        split_hash: Optional[str] = None,
+        meta_path: Optional[Path] = None,
+        force: bool = False
+    ) -> bool:
+        """Strict content-aware cache validation for reconstruction artifacts."""
+        if force:
+            return False
+
+        if mesh_path and not is_artifact_valid(mesh_path):
+            return False
+        if pcd_path and not is_artifact_valid(pcd_path):
+            return False
+
+        # If metadata path is provided, validate content hashes
+        if meta_path and meta_path.exists():
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                if candidate_spec and isinstance(candidate_spec, CandidateSpec):
+                    if meta.get("candidate_spec_hash") != candidate_spec.compute_spec_hash():
+                        return False
+                if dataset_fingerprint and meta.get("dataset_fingerprint") != dataset_fingerprint:
+                    return False
+                if trajectory_sha256 and meta.get("trajectory_sha256") != trajectory_sha256:
+                    return False
+                if split_hash and meta.get("split_hash") != split_hash:
+                    return False
+            except Exception:
+                return False
+
+        return True
+
+    def should_reuse_evaluation(
+        self,
+        candidate_name: str,
+        force: bool = False,
+        expected_spec_hash: Optional[str] = None,
+        dataset_fingerprint: Optional[str] = None,
+        split_hash: Optional[str] = None
+    ) -> Optional[dict]:
+        """Check if evaluation summary exists and matches all spec and provenance hashes."""
+        if force:
+            return None
         cand_dir = self.get_candidate_eval_dir(candidate_name)
         summary_file = cand_dir / "evaluation_summary.json"
         if summary_file.exists() and summary_file.stat().st_size > 50:
@@ -132,43 +323,18 @@ class ArtifactManager:
                     data = json.load(f)
                 if isinstance(data, dict) and data.get("geometry"):
                     if expected_spec_hash:
-                        cached_hash = data.get("spec_hash") or data.get("metadata", {}).get("spec_hash")
+                        cached_hash = data.get("spec_hash") or data.get("spec", {}).get("spec_hash")
                         if cached_hash and cached_hash != expected_spec_hash:
+                            return None
+                    if dataset_fingerprint:
+                        cached_ds = data.get("dataset_fingerprint")
+                        if cached_ds and cached_ds != dataset_fingerprint:
+                            return None
+                    if split_hash:
+                        cached_sp = data.get("split_hash")
+                        if cached_sp and cached_sp != split_hash:
                             return None
                     return data
             except Exception:
                 return None
         return None
-
-    def should_reuse_reconstruction(
-        self,
-        mesh_path: Optional[Path],
-        pcd_path: Optional[Path],
-        candidate_name: str,
-        force: bool = False
-    ) -> bool:
-        """Determine whether existing mesh/pcd and evaluation can be reused."""
-        if force:
-            return False
-
-        # If mesh requested, must be valid
-        if mesh_path and not is_artifact_valid(mesh_path):
-            return False
-
-        # If pcd requested, must be valid
-        if pcd_path and not is_artifact_valid(pcd_path):
-            return False
-
-        return True
-
-    def should_reuse_evaluation(
-        self,
-        candidate_name: str,
-        force: bool = False,
-        expected_spec_hash: Optional[str] = None
-    ) -> Optional[dict]:
-        """Check if evaluation summary exists and can be reused."""
-        if force:
-            return None
-        return self.get_cached_eval_summary(candidate_name, expected_spec_hash=expected_spec_hash)
-

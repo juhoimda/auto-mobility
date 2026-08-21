@@ -41,6 +41,14 @@ class Trajectory:
                 f.write(f"{stamp:.6f} {pos[0]:.6f} {pos[1]:.6f} {pos[2]:.6f} "
                         f"{quat[0]:.6f} {quat[1]:.6f} {quat[2]:.6f} {quat[3]:.6f} {fid}\n")
 
+    def save_tum(self, filepath: str, comment: str = "") -> None:
+        """Alias for to_tum_file."""
+        self.to_tum_file(filepath, comment=comment)
+
+    def save_tum_file(self, filepath: str, comment: str = "") -> None:
+        """Alias for to_tum_file."""
+        self.to_tum_file(filepath, comment=comment)
+
     @classmethod
     def from_tum_file(cls, filepath: str) -> "Trajectory":
         """TUM 포맷 파일에서 궤적 로드."""

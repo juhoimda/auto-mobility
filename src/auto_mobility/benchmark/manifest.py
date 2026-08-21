@@ -1,19 +1,21 @@
 """
-manifest.py — Experiment Manifest, Rankings, Markdown Report, and Final Artifact Bundler.
+manifest.py — Experiment Manifest, Multi-Metric Rankings, Markdown Report, and Final Deliverables.
 
 Produces standard reproducible deliverables:
   ├── experiment_manifest.json (Atomic)
-  ├── benchmark_report.md (Atomic, Explainable Rationale, Decision Trace)
+  ├── benchmark_report.md (Atomic, Explainable Rationale, Full Raw Metrics, Decision Trace)
   ├── rankings.json (Atomic)
   ├── final/
-  │   ├── best.obj
-  │   ├── best_config.json
+  │   ├── best.obj (SHA256 verified)
+  │   ├── best_config.json (Single source of truth from winner spec)
   │   └── quality_report.json
   └── review/
-      ├── rank_01_<candidate>.obj
-      ├── rank_02_<candidate>.obj
-      └── rank_03_<candidate>.obj
+      ├── rank_01.obj (SHA256 verified)
+      ├── rank_02.obj
+      └── rank_03.obj
 """
+
+from __future__ import annotations
 
 import os
 import sys
@@ -27,7 +29,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Union, Tuple
 
 from auto_mobility.config import PROJECT_DIR
-from auto_mobility.benchmark.artifacts import atomic_write_json, atomic_write_text
+from auto_mobility.benchmark.artifacts import atomic_write_json, atomic_write_text, compute_file_sha256
 from auto_mobility.benchmark.scoring import explain_winner_decision
 
 
@@ -61,6 +63,7 @@ def compute_dataset_fingerprint(dataset_dir: Path) -> str:
 
 def get_system_hardware_info() -> dict:
     mem = psutil.virtual_memory()
+    swap = psutil.swap_memory()
     gpu_name = "N/A"
     vram_mb = 0.0
     try:
@@ -87,6 +90,8 @@ def get_system_hardware_info() -> dict:
         "cpu_count": psutil.cpu_count(logical=True),
         "ram_total_mb": round(mem.total / (1024 * 1024), 1),
         "ram_available_mb": round(mem.available / (1024 * 1024), 1),
+        "swap_total_mb": round(swap.total / (1024 * 1024), 1),
+        "swap_used_mb": round(swap.used / (1024 * 1024), 1),
         "gpu_name": gpu_name,
         "vram_total_mb": vram_mb
     }
@@ -108,17 +113,6 @@ def get_software_info() -> dict:
     }
 
 
-def compute_file_sha256(file_path: Path) -> str:
-    """Compute SHA-256 hash of a file."""
-    if not file_path.exists():
-        return "missing"
-    sha = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            sha.update(chunk)
-    return sha.hexdigest()
-
-
 class BenchmarkManifestExporter:
     """Exports manifest, reports, and final deliverables for a benchmark run."""
 
@@ -138,16 +132,17 @@ class BenchmarkManifestExporter:
 
         lines = []
         lines.append("# 📊 Multi-Axis Robotics SLAM & Reconstruction Benchmark Report\n")
+        lines.append("> [!NOTE]\n> Results are relative to this dataset acquisition and benchmark configuration.\n")
         lines.append("## ⚙️ Benchmark Overview\n")
-        lines.append(f"- **Dataset**: `{bag_name}`")
+        lines.append(f"- **Dataset**: `{bag_name}` (Dataset Fingerprint: `{manifest.get('dataset_fingerprint', 'N/A')}`)")
         lines.append(f"- **Execution Mode**: `{mode}`")
         lines.append(f"- **Timestamp**: `{ts}`")
         lines.append(f"- **Git Commit**: `{sw.get('git_commit')}` (Dirty Tree: `{sw.get('git_dirty', False)}`)")
-        lines.append(f"- **Hardware**: CPU {hw.get('cpu_count')} cores, RAM {hw.get('ram_total_mb')} MB | GPU `{hw.get('gpu_name')}` (VRAM: {hw.get('vram_total_mb')} MB)")
+        lines.append(f"- **Hardware**: CPU {hw.get('cpu_count')} cores, RAM {hw.get('ram_total_mb')} MB (Available: {hw.get('ram_available_mb')} MB) | Swap {hw.get('swap_total_mb')} MB | GPU `{hw.get('gpu_name')}` (VRAM: {hw.get('vram_total_mb')} MB)")
         lines.append(f"- **Software**: ROS2 `{sw.get('ros_distro')}`, Open3D `{sw.get('open3d')}`, Python `{sw.get('python')}`")
         if stats:
-            lines.append(f"- **Execution Summary**: Total Candidates: `{stats.get('total_candidates', len(overall_rankings))}`, Evaluated: `{stats.get('evaluated_count', 0)}`, Reused/Cached: `{stats.get('cached_count', 0)}` ({stats.get('reuse_rate_pct', 0):.1f}%), Failed: `{stats.get('failed_count', 0)}`")
-            lines.append(f"- **Total Runtime**: `{stats.get('total_runtime_sec', 0):.1f}s`\n")
+            lines.append(f"- **Execution Summary**: Total Candidates: `{stats.get('total_candidates', len(overall_rankings))}`, Evaluated: `{stats.get('evaluated_count', 0)}`, Cached/Reused: `{stats.get('cached_count', 0)}`, Pruned: `{stats.get('pruned_count', 0)}`, Rebuilt: `{stats.get('rebuilt_count', 0)}`, Failed: `{stats.get('failed_count', 0)}`")
+            lines.append(f"- **Total Benchmark Runtime**: `{stats.get('total_runtime_sec', 0):.1f}s`\n")
         else:
             lines.append("\n")
 
@@ -169,11 +164,11 @@ class BenchmarkManifestExporter:
                 cov = f"{raw.get('depth_coverage_ratio', 0)*100:.1f}%" if raw.get('depth_coverage_ratio') is not None else "N/A"
                 compl = f"{raw.get('observed_surface_completeness', 0)*100:.1f}%" if raw.get('observed_surface_completeness') is not None else "N/A"
                 fs_corr = f"{raw.get('free_space_correctness_ratio', 1.0)*100:.1f}%" if raw.get('free_space_correctness_ratio') is not None else "100.0%"
-                lines.append(f"- **Key Metrics**: Depth MAE `{mae}`, P95 `{p95}`, Coverage `{cov}`, Completeness `{compl}`, Free-Space Correctness `{fs_corr}`")
-                lines.append(f"- **Final Deliverable**: `final/best.obj`\n")
+                lines.append(f"- **Key Raw Metrics**: Depth MAE `{mae}`, P95 `{p95}`, Coverage `{cov}`, Completeness `{compl}`, Free-Space Correctness `{fs_corr}`")
+                lines.append(f"- **Deliverable**: `final/best.obj` (Reproducible via `final/best_config.json`)\n")
 
                 # Decision Rationale
-                lines.append("### 🧠 Selection Rationale")
+                lines.append("### 🧠 Winner Selection Rationale")
                 for r_line in explain_winner_decision(winner, runner_up):
                     lines.append(r_line)
                 lines.append("\n")
@@ -181,9 +176,10 @@ class BenchmarkManifestExporter:
             lines.append("## ⚠️ Benchmark Result: No Passing Candidates\n")
             lines.append("- All candidates failed Hard Gate quality criteria; no final winner selected.\n")
 
+        # Root-Cause Diagnosis
         diagnosis = manifest.get("pipeline_diagnosis")
         if diagnosis:
-            lines.append("## 🧭 Root-Cause Diagnosis\n")
+            lines.append("## 🧭 Root-Cause Pipeline Diagnosis\n")
             lines.append(f"- **Primary cause**: `{diagnosis.get('primary_cause', 'INCONCLUSIVE')}`")
             lines.append(f"- **Confidence**: `{diagnosis.get('confidence', 'low')}`")
             lines.append(f"- **Rationale**: {diagnosis.get('rationale', '')}\n")
@@ -193,13 +189,25 @@ class BenchmarkManifestExporter:
                 lines.append(f"| {stage} | **{detail.get('status', 'UNKNOWN')}** | {detail.get('cause', 'NONE')} |")
             lines.append("")
 
-        # 1. SLAM Ranking
-        lines.append("## 1. [SLAM Screening] Trajectory & Downstream Consistency\n")
-        lines.append("| Backend | Status | Quality Score | Tracking Frames | Coverage | Depth MAE | Depth P95 | Free-Space | Runtime |")
+        # 1. Trajectory Health
+        traj_health = manifest.get("trajectory_health_diagnostics", {})
+        if traj_health:
+            lines.append("## 1. [Trajectory Health Gate: Phase A0]\n")
+            lines.append("| Trajectory | Status | Cause | Poses | Finite % | Path Len (m) | BBox Diag (m) | Max Step (m) | Max Vel (m/s) |")
+            lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
+            for t_k, t_h in traj_health.items():
+                st = t_h.get("status", "UNKNOWN")
+                st_badge = "✅ PASS" if st == "PASS" else ("⚠️ WARN" if st == "WARN" else "❌ FAIL")
+                lines.append(f"| **{t_k}** | {st_badge} | {t_h.get('cause', 'NONE')} | {t_h.get('pose_count', 0)} | {t_h.get('finite_pose_ratio', 1.0)*100:.1f}% | {t_h.get('total_path_length_m', 0):.2f} | {t_h.get('bbox_diagonal_m', 0):.2f} | {t_h.get('translation_step_max_m', 0):.2f} | {t_h.get('linear_velocity_max_mps', 0):.2f} |")
+            lines.append("")
+
+        # 2. SLAM Screening
+        lines.append("## 2. [SLAM Profile & Backend Screening: Phase A]\n")
+        lines.append("| Backend / Profile | Status | Quality Score | Tracking Frames | Coverage | Depth MAE | Depth P95 | Free-Space | Runtime |")
         lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
         for s in manifest.get("phase_a_slam_results", []):
             status = s.get("status") or s.get("overall_status", "UNKNOWN")
-            if status in ("FAIL", "FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "FAIL_EXCEPTION", "SKIPPED_UNAVAILABLE", "PRUNED", "BLOCKED", "NOT_EVALUATED"):
+            if status in ("FAIL", "FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "FAIL_EXCEPTION", "FAIL_TRAJECTORY", "FAIL_ALIGNMENT", "SKIPPED_UNAVAILABLE", "PRUNED", "BLOCKED", "NOT_EVALUATED"):
                 lines.append(f"| **{s['candidate_name']}** | ❌ {status} | - | - | - | - | - | - | - |")
                 continue
             tm = s.get("trajectory_metrics", {})
@@ -213,8 +221,8 @@ class BenchmarkManifestExporter:
             sc = compute_absolute_scores(s)
             lines.append(f"| **{s['candidate_name']}** | ✅ | {sc['quality_score']:.1f} | {tm.get('num_frames', 'N/A')} | {cov} | {mae} | {p95} | {fs} | {runtime:.2f}s |")
 
-        # 2. Fusion Ranking (TSDF vs Direct Point Cloud)
-        lines.append("\n## 2. [Fusion Screening] TSDF vs Direct Point Cloud Fusion\n")
+        # 3. Fusion Screening
+        lines.append("\n## 3. [Fusion Screening: Phase B (Common Surface Adapter)]\n")
         lines.append("| Candidate | Fusion Backend | Voxel Size | Status | Quality Score | Depth MAE | Coverage | Completeness | Triangles | Runtime |")
         lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
         for s in manifest.get("phase_b_tsdf_results", []):
@@ -222,7 +230,7 @@ class BenchmarkManifestExporter:
             fusion_backend = s.get("fusion_method", "tsdf").upper()
             v_m = s.get("voxel_size_m", 0.010)
             v_str = f"{v_m*1000:.1f}mm" if v_m else "10.0mm"
-            if status in ("FAIL", "FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "FAIL_EXCEPTION", "SKIPPED_UNAVAILABLE", "PRUNED", "BLOCKED", "NOT_EVALUATED"):
+            if status in ("FAIL", "FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "FAIL_EXCEPTION", "FAIL_TRAJECTORY", "SKIPPED_UNAVAILABLE", "PRUNED", "BLOCKED", "NOT_EVALUATED"):
                 lines.append(f"| **{s['candidate_name']}** | {fusion_backend} | {v_str} | ❌ {status} | - | FAIL | FAIL | FAIL | 0 | 0.0s |")
                 continue
             gm = s.get("geometry", {})
@@ -236,8 +244,8 @@ class BenchmarkManifestExporter:
             sc = compute_absolute_scores(s)
             lines.append(f"| **{s['candidate_name']}** | {fusion_backend} | {v_str} | ✅ | {sc['quality_score']:.1f} | {mae} | {cov} | {compl} | {tri} | {runtime:.2f}s |")
 
-        # 3. Surface Ranking
-        lines.append("\n## 3. [Surface Screening] Surface Representation & Topology\n")
+        # 4. Surface Screening
+        lines.append("\n## 4. [Surface Screening: Phase C (Fair No-Simplification Baseline)]\n")
         lines.append("| Candidate | Surface Method | Status | Quality Score | Depth MAE | Point-Mesh P95 | Free-Space | Non-Manifold | Triangles | Runtime |")
         lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
         for s in manifest.get("phase_c_surface_results", []):
@@ -258,38 +266,42 @@ class BenchmarkManifestExporter:
             sc = compute_absolute_scores(s)
             lines.append(f"| **{s['candidate_name']}** | {surf_method} | ✅ | {sc['quality_score']:.1f} | {mae} | {p95} | {fs} | {nm} | {tri} | {runtime:.2f}s |")
 
-        # 4. Overall Rebuilt Finalists & Joint Ranking
+        # 5. Overall Full Rebuilt Multi-Metric Joint Ranking
         if overall_rankings:
-            lines.append("\n## 4. Overall Multi-Axis Joint Ranking (Top Finalists Rebuilt with stride=1)\n")
-            lines.append("| Rank | Candidate | Quality Score | Cost Score | Composite Score | Status | Depth MAE | Depth P95 | Coverage | Triangles | Full Rebuild |")
-            lines.append("| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
+            lines.append("\n## 5. Overall Final Multi-Metric Joint Ranking (stride=1, ALL TRAIN FRAMES)\n")
+            lines.append("| Rank | Candidate | Quality | Cost | Composite | Status | Depth MAE | Depth RMSE | Depth P95 | Coverage | Within 20mm | Free Space | Non-Manifold | Triangles | Runtime | Full Rebuild |")
+            lines.append("| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
             for r in overall_rankings:
                 raw = r.get("raw_metrics", {})
                 mae_str = f"{raw.get('depth_mae_mm', 0):.2f} mm" if raw.get('depth_mae_mm') is not None else "N/A"
+                rmse_str = f"{raw.get('depth_rmse_mm', 0):.2f} mm" if raw.get('depth_rmse_mm') is not None else "N/A"
                 p95_str = f"{raw.get('depth_p95_mm', 0):.2f} mm" if raw.get('depth_p95_mm') is not None else "N/A"
                 cov_str = f"{raw.get('depth_coverage_ratio', 0)*100:.1f}%" if raw.get('depth_coverage_ratio') is not None else "N/A"
+                w20_str = f"{raw.get('within_20mm_ratio', 0)*100:.1f}%" if raw.get('within_20mm_ratio') is not None else "N/A"
+                fs_str = f"{raw.get('free_space_correctness_ratio', 1.0)*100:.1f}%" if raw.get('free_space_correctness_ratio') is not None else "100%"
+                nm_str = f"{raw.get('non_manifold_ratio', 0)*100:.2f}%" if raw.get('non_manifold_ratio') is not None else "0%"
                 tri_str = f"{r.get('summary_data', {}).get('mesh', {}).get('num_triangles', 'N/A')}"
+                rt_str = f"{raw.get('runtime_sec', 0):.2f}s" if raw.get('runtime_sec') is not None else "N/A"
                 is_rb = "✅ Full (stride=1)" if r.get('summary_data', {}).get('is_full_rebuild') else "Screening"
-                lines.append(f"| {r.get('rank')} | **{r.get('candidate_name')}** | {r.get('quality_score', 0):.1f} | {r.get('cost_score', 0):.1f} | {r.get('composite_score', 0):.1f} | {r.get('status')} | {mae_str} | {p95_str} | {cov_str} | {tri_str} | {is_rb} |")
+                lines.append(f"| {r.get('rank')} | **{r.get('candidate_name')}** | {r.get('quality_score', 0):.1f} | {r.get('cost_score', 0):.1f} | {r.get('composite_score', 0):.1f} | {r.get('status')} | {mae_str} | {rmse_str} | {p95_str} | {cov_str} | {w20_str} | {fs_str} | {nm_str} | {tri_str} | {rt_str} | {is_rb} |")
 
-        # 5. Search Decision Trace
+        # 6. Search Decision Trace
         trace = manifest.get("decision_trace", [])
         if trace:
-            lines.append("\n## 5. Search & Pruning Decision Trace\n")
+            lines.append("\n## 6. Search & Pruning Decision Trace\n")
             lines.append("| Phase | Candidate / Action | Decision | Reason / Evidence |")
             lines.append("| :---: | :--- | :---: | :--- |")
             for entry in trace:
                 lines.append(f"| {entry.get('phase')} | `{entry.get('candidate')}` | **{entry.get('decision')}** | {entry.get('reason')} |")
 
-        # 6. Visual Inspection Guide
-        lines.append("\n## 6. Visual Inspection & 3D Viewer Commands\n")
+        # 7. Visual Inspection Guide
+        lines.append("\n## 7. Visual Inspection & 3D Viewer Commands\n")
         lines.append("Inspect Top Reconstruction candidates using the interactive 3D viewer:\n")
         lines.append("```bash")
         top_candidates = [r for r in overall_rankings if r.get("hard_gate_pass", False)][:3]
         if not top_candidates:
             top_candidates = overall_rankings[:3]
         for idx, rank_item in enumerate(top_candidates, 1):
-            mesh_p = rank_item.get("summary_data", {}).get("mesh_path")
             lines.append(f"# Rank {idx}: {rank_item.get('candidate_name')} (Quality: {rank_item.get('quality_score', 0):.1f}, Composite: {rank_item.get('composite_score', 0):.1f})")
             lines.append(f"./scripts/utils/view_mesh.sh {report_path.parent / 'review' / f'rank_{idx:02d}.obj'}\n")
         lines.append(f"# Final Winner Mesh")
@@ -316,17 +328,25 @@ class BenchmarkManifestExporter:
         # 1. Export Review Artifacts (Top-K candidates)
         valid_candidates = [r for r in overall_rankings if r.get("hard_gate_pass", False)]
         top_review = valid_candidates[:top_k] if valid_candidates else overall_rankings[:top_k]
+        review_sha_map = {}
         for idx, item in enumerate(top_review, 1):
             src_m = item.get("summary_data", {}).get("mesh_path")
             if src_m and Path(src_m).exists():
                 dst_m = review_dir / f"rank_{idx:02d}.obj"
                 shutil.copy2(Path(src_m), dst_m)
+                review_sha_map[f"rank_{idx:02d}"] = {
+                    "candidate_name": item.get("candidate_name"),
+                    "source_path": str(src_m),
+                    "sha256": compute_file_sha256(dst_m)
+                }
+
+        manifest_data["review_artifacts"] = review_sha_map
 
         # 2. Save experiment_manifest.json (Atomic)
         manifest_file = report_dir / "experiment_manifest.json"
         atomic_write_json(manifest_file, manifest_data)
 
-        # Keep the concise attribution separately discoverable for tooling.
+        # Keep diagnosis separately discoverable for tooling
         diagnosis = manifest_data.get("pipeline_diagnosis")
         if diagnosis is not None:
             atomic_write_json(report_dir / "pipeline_diagnosis.json", diagnosis)
@@ -358,9 +378,33 @@ class BenchmarkManifestExporter:
             quality_report_file = final_dir / "quality_report.json"
             atomic_write_json(quality_report_file, winner_summary)
 
-            # Build best_config.json
+            # Build best_config.json directly from winner CandidateSpec
+            spec_info = winner_summary.get("spec", {}).get("requested_params", {})
+            fusion_method = spec_info.get("fusion_method") or winner_summary.get("fusion_method", "tsdf")
+            fusion_params = spec_info.get("fusion_params") or {
+                "voxel_size_m": winner_summary.get("voxel_size_m", 0.010),
+                "depth_min_m": 0.3,
+                "depth_max_m": 3.0,
+                "trunc_mult": 4.0
+            }
+            surface_method = spec_info.get("surface_method") or winner_summary.get("surface_method", "tsdf_direct")
+            surface_params = spec_info.get("surface_params") or {}
+            postprocess_params = spec_info.get("postprocess_params") or {}
+            slam_backend = spec_info.get("slam_backend") or winner_summary.get("trajectory_metrics", {}).get("slam_backend") or winner_candidate.get("candidate_name", "").split("_")[0]
+            slam_profile = spec_info.get("slam_profile", "normal")
+            replay_rate = spec_info.get("replay_rate", 1.0)
+            frame_stride = spec_info.get("frame_stride", 1)
+
             traj_p = winner_summary.get("trajectory_path", "")
             traj_sha = compute_file_sha256(Path(traj_p)) if traj_p and Path(traj_p).exists() else "N/A"
+
+            rebuild_cmd = (
+                f"python3 -m auto_mobility.mesh.reconstruct_tsdf {manifest_data.get('bag_name')} "
+                f"--trajectory={traj_p} --voxel={fusion_params.get('voxel_size_m', 0.01)} "
+                f"--depth-max={fusion_params.get('depth_max_m', 3.0)} --stride=1"
+                if fusion_method == "tsdf"
+                else f"python3 -m auto_mobility.mesh.direct_fusion {manifest_data.get('bag_name')} {traj_p} --voxel={fusion_params.get('voxel_size_m', 0.01)} --stride=1"
+            )
 
             best_config = {
                 "dataset": manifest_data.get("bag_name"),
@@ -369,17 +413,24 @@ class BenchmarkManifestExporter:
                 "quality_score": winner_candidate.get("quality_score"),
                 "cost_score": winner_candidate.get("cost_score"),
                 "composite_score": winner_candidate.get("composite_score"),
-                "slam_backend": winner_summary.get("trajectory_metrics", {}).get("slam_backend") or winner_candidate.get("candidate_name", "").split("_")[0],
+                "slam": {
+                    "backend": slam_backend,
+                    "profile": slam_profile,
+                    "replay_rate": replay_rate
+                },
                 "trajectory_path": traj_p,
                 "fusion": {
-                    "method": "Open3D Tensor VoxelBlockGrid TSDF",
-                    "voxel_size_m": winner_summary.get("voxel_size_m") or 0.010,
-                    "depth_min_m": 0.3,
-                    "depth_max_m": 3.0,
-                    "trunc_mult": 4.0
+                    "method": fusion_method,
+                    "params": fusion_params
                 },
                 "surface": {
-                    "method": winner_summary.get("surface_method", "tsdf_direct"),
+                    "method": surface_method,
+                    "params": surface_params,
+                    "postprocess": postprocess_params
+                },
+                "reconstruction": {
+                    "frame_stride": frame_stride,
+                    "is_full_rebuild": True
                 },
                 "quality_metrics": winner_summary.get("geometry", {}),
                 "mesh_topology_metrics": winner_summary.get("mesh", {}),
@@ -393,6 +444,7 @@ class BenchmarkManifestExporter:
                     "dataset_fingerprint": manifest_data.get("dataset_fingerprint", "N/A"),
                     "git_commit": manifest_data.get("software", {}).get("git_commit", "unknown"),
                     "git_dirty": manifest_data.get("software", {}).get("git_dirty", False),
+                    "rebuild_command": rebuild_cmd
                 },
                 "software": manifest_data.get("software", {}),
                 "hardware": manifest_data.get("hardware", {}),

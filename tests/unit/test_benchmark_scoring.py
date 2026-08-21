@@ -268,31 +268,17 @@ def test_old_schema_evaluation_dict_compatibility():
 
 def test_all_candidates_failed_returns_no_winner():
     """Validates: when all candidates fail Hard Gate, no winner is selected."""
-    from pathlib import Path
-    from auto_mobility.benchmark.search import SearchEngine
-    from unittest.mock import MagicMock
-
-    engine = SearchEngine(
-        bag_name="test_bag",
-        dataset=MagicMock(),
-        split_file=Path("/tmp/split.json"),
-        artifact_mgr=MagicMock()
-    )
-
     failed_a = [{"candidate_name": "a", "status": "FAIL_SEGFAULT", "geometry": {}}]
     failed_b = [{"candidate_name": "b", "status": "FAIL_OOM", "geometry": {}}]
     failed_c = [{"candidate_name": "c", "status": "FAIL_TIMEOUT", "geometry": {}}]
 
-    overall_ranked, winner = engine.compute_overall_rankings(
-        phase_a_results=failed_a,
-        phase_b_results=failed_b,
-        phase_c_results=failed_c,
-        run_full_eval_on_winner=False
-    )
+    ranked = rank_candidate_summaries(failed_a + failed_b + failed_c)
+    valid = [r for r in ranked if r.get("hard_gate_pass", False)]
+    winner = valid[0] if valid else None
 
     assert winner is None, "When all candidates fail Hard Gate, winner MUST be None"
-    assert len(overall_ranked) == 3
-    for item in overall_ranked:
+    assert len(ranked) == 3
+    for item in ranked:
         assert item["hard_gate_pass"] is False
         assert item["composite_score"] == 0.0
 

@@ -123,39 +123,59 @@ import concurrent.futures
 
 
 class AsyncFramePrefetcher:
-    """ThreadPool background loader to prefetch depth/color images to eliminate disk I/O stall."""
+    """Sliding-window parallel frame prefetcher using ThreadPoolExecutor.
+    Submits up to `prefetch_size` asynchronous frame loading tasks across `max_workers`
+    worker threads, yielding loaded frames in strict sequential order.
+    """
     def __init__(self, dataset, indices, no_color=False, max_workers=4, prefetch_size=12):
         self.dataset = dataset
-        self.indices = indices
+        self.indices = list(indices)
         self.no_color = no_color
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-        self.queue = queue.Queue(maxsize=prefetch_size)
+        self.max_workers = max(1, max_workers)
+        self.prefetch_size = max(1, prefetch_size)
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers)
         self._stop_event = False
-        self._future = self.executor.submit(self._worker_loop)
 
     def _fetch_one(self, idx):
+        if self._stop_event:
+            return idx, None, None
         depth = self.dataset.get_depth(idx)
         color = None if self.no_color else self.dataset.get_rgb_tensor(idx)
         return idx, depth, color
 
-    def _worker_loop(self):
-        for idx in self.indices:
+    def __iter__(self):
+        import collections
+        pending_futures = collections.deque()
+        idx_iter = iter(self.indices)
+
+        # Pre-fill sliding window with parallel load tasks
+        for _ in range(min(self.prefetch_size, len(self.indices))):
+            try:
+                idx = next(idx_iter)
+                pending_futures.append(self.executor.submit(self._fetch_one, idx))
+            except StopIteration:
+                break
+
+        while pending_futures:
             if self._stop_event:
                 break
-            res = self._fetch_one(idx)
-            self.queue.put(res)
-        self.queue.put(None)
+            fut = pending_futures.popleft()
+            # Refill sliding window
+            try:
+                next_idx = next(idx_iter)
+                pending_futures.append(self.executor.submit(self._fetch_one, next_idx))
+            except StopIteration:
+                pass
 
-    def __iter__(self):
-        while True:
-            item = self.queue.get()
-            if item is None:
-                break
-            yield item
+            res = fut.result()
+            yield res
 
     def shutdown(self):
         self._stop_event = True
-        self.executor.shutdown(wait=False)
+        try:
+            self.executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            self.executor.shutdown(wait=False)
 
 
 def reconstruct(

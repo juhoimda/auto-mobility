@@ -238,21 +238,20 @@ def evaluate_reconstruction(
 
     raw_holdout_indices = split_data.get("holdout_indices", [])
     
-    # Adaptive Hold-out frame sampling:
-    # cheap screening -> max 12 frames, full fidelity -> max 40 frames (statistically representative, ~99% CLT confidence)
+    # Deterministic stratified temporal holdout sampling for fast evaluation
     max_eval_frames = max_holdout_samples if max_holdout_samples is not None else (12 if is_cheap else 40)
     if len(raw_holdout_indices) > max_eval_frames:
-        step = max(1, len(raw_holdout_indices) // max_eval_frames)
-        holdout_indices = raw_holdout_indices[::step][:max_eval_frames]
+        bins = np.array_split(np.arange(len(raw_holdout_indices)), max_eval_frames)
+        holdout_indices = [raw_holdout_indices[b[len(b) // 2]] for b in bins if len(b) > 0]
     else:
         holdout_indices = raw_holdout_indices
 
     print(f"🎯 Hold-out 평가 프레임 수: {len(holdout_indices)}장 (전체 {len(raw_holdout_indices)}장 중 {'샘플링' if len(raw_holdout_indices) > len(holdout_indices) else '전체'})")
 
-    # 6. Raycasting Depth Reprojection on Hold-out frames
+    # 6. Raycasting Depth Reprojection on Hold-out frames (Reconstruction & Evaluation depth domain unified: 0.3m ~ 3.0m)
     scene = create_raycasting_scene(mesh)
     depth_min_m = float(eval_cfg.get("raycasting", {}).get("depth_min_m", 0.3))
-    depth_max_m = float(eval_cfg.get("raycasting", {}).get("depth_max_m", 5.0))
+    depth_max_m = float(eval_cfg.get("raycasting", {}).get("depth_max_m", 3.0))
 
     frame_metrics_list = []
     all_world_points = []
@@ -371,6 +370,16 @@ def evaluate_reconstruction(
             "pose_coverage_ratio": assoc_summary.pose_coverage_ratio,
             "pose_dt_mean_ms": assoc_summary.pose_dt_mean_ms,
             "pose_dt_p95_ms": assoc_summary.pose_dt_p95_ms
+        },
+        "depth_domain": {
+            "depth_min_m": depth_min_m,
+            "depth_max_m": depth_max_m
+        },
+        "split": {
+            "split_file": str(split_json) if split_json else None,
+            "train_frame_count": len(split_data.get("train_indices", [])),
+            "holdout_frame_count": len(split_data.get("holdout_indices", [])),
+            "evaluated_holdout_samples": len(holdout_indices)
         },
         "geometry": geometry_summary,
         "mesh": mesh_summary,

@@ -22,6 +22,7 @@ class WorkerStatus:
     FAIL_EXCEPTION = "FAIL_EXCEPTION"
     FAIL_SEGFAULT = "FAIL_SEGFAULT"
     FAIL_OOM = "FAIL_OOM"
+    FAIL_CRASH = "FAIL_CRASH"
     FAIL_TIMEOUT = "FAIL_TIMEOUT"
     SKIPPED_UNAVAILABLE = "SKIPPED_UNAVAILABLE"
     CACHED = "CACHED"
@@ -35,6 +36,7 @@ class CandidateLifecycleStatus:
     FAIL_EXCEPTION = "FAIL_EXCEPTION"
     FAIL_SEGFAULT = "FAIL_SEGFAULT"
     FAIL_OOM = "FAIL_OOM"
+    FAIL_CRASH = "FAIL_CRASH"
     FAIL_TIMEOUT = "FAIL_TIMEOUT"
     SKIPPED_UNAVAILABLE = "SKIPPED_UNAVAILABLE"
     PRUNED = "PRUNED"
@@ -175,9 +177,9 @@ def run_surface_worker(
     depth: int = 8,
     alpha: Optional[float] = None,
     alpha_factor: float = 3.0,
-    simplify: float = 0.5,
+    simplify: float = 0.0,
     no_clean: bool = False,
-    no_simplify: bool = False,
+    no_simplify: bool = True,
     timeout: int = 600,
     env: Optional[Dict[str, str]] = None
 ) -> WorkerResult:
@@ -198,7 +200,7 @@ def run_surface_worker(
         cmd.append(f"--alpha={alpha}")
     if no_clean:
         cmd.append("--no-clean")
-    if no_simplify:
+    if no_simplify or simplify <= 0.0:
         cmd.append("--no-simplify")
 
     worker_env = os.environ.copy()
