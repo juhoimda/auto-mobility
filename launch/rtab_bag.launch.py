@@ -1,6 +1,7 @@
 import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
@@ -45,6 +46,12 @@ def generate_launch_description():
         description='Offline reconstruction profile: preserve an RTAB-Map node for every RGB-D frame'
     )
 
+    headless_benchmark_arg = DeclareLaunchArgument(
+        'headless_benchmark',
+        default_value='false',
+        description='Disable RViz and visualization throttle nodes for fast offline benchmarking'
+    )
+
     depth_compressed_topic_arg = DeclareLaunchArgument(
         'depth_compressed_topic',
         default_value=CAMERA_DEPTH_COMPRESSED_TOPIC,
@@ -72,8 +79,16 @@ def generate_launch_description():
         depth_compressed_topic=LaunchConfiguration('depth_compressed_topic')
     )
     imu_filter_node = create_imu_filter_node(use_sim_time=True)
-    cloud_throttle_node = create_cloud_throttle_node(use_sim_time=True, max_rate=2.0)
-    point_cloud_node = create_point_cloud_node(use_sim_time=True)
+    
+    # RViz/throttle nodes only active if NOT in headless benchmark mode
+    cloud_throttle_node = create_cloud_throttle_node(
+        use_sim_time=True, max_rate=2.0,
+        condition=IfCondition(PythonExpression(["'", LaunchConfiguration('headless_benchmark'), "' != 'true'"]))
+    )
+    point_cloud_node = create_point_cloud_node(
+        use_sim_time=True,
+        condition=IfCondition(PythonExpression(["'", LaunchConfiguration('headless_benchmark'), "' != 'true'"]))
+    )
 
     rtabmap_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -83,15 +98,14 @@ def generate_launch_description():
             **get_rtabmap_base_args(),
             'depth_topic': LaunchConfiguration('depth_topic'),
             'subscribe_imu': LaunchConfiguration('use_imu'),
+            'rviz': PythonExpression(["'false' if '", LaunchConfiguration('headless_benchmark'), "' == 'true' else 'true'"]),
+            'rtabmap_viz': 'false',
             # Frame processing (모든 프레임 순서 처리 → map 밀도 확보)
             'odom_always_process_most_recent_frame': 'false',
             'topic_queue_size': RTAB_BAG_TOPIC_QUEUE_SIZE,
             'use_sim_time': 'true',
             'database_path': LaunchConfiguration('database_path'),
             # A dense offline pass must not reuse the live-view keyframe policy.
-            # DetectionRate=0 removes the temporal cap, zero updates prevent
-            # motion-threshold suppression, and intermediate nodes retain each
-            # processed RGB-D observation for later pose export.
             'rtabmap_args': PythonExpression([
                 "'", RTABMAP_ARGS,
                 " --Rtabmap/DetectionRate 0 --Rtabmap/CreateIntermediateNodes true"
@@ -99,11 +113,6 @@ def generate_launch_description():
                 LaunchConfiguration('dense_mapping'),
                 "' == 'true' else '", RTABMAP_ARGS, "'"
             ]),
-            # Odom/OdomF2M 계열은 rtabmap 메인이 선언하지 않아 크래시 → rgbd_odometry에 odom_args로 전달
-            # A one-frame odometry loss must not start a new map during an
-            # offline dense pass.  ResetCountdown=1 fragmented the test bag
-            # into seven map IDs, leaving rtabmap-export with only 11 poses in
-            # the first connected component.
             'odom_args': PythonExpression([
                 "'", ODOM_ARGS, " --Odom/ResetCountdown 0' if '",
                 LaunchConfiguration('dense_mapping'),
@@ -119,6 +128,7 @@ def generate_launch_description():
         depth_topic_arg,
         use_imu_arg,
         dense_mapping_arg,
+        headless_benchmark_arg,
         camera_tf_pub_node,
         republish_compressed_node,
         imu_filter_node,

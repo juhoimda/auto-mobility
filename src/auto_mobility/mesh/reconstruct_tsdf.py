@@ -15,13 +15,16 @@ reconstruct_tsdf.py — Canonical Frame Dataset + Trajectory → Open3D Tensor T
 import os
 import sys
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from auto_mobility.benchmark.resources import DEFAULT_RESOURCE_POLICY, ResourcePolicy
+
 # Limit multi-threading CPU peak overload to prevent hardware thermal/power throttling shutdowns
 if "OMP_NUM_THREADS" not in os.environ:
-    os.environ["OMP_NUM_THREADS"] = "8"
+    os.environ["OMP_NUM_THREADS"] = str(DEFAULT_RESOURCE_POLICY.openmp_threads)
 if "OPENBLAS_NUM_THREADS" not in os.environ:
-    os.environ["OPENBLAS_NUM_THREADS"] = "8"
+    os.environ["OPENBLAS_NUM_THREADS"] = str(DEFAULT_RESOURCE_POLICY.blas_threads)
 if "MKL_NUM_THREADS" not in os.environ:
-    os.environ["MKL_NUM_THREADS"] = "8"
+    os.environ["MKL_NUM_THREADS"] = str(DEFAULT_RESOURCE_POLICY.blas_threads)
 
 import time
 import shutil
@@ -35,7 +38,6 @@ import open3d as o3d
 import open3d.core as o3c
 from scipy.spatial.transform import Rotation
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from auto_mobility.config import DB_DIR, MESH_DIR, POINTCLOUD_DIR, FRAME_DIR, PROJECT_DIR
 from auto_mobility.dataset.frame_dataset import FrameDataset, CameraIntrinsics
 from auto_mobility.trajectory.io import Trajectory
@@ -78,7 +80,7 @@ def _estimate_block_count(
     block_resolution: int = 16,
     safety_factor: float = 1.5,
     min_blocks: int = 65536,
-    memory_budget_gb: float = 6.0,
+    memory_budget_gb: float = DEFAULT_RESOURCE_POLICY.tsdf_memory_budget_gb,
 ) -> int:
     """궤적 범위(장면 규모)를 기반으로 VoxelBlockGrid의 block_count를 추정한다.
 
@@ -174,18 +176,29 @@ class AsyncFramePrefetcher:
     Submits up to `prefetch_size` asynchronous frame loading tasks across `max_workers`
     worker threads, yielding loaded frames in strict sequential order.
     """
-    def __init__(self, dataset, indices, no_color=False, max_workers=4, prefetch_size=12):
+    def __init__(
+        self,
+        dataset,
+        indices,
+        no_color: bool = False,
+        max_workers: Optional[int] = None,
+        prefetch_size: Optional[int] = None
+    ):
         self.dataset = dataset
         self.indices = list(indices)
         self.no_color = no_color
-        self.max_workers = max(1, max_workers)
-        self.prefetch_size = max(1, prefetch_size)
+        self.max_workers = max(1, int(max_workers or DEFAULT_RESOURCE_POLICY.frame_prefetch_workers))
+        self.prefetch_size = max(1, int(prefetch_size or DEFAULT_RESOURCE_POLICY.frame_prefetch_depth))
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers)
         self._stop_event = False
 
     def _fetch_one(self, idx):
         if self._stop_event:
             return idx, None, None
+        try:
+            cv2.setNumThreads(DEFAULT_RESOURCE_POLICY.opencv_threads)
+        except Exception:
+            pass
         depth = self.dataset.get_depth(idx)
         color = None if self.no_color else self.dataset.get_rgb_tensor(idx)
         return idx, depth, color
@@ -248,6 +261,7 @@ def reconstruct(
       - Trajectory poses: T_world_camera (카메라 좌표계 -> 월드 좌표계)
       - TSDF extrinsic: T_camera_world = inv(T_world_camera) (월드 좌표계 -> 카메라 좌표계)
     """
+    t_start_total = time.time()
     if isinstance(dataset, (str, Path)):
         dataset = FrameDataset(dataset)
 
@@ -266,11 +280,6 @@ def reconstruct(
         if assoc_summary.warning:
             print(f"⚠️ [TSDF Warning] {assoc_summary.warning}")
 
-    # NOTE: no_gpu parameter accepted for API compatibility but CUDA is intentionally disabled.
-    # In the benchmark environment, mixing ROS and Open3D CUDA paths causes SIGSEGV
-    # (LD_LIBRARY_PATH conflict between ROS OpenCV/PCL and Open3D bundled libraries).
-    # CPU:0 is safe and reproducible. To re-enable GPU, sanitize LD_LIBRARY_PATH first
-    # (compare.sh already strips /opt/ros before calling the benchmark).
     device = o3c.Device("CPU:0")
     print(f"🖥️ TSDF Device: {device}, Voxel: {voxel_size*1000:.1f}mm, Total Frames: {len(dataset)}")
 
@@ -288,33 +297,36 @@ def reconstruct(
         print(f"🧮 VoxelBlockGrid block_count (명시) = {bc:,} (~{bc * _bytes_per_block(no_color) / 1e9:.1f} GB)")
     else:
         print(f"🧮 VoxelBlockGrid block_count (자동 추정) = {bc:,} (~{bc * _bytes_per_block(no_color) / 1e9:.1f} GB)")
-    if no_color:
-        vbg = o3d.t.geometry.VoxelBlockGrid(
-            attr_names=('tsdf', 'weight'),
-            attr_dtypes=(o3c.float32, o3c.float32),
-            attr_channels=((1,), (1,)),
-            voxel_size=voxel_size, block_resolution=16,
-            block_count=bc, device=device
-        )
-    else:
-        vbg = o3d.t.geometry.VoxelBlockGrid(
-            attr_names=('tsdf', 'weight', 'color'),
-            attr_dtypes=(o3c.float32, o3c.float32, o3c.float32),
-            attr_channels=((1,), (1,), (3,)),
-            voxel_size=voxel_size, block_resolution=16,
-            block_count=bc, device=device
-        )
 
-    # Frame filtering (holdout frames exclusion if train_indices specified)
+    # Open3D 0.19.0 compatibility: Always declare color attribute to prevent {0} shape extraction exception
+    vbg = o3d.t.geometry.VoxelBlockGrid(
+        attr_names=('tsdf', 'weight', 'color'),
+        attr_dtypes=(o3c.float32, o3c.float32, o3c.float32),
+        attr_channels=((1,), (1,), (3,)),
+        voxel_size=voxel_size, block_resolution=16,
+        block_count=bc, device=device
+    )
+
+    # Frame filtering: filter only valid train frames with associated valid poses
     indices_to_integrate = set(train_indices) if train_indices is not None else set(range(len(dataset)))
 
     integrated = 0
     skipped = 0
 
     step_stride = max(1, int(stride))
-    target_indices = [idx for idx in range(0, len(dataset), step_stride) if idx in indices_to_integrate]
+    target_indices = [
+        idx for idx in range(0, len(dataset), step_stride)
+        if idx in indices_to_integrate and idx in poses and poses[idx] is not None
+    ]
 
-    prefetcher = AsyncFramePrefetcher(dataset, target_indices, no_color=no_color, max_workers=4, prefetch_size=12)
+    prefetcher = AsyncFramePrefetcher(
+        dataset, target_indices, no_color=no_color,
+        max_workers=DEFAULT_RESOURCE_POLICY.frame_prefetch_workers,
+        prefetch_size=DEFAULT_RESOURCE_POLICY.frame_prefetch_depth
+    )
+
+    t_coords_total = 0.0
+    t_integrate_total = 0.0
 
     t0 = time.time()
     try:
@@ -334,6 +346,7 @@ def reconstruct(
             depth_t = o3d.t.geometry.Image(o3c.Tensor(np.asarray(depth, dtype=np.uint16), device=device))
             extrinsic_t = o3c.Tensor(extrinsic.astype(np.float64))
 
+            t_c0 = time.time()
             try:
                 coords = vbg.compute_unique_block_coordinates(
                     depth_t, intrinsic_t, extrinsic_t, depth_scale=1000.0,
@@ -342,7 +355,9 @@ def reconstruct(
             except Exception:
                 skipped += 1
                 continue
+            t_coords_total += (time.time() - t_c0)
 
+            t_i0 = time.time()
             if no_color or color_rgb is None:
                 vbg.integrate(coords, depth_t, intrinsic_t, extrinsic_t,
                               depth_scale=1000.0, depth_max=depth_max,
@@ -352,14 +367,17 @@ def reconstruct(
                 vbg.integrate(coords, depth_t, color_t, intrinsic_t, intrinsic_t,
                               extrinsic_t, depth_scale=1000.0, depth_max=depth_max,
                               trunc_voxel_multiplier=trunc_mult)
+            t_integrate_total += (time.time() - t_i0)
             integrated += 1
             if integrated % 30 == 0:
                 print(f"  integrate {integrated}/{len(target_indices)} frames")
     finally:
         prefetcher.shutdown()
 
-    print(f"✅ TSDF 적분 완료 ({time.time()-t0:.2f}s): {integrated} frames integrated (skipped {skipped})")
+    t_loop_total = time.time() - t0
+    print(f"✅ TSDF 적분 완료 ({t_loop_total:.2f}s: Coords={t_coords_total:.2f}s, Integrate={t_integrate_total:.2f}s): {integrated} frames integrated (skipped {skipped})")
 
+    t_extract0 = time.time()
     if integrated == 0:
         print("⚠️ TSDF integrated 0 frames! Returning empty triangle mesh and point cloud.")
         mesh = o3d.geometry.TriangleMesh()
@@ -372,8 +390,6 @@ def reconstruct(
             vbg_cpu = vbg
 
         # ── Point Cloud 추출 + 즉시 저장 ──
-        # Open3D extract_triangle_mesh()가 대용량 VoxelBlockGrid에서
-        # SIGSEGV될 수 있어, pcd를 먼저 추출·저장해 crash 시에도 보존한다.
         print("  • PointCloud 추출 중...")
         try:
             pcd_t = vbg_cpu.extract_point_cloud(weight_threshold=weight_thr)
@@ -382,17 +398,14 @@ def reconstruct(
             print(f"  ⚠️ extract_point_cloud 실패: {e}. 빈 PointCloud 사용.")
             pcd = o3d.geometry.PointCloud()
 
+        t_io0 = time.time()
         if output_pcd:
             os.makedirs(os.path.dirname(os.path.abspath(output_pcd)), exist_ok=True)
             o3d.io.write_point_cloud(output_pcd, pcd)
             print(f"☁️ PointCloud 저장: {output_pcd}")
+        t_io_pcd = time.time() - t_io0
 
         # ── Triangle Mesh 추출 ──
-        # ``tsdf_direct`` must be the TSDF zero-crossing surface.  The previous
-        # implementation silently converted a 3 cm downsampled point cloud with
-        # Poisson(depth=8), which discarded the requested voxel resolution and
-        # produced a closed, inflated surface.  Poisson is available explicitly
-        # through mesh_open3d.py; it is not a valid fallback for direct TSDF.
         print("  • Triangle Mesh 추출 중...")
         mesh = o3d.geometry.TriangleMesh()
         if output_mesh:
@@ -410,10 +423,14 @@ def reconstruct(
             print(f"🔺 Mesh 결과: {len(mesh.vertices):,} vertices / {len(mesh.triangles):,} triangles")
             print(f"☁️ PointCloud 결과: {len(pcd.points):,} points")
 
+            t_io0 = time.time()
             os.makedirs(os.path.dirname(os.path.abspath(output_mesh)), exist_ok=True)
             o3d.io.write_triangle_mesh(output_mesh, mesh)
             print(f"💾 Mesh 저장: {output_mesh}")
+            t_io_mesh = time.time() - t_io0
 
+    t_total_elapsed = time.time() - t_start_total
+    print(f"⏱️ [TSDF Total] {t_total_elapsed:.2f}s (Loop: {t_loop_total:.2f}s, Extract+IO: {time.time()-t_extract0:.2f}s)")
     return mesh, pcd
 
 

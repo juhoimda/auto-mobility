@@ -5,10 +5,11 @@ PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$PIPELINE_DIR/../common.sh"
 export PYTHONWARNINGS="ignore"
 
-# HW 과부하 및 셧다운 방지를 위한 CPU 멀티스레드 상한 제한
-export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
-export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-8}"
-export MKL_NUM_THREADS="${MKL_NUM_THREADS:-8}"
+# HW 과부하 및 셧다운 방지를 위한 CPU 멀티스레드 상한 제한 (ResourcePolicy 단일 소스 준수)
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-6}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+export OPENCV_NUM_THREADS="${OPENCV_NUM_THREADS:-1}"
 
 SLAM_TYPE="rtab"
 SURFACE_TYPE="tsdf_direct"

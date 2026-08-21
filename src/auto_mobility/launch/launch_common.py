@@ -209,35 +209,38 @@ def create_imu_filter_node(use_sim_time: bool):
     )
 
 
-def create_cloud_throttle_node(use_sim_time: bool, max_rate: float = 2.0):
+def create_cloud_throttle_node(use_sim_time: bool, max_rate: float = 2.0, condition=None):
     """RViz 소프트웨어 렌더링 부하 절감용 cloud_map 저주파 중계 노드
 
     /rtabmap/cloud_map (DetectionRate=5Hz) 을 최대 max_rate Hz 로
     /rtabmap/cloud_map_lite 에 재발행한다. SLAM 내부 처리에는 영향 없음.
     """
-    return Node(
-        package='auto_mobility',
-        executable='cloud_throttle.py',
-        name='cloud_throttle',
-        output='screen',
-        parameters=[{
+    node_kwargs = {
+        'package': 'auto_mobility',
+        'executable': 'cloud_throttle.py',
+        'name': 'cloud_throttle',
+        'output': 'screen',
+        'parameters': [{
             'use_sim_time': use_sim_time,
             'max_rate': max_rate,
             'input_topic': CLOUD_MAP_TOPIC,
             'output_topic': CLOUD_MAP_LITE_TOPIC,
         }],
-    )
+    }
+    if condition is not None:
+        node_kwargs['condition'] = condition
+    return Node(**node_kwargs)
 
 
-def create_point_cloud_node(use_sim_time: bool):
+def create_point_cloud_node(use_sim_time: bool, condition=None):
     """실시간 Live PointCloud (/rtabmap/voxel_cloud) 생성 노드"""
-    return Node(
-        package='rtabmap_util',
-        executable='point_cloud_xyzrgb',
-        name='point_cloud_xyzrgb_live',
-        namespace='rtabmap',
-        output='screen',
-        parameters=[{
+    node_kwargs = {
+        'package': 'rtabmap_util',
+        'executable': 'point_cloud_xyzrgb',
+        'name': 'point_cloud_xyzrgb_live',
+        'namespace': 'rtabmap',
+        'output': 'screen',
+        'parameters': [{
             'use_sim_time': use_sim_time,
             'approx_sync': True,
             'approx_sync_max_interval': 0.0,
@@ -249,10 +252,13 @@ def create_point_cloud_node(use_sim_time: bool):
             'decimation': 4,
             'voxel_size': 0.0,
         }],
-        remappings=[
+        'remappings': [
             ('rgbd_image', 'rgbd_image'),
             ('cloud', 'voxel_cloud'),
         ],
-    )
+    }
+    if condition is not None:
+        node_kwargs['condition'] = condition
+    return Node(**node_kwargs)
 
 

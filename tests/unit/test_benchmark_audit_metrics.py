@@ -67,7 +67,7 @@ def test_metric_b_adaptive_search_reduces_cartesian_space(tmp_path):
 
     worker_calls = []
 
-    def mock_tsdf(dataset_dir, traj_file, mesh_path, pcd_path, voxel, depth_max, trunc_mult, stride, split_file, quick):
+    def mock_tsdf(dataset_dir, traj_file, mesh_path, pcd_path, voxel, depth_max, trunc_mult, stride, split_file, quick=False, **kwargs):
         worker_calls.append(f"tsdf_{voxel}m")
         if mesh_path:
             Path(mesh_path).write_text("v 0 0 0\n")
@@ -80,7 +80,7 @@ def test_metric_b_adaptive_search_reduces_cartesian_space(tmp_path):
         Path(output_mesh).write_text("v 0 0 0\n")
         return WorkerResult(WorkerStatus.SUCCESS, 0, 1.0)
 
-    def mock_direct(dataset_dir, traj_file, pcd_path, voxel, depth_min, depth_max, stride, split_file):
+    def mock_direct(dataset_dir, traj_file, pcd_path, voxel, depth_min, depth_max, stride, split_file, **kwargs):
         worker_calls.append(f"direct_{voxel}m")
         Path(pcd_path).write_text("ply\nformat ascii 1.0\n")
         return WorkerResult(WorkerStatus.SUCCESS, 0, 1.0)
@@ -132,7 +132,7 @@ def test_metric_c_segfault_isolation_allows_workflow_completion(tmp_path):
         "healthy_slam": str(tmp_path / "healthy_slam_traj.txt")
     }
 
-    def mock_tsdf(dataset_dir, traj_file, mesh_path, pcd_path, voxel, depth_max, trunc_mult, stride, split_file, quick):
+    def mock_tsdf(dataset_dir, traj_file, mesh_path, pcd_path, voxel, depth_max, trunc_mult, stride, split_file, quick=False, **kwargs):
         if "buggy_slam" in traj_file:
             return WorkerResult(WorkerStatus.FAIL_SEGFAULT, -11, 0.5, stderr="Segmentation fault (core dumped)")
         Path(mesh_path).write_text("v 0 0 0\n")

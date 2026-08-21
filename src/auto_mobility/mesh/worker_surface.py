@@ -19,10 +19,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-os.environ.setdefault("OMP_NUM_THREADS", "8")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "8")
-os.environ.setdefault("MKL_NUM_THREADS", "8")
-
+from auto_mobility.benchmark.resources import DEFAULT_RESOURCE_POLICY
 from auto_mobility.mesh.mesh_open3d import generate_mesh
 from auto_mobility.mesh.cgal_surface import is_cgal_available
 
@@ -39,6 +36,7 @@ def main():
     parser.add_argument("--simplify", type=float, default=0.5)
     parser.add_argument("--no-clean", action="store_true")
     parser.add_argument("--no-simplify", action="store_true")
+    parser.add_argument("--no-color-transfer", action="store_true", help="Skip vertex RGB color transfer")
     parser.add_argument("--benchmark-mode", action="store_true", help="Do not use fallback proxy for CGAL if unavailable")
     args = parser.parse_args()
 
@@ -64,7 +62,8 @@ def main():
         view_result=False,
         clean_density=not args.no_clean,
         simplify_target=0.0 if args.no_simplify else args.simplify,
-        use_cuda=False
+        use_cuda=False,
+        color_transfer=not args.no_color_transfer
     )
     print(f"SurfaceWorker: done in {time.time()-t0:.1f}s", flush=True)
 

@@ -1,20 +1,28 @@
 """
-workers.py — Subprocess Candidate Execution & Crash Isolation.
+workers.py — Subprocess Candidate Execution, Telemetry, and Crash Isolation.
 
 Provides process-level isolation for heavy native Open3D / CGAL / C++ tasks.
 Traps SIGSEGV, OOM, and timeouts without crashing the parent benchmark orchestrator.
+Collects granular CPU, memory (RSS/VMS), I/O, and wall-clock telemetry via ResourceUsage.
 """
+
+from __future__ import annotations
 
 import os
 import sys
 import time
-import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 from auto_mobility.config import PROJECT_DIR
 from auto_mobility.mesh.cgal_surface import is_cgal_available
+from auto_mobility.benchmark.resources import (
+    ResourcePolicy,
+    ResourceUsage,
+    DEFAULT_RESOURCE_POLICY,
+    run_monitored_subprocess
+)
 
 
 class WorkerStatus:
@@ -51,6 +59,7 @@ class WorkerResult:
     stdout: str = ""
     stderr: str = ""
     error_message: Optional[str] = None
+    resources: Optional[ResourceUsage] = None
 
     @property
     def is_success(self) -> bool:
@@ -65,7 +74,7 @@ def _classify_returncode(rc: int, stderr: str = "", stdout: str = "") -> str:
         return WorkerStatus.FAIL_SEGFAULT
     if rc in (-9, 137):
         return WorkerStatus.FAIL_OOM
-    if rc == 2:
+    if rc in (2,):
         return WorkerStatus.SKIPPED_UNAVAILABLE
 
     # Inspect stderr/stdout for clues
@@ -74,6 +83,8 @@ def _classify_returncode(rc: int, stderr: str = "", stdout: str = "") -> str:
         return WorkerStatus.FAIL_SEGFAULT
     if "out of memory" in combined or "killed" in combined or "std::bad_alloc" in combined:
         return WorkerStatus.FAIL_OOM
+    if "timed out" in combined or "timeout" in combined or rc == 124:
+        return WorkerStatus.FAIL_TIMEOUT
     if "skipped_unavailable" in combined:
         return WorkerStatus.SKIPPED_UNAVAILABLE
 
@@ -91,10 +102,12 @@ def run_tsdf_worker(
     split_file: Optional[str] = None,
     stride: int = 1,
     quick: bool = False,
+    no_color: bool = False,
     timeout: int = 1800,
+    policy: Optional[ResourcePolicy] = None,
     env: Optional[Dict[str, str]] = None
 ) -> WorkerResult:
-    """Run TSDF integration in an isolated subprocess."""
+    """Run TSDF integration in an isolated subprocess with telemetry monitoring."""
     worker_script = PROJECT_DIR / "src" / "auto_mobility" / "mesh" / "worker.py"
     cmd = [
         sys.executable, "-u", str(worker_script),
@@ -113,59 +126,32 @@ def run_tsdf_worker(
         cmd.append(f"--split={split_file}")
     if quick:
         cmd.append("--no-gpu")
+    if no_color:
+        cmd.append("--no-color")
 
-    worker_env = os.environ.copy()
-    worker_env.setdefault("OMP_NUM_THREADS", "8")
-    worker_env.setdefault("OPENBLAS_NUM_THREADS", "8")
-    worker_env.setdefault("MKL_NUM_THREADS", "8")
-    worker_env.setdefault("NUMEXPR_NUM_THREADS", "8")
-    worker_env.setdefault("VECLIB_MAXIMUM_THREADS", "8")
-    if "LD_LIBRARY_PATH" in worker_env:
-        cleaned_ld = [p for p in worker_env["LD_LIBRARY_PATH"].split(":") if "/opt/ros" not in p and p]
-        if cleaned_ld:
-            worker_env["LD_LIBRARY_PATH"] = ":".join(cleaned_ld)
-        else:
-            worker_env.pop("LD_LIBRARY_PATH", None)
-    if env:
-        worker_env.update(env)
+    active_policy = policy or DEFAULT_RESOURCE_POLICY
+    worker_env = active_policy.get_worker_env(env)
 
-    t0 = time.time()
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=worker_env
-        )
-        runtime = time.time() - t0
-        status = _classify_returncode(proc.returncode, proc.stderr, proc.stdout)
-        err_msg = proc.stderr.strip() if proc.returncode != 0 else None
+        rc, stdout, stderr, usage = run_monitored_subprocess(cmd, env=worker_env, timeout=timeout)
+        status = _classify_returncode(rc, stderr, stdout)
+        err_msg = stderr.strip() if rc != 0 else None
         return WorkerResult(
             status=status,
-            returncode=proc.returncode,
-            runtime_sec=runtime,
-            stdout=proc.stdout,
-            stderr=proc.stderr,
-            error_message=err_msg
-        )
-    except subprocess.TimeoutExpired as te:
-        runtime = time.time() - t0
-        return WorkerResult(
-            status=WorkerStatus.FAIL_TIMEOUT,
-            returncode=-15,
-            runtime_sec=runtime,
-            stdout=te.stdout.decode() if te.stdout else "",
-            stderr=te.stderr.decode() if te.stderr else "",
-            error_message=f"Timed out after {timeout}s"
+            returncode=rc,
+            runtime_sec=usage.wall_time_sec,
+            stdout=stdout,
+            stderr=stderr,
+            error_message=err_msg,
+            resources=usage
         )
     except Exception as e:
-        runtime = time.time() - t0
         return WorkerResult(
             status=WorkerStatus.FAIL_EXCEPTION,
             returncode=1,
-            runtime_sec=runtime,
-            error_message=str(e)
+            runtime_sec=0.0,
+            error_message=str(e),
+            resources=ResourceUsage()
         )
 
 
@@ -180,10 +166,12 @@ def run_surface_worker(
     simplify: float = 0.0,
     no_clean: bool = False,
     no_simplify: bool = True,
+    no_color_transfer: bool = False,
     timeout: int = 600,
+    policy: Optional[ResourcePolicy] = None,
     env: Optional[Dict[str, str]] = None
 ) -> WorkerResult:
-    """Run Surface Reconstruction (Poisson/BPA/Alpha/CGAL) in an isolated subprocess."""
+    """Run Surface Reconstruction (Poisson/BPA/Alpha/CGAL) in an isolated subprocess with telemetry."""
     worker_script = PROJECT_DIR / "src" / "auto_mobility" / "mesh" / "worker_surface.py"
     cmd = [
         sys.executable, "-u", str(worker_script),
@@ -202,59 +190,32 @@ def run_surface_worker(
         cmd.append("--no-clean")
     if no_simplify or simplify <= 0.0:
         cmd.append("--no-simplify")
+    if no_color_transfer:
+        cmd.append("--no-color-transfer")
 
-    worker_env = os.environ.copy()
-    worker_env.setdefault("OMP_NUM_THREADS", "8")
-    worker_env.setdefault("OPENBLAS_NUM_THREADS", "8")
-    worker_env.setdefault("MKL_NUM_THREADS", "8")
-    worker_env.setdefault("NUMEXPR_NUM_THREADS", "8")
-    worker_env.setdefault("VECLIB_MAXIMUM_THREADS", "8")
-    if "LD_LIBRARY_PATH" in worker_env:
-        cleaned_ld = [p for p in worker_env["LD_LIBRARY_PATH"].split(":") if "/opt/ros" not in p and p]
-        if cleaned_ld:
-            worker_env["LD_LIBRARY_PATH"] = ":".join(cleaned_ld)
-        else:
-            worker_env.pop("LD_LIBRARY_PATH", None)
-    if env:
-        worker_env.update(env)
+    active_policy = policy or DEFAULT_RESOURCE_POLICY
+    worker_env = active_policy.get_worker_env(env)
 
-    t0 = time.time()
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=worker_env
-        )
-        runtime = time.time() - t0
-        status = _classify_returncode(proc.returncode, proc.stderr, proc.stdout)
-        err_msg = proc.stderr.strip() if proc.returncode != 0 else None
+        rc, stdout, stderr, usage = run_monitored_subprocess(cmd, env=worker_env, timeout=timeout)
+        status = _classify_returncode(rc, stderr, stdout)
+        err_msg = stderr.strip() if rc != 0 else None
         return WorkerResult(
             status=status,
-            returncode=proc.returncode,
-            runtime_sec=runtime,
-            stdout=proc.stdout,
-            stderr=proc.stderr,
-            error_message=err_msg
-        )
-    except subprocess.TimeoutExpired as te:
-        runtime = time.time() - t0
-        return WorkerResult(
-            status=WorkerStatus.FAIL_TIMEOUT,
-            returncode=-15,
-            runtime_sec=runtime,
-            stdout=te.stdout.decode() if te.stdout else "",
-            stderr=te.stderr.decode() if te.stderr else "",
-            error_message=f"Timed out after {timeout}s"
+            returncode=rc,
+            runtime_sec=usage.wall_time_sec,
+            stdout=stdout,
+            stderr=stderr,
+            error_message=err_msg,
+            resources=usage
         )
     except Exception as e:
-        runtime = time.time() - t0
         return WorkerResult(
             status=WorkerStatus.FAIL_EXCEPTION,
             returncode=1,
-            runtime_sec=runtime,
-            error_message=str(e)
+            runtime_sec=0.0,
+            error_message=str(e),
+            resources=ResourceUsage()
         )
 
 
@@ -270,9 +231,10 @@ def run_direct_fusion_worker(
     no_color: bool = False,
     orient: str = "centroid",
     timeout: int = 1800,
+    policy: Optional[ResourcePolicy] = None,
     env: Optional[Dict[str, str]] = None
 ) -> WorkerResult:
-    """Run Direct Point Cloud Fusion in an isolated subprocess."""
+    """Run Direct Point Cloud Fusion in an isolated subprocess with telemetry monitoring."""
     worker_script = PROJECT_DIR / "src" / "auto_mobility" / "mesh" / "direct_fusion.py"
     cmd = [
         sys.executable, "-u", str(worker_script),
@@ -290,57 +252,27 @@ def run_direct_fusion_worker(
     if no_color:
         cmd.append("--no-color")
 
-    worker_env = os.environ.copy()
-    worker_env.setdefault("OMP_NUM_THREADS", "8")
-    worker_env.setdefault("OPENBLAS_NUM_THREADS", "8")
-    worker_env.setdefault("MKL_NUM_THREADS", "8")
-    worker_env.setdefault("NUMEXPR_NUM_THREADS", "8")
-    worker_env.setdefault("VECLIB_MAXIMUM_THREADS", "8")
-    if "LD_LIBRARY_PATH" in worker_env:
-        cleaned_ld = [p for p in worker_env["LD_LIBRARY_PATH"].split(":") if "/opt/ros" not in p and p]
-        if cleaned_ld:
-            worker_env["LD_LIBRARY_PATH"] = ":".join(cleaned_ld)
-        else:
-            worker_env.pop("LD_LIBRARY_PATH", None)
-    if env:
-        worker_env.update(env)
+    active_policy = policy or DEFAULT_RESOURCE_POLICY
+    worker_env = active_policy.get_worker_env(env)
 
-    t0 = time.time()
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=worker_env
-        )
-        runtime = time.time() - t0
-        status = _classify_returncode(proc.returncode, proc.stderr, proc.stdout)
-        err_msg = proc.stderr.strip() if proc.returncode != 0 else None
+        rc, stdout, stderr, usage = run_monitored_subprocess(cmd, env=worker_env, timeout=timeout)
+        status = _classify_returncode(rc, stderr, stdout)
+        err_msg = stderr.strip() if rc != 0 else None
         return WorkerResult(
             status=status,
-            returncode=proc.returncode,
-            runtime_sec=runtime,
-            stdout=proc.stdout,
-            stderr=proc.stderr,
-            error_message=err_msg
-        )
-    except subprocess.TimeoutExpired as te:
-        runtime = time.time() - t0
-        return WorkerResult(
-            status=WorkerStatus.FAIL_TIMEOUT,
-            returncode=-15,
-            runtime_sec=runtime,
-            stdout=te.stdout.decode() if te.stdout else "",
-            stderr=te.stderr.decode() if te.stderr else "",
-            error_message=f"Timed out after {timeout}s"
+            returncode=rc,
+            runtime_sec=usage.wall_time_sec,
+            stdout=stdout,
+            stderr=stderr,
+            error_message=err_msg,
+            resources=usage
         )
     except Exception as e:
-        runtime = time.time() - t0
         return WorkerResult(
             status=WorkerStatus.FAIL_EXCEPTION,
             returncode=1,
-            runtime_sec=runtime,
-            error_message=str(e)
+            runtime_sec=0.0,
+            error_message=str(e),
+            resources=ResourceUsage()
         )
-

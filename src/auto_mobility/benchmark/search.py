@@ -283,7 +283,8 @@ class SearchEngine:
                         trunc_mult=self.trunc_mult,
                         stride=stride,
                         split_file=str(self.split_file),
-                        quick=self.quick
+                        quick=self.quick,
+                        no_color=True
                     )
                     recon_t = w_res.runtime_sec
                     self.stats["total_runtime_sec"] += recon_t
@@ -293,6 +294,8 @@ class SearchEngine:
                         fail_rec = self._fail_summary(cand_name, w_res.error_message or "worker crash", status=w_res.status)
                         fail_rec["spec"] = spec.to_metadata_dict()
                         fail_rec["trajectory_path"] = traj_file
+                        if w_res.resources:
+                            fail_rec["resources"] = w_res.resources.to_dict()
                         slam_eval_results.append(fail_rec)
                         family_results.append(fail_rec)
                         continue
@@ -322,6 +325,8 @@ class SearchEngine:
                     summary["spec_hash"] = spec_hash
                     summary["dataset_fingerprint"] = self.dataset_fingerprint
                     summary["split_hash"] = self.split_hash
+                    if 'w_res' in locals() and w_res.resources:
+                        summary["resources"] = w_res.resources.to_dict()
                     self.stats["evaluated_count"] += 1
                     self._log_decision("Phase A (SLAM)", cand_name, "EXECUTED", "Evaluated with cheap screening")
                     slam_eval_results.append(summary)
@@ -532,7 +537,8 @@ class SearchEngine:
                         trunc_mult=self.trunc_mult,
                         stride=stride,
                         split_file=str(self.split_file),
-                        quick=self.quick
+                        quick=self.quick,
+                        no_color=True
                     )
                     recon_t += w_res.runtime_sec
                     self.stats["total_runtime_sec"] += w_res.runtime_sec
@@ -544,6 +550,8 @@ class SearchEngine:
                         fail_rec["voxel_size_m"] = v
                         fail_rec["spec"] = spec.to_metadata_dict()
                         fail_rec["trajectory_path"] = traj_path
+                        if w_res.resources:
+                            fail_rec["resources"] = w_res.resources.to_dict()
                         fusion_eval_results.append(fail_rec)
                         continue
 
@@ -561,7 +569,8 @@ class SearchEngine:
                         voxel=v,
                         depth=8,
                         simplify=0.0,
-                        no_simplify=True
+                        no_simplify=True,
+                        no_color_transfer=True
                     )
                     recon_t += w_surf.runtime_sec
                     self.stats["total_runtime_sec"] += w_surf.runtime_sec
@@ -599,13 +608,15 @@ class SearchEngine:
                     summary["trajectory_path"] = traj_path
                     summary["spec"] = spec.to_metadata_dict()
                     summary["spec_hash"] = spec_hash
+                    if 'w_res' in locals() and w_res.resources:
+                        summary["resources"] = w_res.resources.to_dict()
                     summary["dataset_fingerprint"] = self.dataset_fingerprint
                     summary["split_hash"] = self.split_hash
                     self.stats["evaluated_count"] += 1
                     self._log_decision("Phase B (Fusion)", cand_name, "EXECUTED", "Evaluated TSDF candidate with common adapter")
                     fusion_eval_results.append(summary)
                 except Exception as e:
-                    print(f"❌ Phase B {v_mm}mm 평가 실패: {e}")
+                    print(f"⚠️ TSDF eval failure: {e}")
                     self._log_decision("Phase B (Fusion)", cand_name, "FAILED", f"Evaluation exception: {str(e)}")
                     fail_rec = self._fail_summary(cand_name, str(e), status="FAIL_EXCEPTION")
                     fail_rec["fusion_method"] = "tsdf"
@@ -614,22 +625,23 @@ class SearchEngine:
                     fail_rec["trajectory_path"] = traj_path
                     fusion_eval_results.append(fail_rec)
 
-            # 2. Direct Point Cloud Fusion (with identical common surface adapter)
-            direct_v_mm = 10
-            direct_cand_name = f"{slam_name}_direct{direct_v_mm}mm"
-            direct_pcd_out = self.artifact_mgr.get_direct_pcd_path(slam_name, direct_v_mm)
+            # 2. Evaluate Direct Point Cloud Fusion Baseline
+            s_champ_key = slam_name
+            s_champ_obj = champ
+            direct_cand_name = f"{s_champ_key}_direct_cloud_poisson"
+            direct_pcd_out = self.artifact_mgr.get_pcd_path(s_champ_key, 10)  # Standard 10mm
             direct_pcd_meta = self.artifact_mgr.get_artifact_meta_path(direct_pcd_out)
-            direct_mesh_out = self.artifact_mgr.get_mesh_path(f"{slam_name}_direct", direct_v_mm, method="poisson")
+            direct_mesh_out = self.artifact_mgr.get_candidate_artifact_dir(direct_cand_name) / "mesh.obj"
             direct_mesh_meta = self.artifact_mgr.get_artifact_meta_path(direct_mesh_out)
             direct_eval_dir = self.artifact_mgr.get_candidate_eval_dir(direct_cand_name)
 
             spec_direct = CandidateSpec(
                 dataset_name=self.bag_name,
-                slam_backend=prof_spec.backend,
-                slam_profile=prof_spec.profile,
-                replay_rate=prof_spec.replay_rate,
+                slam_backend=s_champ_obj.profile_spec.backend,
+                slam_profile=s_champ_obj.profile_spec.profile,
+                replay_rate=s_champ_obj.profile_spec.replay_rate,
                 fusion_method="direct_pointcloud",
-                fusion_params={"voxel_size_m": 0.010, "depth_min_m": self.depth_min, "depth_max_m": self.depth_max},
+                fusion_params={"voxel_size_m": 0.010, "depth_min_m": self.depth_min, "depth_max_m": self.depth_max, "weight_threshold": 1.5},
                 surface_method="poisson",
                 surface_params={"depth": 8},
                 postprocess_params={"clean_density": True, "simplify_target": 0.0},
@@ -650,7 +662,8 @@ class SearchEngine:
                     depth_min=self.depth_min,
                     depth_max=self.depth_max,
                     stride=self._screening_stride(),
-                    split_file=str(self.split_file)
+                    split_file=str(self.split_file),
+                    no_color=True
                 )
                 dir_recon_t += w_res.runtime_sec
                 self.stats["total_runtime_sec"] += w_res.runtime_sec
@@ -685,7 +698,8 @@ class SearchEngine:
                         voxel=0.010,
                         depth=8,
                         simplify=0.0,
-                        no_simplify=True
+                        no_simplify=True,
+                        no_color_transfer=True
                     )
                     dir_recon_t += w_surf.runtime_sec
                     self.stats["total_runtime_sec"] += w_surf.runtime_sec
@@ -712,8 +726,8 @@ class SearchEngine:
                             dir_summary["trajectory_path"] = traj_path
                             dir_summary["spec"] = spec_direct.to_metadata_dict()
                             dir_summary["spec_hash"] = spec_dir_hash
-                            dir_summary["dataset_fingerprint"] = self.dataset_fingerprint
-                            dir_summary["split_hash"] = self.split_hash
+                            if 'w_res' in locals() and w_res.resources:
+                                dir_summary["resources"] = w_res.resources.to_dict()
                             self.stats["evaluated_count"] += 1
                             fusion_eval_results.append(dir_summary)
                         except Exception as e:
@@ -784,7 +798,8 @@ class SearchEngine:
                         trunc_mult=self.trunc_mult,
                         stride=self._screening_stride(),
                         split_file=str(self.split_file),
-                        quick=self.quick
+                        quick=self.quick,
+                        no_color=True
                     )
                     if w_res.is_success:
                         self.artifact_mgr.save_artifact_metadata(
@@ -797,7 +812,8 @@ class SearchEngine:
                             voxel=0.005,
                             depth=8,
                             simplify=0.0,
-                            no_simplify=True
+                            no_simplify=True,
+                            no_color_transfer=True
                         )
                         if w_surf.is_success:
                             self.artifact_mgr.save_artifact_metadata(
@@ -823,6 +839,8 @@ class SearchEngine:
                                 sum_5mm["trajectory_path"] = best_traj
                                 sum_5mm["spec"] = spec_5mm.to_metadata_dict()
                                 sum_5mm["spec_hash"] = spec_5mm.compute_spec_hash()
+                                if w_res.resources:
+                                    sum_5mm["resources"] = w_res.resources.to_dict()
                                 fusion_eval_results.append(sum_5mm)
                                 self._log_decision("Phase B (Fusion)", cand_5mm_name, "EXECUTED", "Evaluated 5mm TSDF candidate")
                             except Exception as e:
@@ -872,7 +890,8 @@ class SearchEngine:
                         trunc_mult=t_mult,
                         stride=self._screening_stride(),
                         split_file=str(self.split_file),
-                        quick=self.quick
+                        quick=self.quick,
+                        no_color=True
                     )
                     if w_res.is_success:
                         w_surf = run_surface_worker(
@@ -882,7 +901,8 @@ class SearchEngine:
                             voxel=v_m,
                             depth=8,
                             simplify=0.0,
-                            no_simplify=True
+                            no_simplify=True,
+                            no_color_transfer=True
                         )
                         if w_surf.is_success:
                             try:
@@ -905,6 +925,8 @@ class SearchEngine:
                                 ref_sum["trajectory_path"] = t_path
                                 ref_sum["spec"] = refine_spec.to_metadata_dict()
                                 ref_sum["spec_hash"] = refine_spec.compute_spec_hash()
+                                if w_res.resources:
+                                    ref_sum["resources"] = w_res.resources.to_dict()
                                 fusion_eval_results.append(ref_sum)
                                 self._log_decision("Phase B2 (Refinement)", refine_cand_name, "EXECUTED", f"Evaluated truncation multiplier {t_mult}")
                             except Exception:
@@ -1039,7 +1061,8 @@ class SearchEngine:
                         voxel=voxel_m,
                         depth=8,
                         simplify=0.0,
-                        no_simplify=True
+                        no_simplify=True,
+                        no_color_transfer=True
                     )
                     surf_t = w_res.runtime_sec
                     self.stats["total_runtime_sec"] += surf_t
@@ -1052,6 +1075,8 @@ class SearchEngine:
                         fail_rec["voxel_size_m"] = voxel_m
                         fail_rec["spec"] = spec.to_metadata_dict()
                         fail_rec["trajectory_path"] = traj_path
+                        if w_res.resources:
+                            fail_rec["resources"] = w_res.resources.to_dict()
                         surface_eval_results.append(fail_rec)
                         continue
 
@@ -1081,6 +1106,8 @@ class SearchEngine:
                     summary["spec_hash"] = spec_hash
                     summary["dataset_fingerprint"] = self.dataset_fingerprint
                     summary["split_hash"] = self.split_hash
+                    if 'w_res' in locals() and w_res.resources:
+                        summary["resources"] = w_res.resources.to_dict()
                     self.stats["evaluated_count"] += 1
                     self._log_decision("Phase C (Surface)", cand_name, "EXECUTED", "Evaluated surface candidate")
                     surface_eval_results.append(summary)
@@ -1265,6 +1292,8 @@ class SearchEngine:
                 full_summary["spec_hash"] = full_spec_hash
                 full_summary["dataset_fingerprint"] = self.dataset_fingerprint
                 full_summary["split_hash"] = self.split_hash
+                if 'w_res' in locals() and w_res.resources:
+                    full_summary["resources"] = w_res.resources.to_dict()
                 self.stats["evaluated_count"] += 1
                 self._log_decision("Phase D (Full Rebuild)", rebuild_cand_name, "FULL_REBUILT", f"Full rebuild complete (stride=1, Quality: {full_summary.get('geometry', {}).get('depth_mae_mm', 0):.1f}mm MAE)")
                 rebuilt_eval_results.append(full_summary)

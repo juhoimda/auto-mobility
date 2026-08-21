@@ -1,8 +1,9 @@
-#!/usr/bin/env python3
+from __future__ import annotations
 import sys
 import os
 import argparse
 import time
+from typing import Optional, List, Dict, Tuple, Union
 
 # repo 소스 실행 / 설치 실행 양쪽에서 auto_mobility 패키지 임포트 보장
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
@@ -12,15 +13,13 @@ try:
     import numpy as np
     from scipy.spatial import cKDTree
 except ImportError:
-    print("Error: Open3D, NumPy, or SciPy is not installed. Install via `pip install open3d numpy scipy`")
+    print("Error: Open3D, NumPy, or SciPy is not installed. Install via pip install open3d numpy scipy")
     sys.exit(1)
 
 from auto_mobility.config import MESH_DEFAULTS
+from auto_mobility.benchmark.resources import DEFAULT_RESOURCE_POLICY, ResourcePolicy
 
 # CUDA voxel downsample이 CPU 대비 실질 이득을 내는 최소 포인트 수.
-# 실측(2026-08-12, WSL2 paravirtualized GPU): GPU copy-in 오버헤드가 커서
-# 2M 포인트에서도 CPU(tensor)와 비슷(0.94s vs 0.92s), 작은 클라우드는 CPU가 더 빠름.
-# 실제 이산형 NVIDIA GPU를 사용한다면 이 임계값을 낮추거나 CPU 경로를 유지해도 무방.
 GPU_VOXEL_MIN_POINTS = 5_000_000
 
 
@@ -34,12 +33,7 @@ def _cuda_available() -> bool:
 
 
 def _voxel_down(pcd, voxel_size, use_cuda=True):
-    """Tensor API 기반 voxel downsampling.
-
-    실측(2026-08-12): legacy voxel_down_sample 대비 더 빠르고 (2.2M pts: legacy
-    1.67s vs tensor 0.92s), CUDA는 paravirtualized GPU에서 copy-in 오버헤드로
-    이득이 없어 기본 CPU 사용. 대규모 클라우드에 한해 자동 CUDA 선택.
-    """
+    """Tensor API 기반 voxel downsampling."""
     import open3d.core as o3c
     pts = np.asarray(pcd.points).astype(np.float32)
     use_gpu = bool(use_cuda and _cuda_available() and len(pts) >= GPU_VOXEL_MIN_POINTS)
@@ -62,8 +56,10 @@ def _voxel_down(pcd, voxel_size, use_cuda=True):
 def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_size=MESH_DEFAULTS["voxel_size"],
                   method=MESH_DEFAULTS["method"], view_result=False, clean_density=True,
                   simplify_target=MESH_DEFAULTS["simplify_target"], use_cuda=True,
-                  orient="centroid", alpha=None, alpha_factor=3.0):
+                  orient="centroid", alpha=None, alpha_factor=3.0, color_transfer=True,
+                  policy: Optional[ResourcePolicy] = None):
     t0 = time.time()
+    active_policy = policy or DEFAULT_RESOURCE_POLICY
     print(f"Loading point cloud: {input_ply}")
     pcd = o3d.io.read_point_cloud(input_ply)
 
@@ -77,8 +73,7 @@ def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_si
     print(f"Downsampling with fine resolution (voxel_size={voxel_size}m)...")
     pcd = _voxel_down(pcd, voxel_size, use_cuda=use_cuda)
 
-    # 실측(2026-08-12): Tensor voxel이 법선을 버리므로 다운샘플된 클라우드에
-    # estimate_normals 를 재수행.
+    # Tensor voxel이 법선을 버리므로 다운샘플된 클라우드에 estimate_normals 를 수행
     if len(pcd.points) >= 4:
         print("Estimating normals using fast multi-threaded computation...")
         pcd.estimate_normals(
@@ -136,10 +131,11 @@ def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_si
             pcd, o3d.utility.DoubleVector(radii)
         )
     else:
-        # 기본: Poisson (watertight, 구멍 없는 폐곡면) - BPA 대비 품질 우수
-        print(f"Reconstructing surface using Poisson Surface Reconstruction (depth={depth}, linear_fit=True, n_threads=8)...")
+        # 기본: Poisson (watertight, 구멍 없는 폐곡면)
+        poisson_thr = active_policy.poisson_threads
+        print(f"Reconstructing surface using Poisson Surface Reconstruction (depth={depth}, linear_fit=True, n_threads={poisson_thr})...")
         mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-            pcd, depth=depth, scale=1.1, linear_fit=True, n_threads=8
+            pcd, depth=depth, scale=1.1, linear_fit=True, n_threads=poisson_thr
         )
 
         if clean_density:
@@ -153,7 +149,7 @@ def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_si
     bbox = pcd.get_axis_aligned_bounding_box()
     mesh = mesh.crop(bbox)
 
-    # Simplify: Isaac Sim / viewer 로딩 성능을 위해 target 비율로 경량화 (기본 50%)
+    # Simplify: target ratio (default 50% if enabled)
     if simplify_target and 0.0 < simplify_target < 1.0 and len(mesh.triangles) > 1000:
         n_before = len(mesh.triangles)
         target = max(int(n_before * simplify_target), 1000)
@@ -173,14 +169,14 @@ def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_si
     mesh.remove_non_manifold_edges()
 
     # Transfer RGB colors from point cloud to mesh vertices using nearest-neighbor search
-    if pcd.has_colors() and len(pcd.points) > 0 and len(mesh.vertices) > 0:
+    if color_transfer and pcd.has_colors() and len(pcd.points) > 0 and len(mesh.vertices) > 0:
         print("Transferring RGB colors from point cloud using nearest-neighbor search...")
         pcd_points = np.asarray(pcd.points)
         pcd_colors = np.asarray(pcd.colors)
         mesh_vertices = np.asarray(mesh.vertices)
 
         tree = cKDTree(pcd_points)
-        _, indices = tree.query(mesh_vertices, k=1, workers=-1)
+        _, indices = tree.query(mesh_vertices, k=1, workers=active_policy.kdtree_workers)
         mesh.vertex_colors = o3d.utility.Vector3dVector(pcd_colors[indices])
 
     mesh.compute_vertex_normals()
@@ -206,6 +202,7 @@ def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_si
         )
     return mesh
 
+
 def main():
     parser = argparse.ArgumentParser(description="Generate high-quality 3D Mesh using Open3D from Point Cloud")
     parser.add_argument("input", help="Input .ply or .pcd point cloud file")
@@ -218,6 +215,7 @@ def main():
     parser.add_argument("--view", action="store_true", help="Visualize generated mesh in interactive 3D window")
     parser.add_argument("--no-clean", action="store_true", help="Disable density cleaning filter")
     parser.add_argument("--no-simplify", action="store_true", help="Disable mesh simplification")
+    parser.add_argument("--no-color-transfer", action="store_true", help="Disable vertex RGB color transfer")
     parser.add_argument("--simplify", type=float, default=MESH_DEFAULTS["simplify_target"], help="Triangle simplification target ratio (default: 0.5)")
     parser.add_argument("--no-gpu", action="store_true", help="Disable CUDA voxel downsampling (use CPU)")
     parser.add_argument("--orient", choices=["centroid", "tangent"], default="centroid",
@@ -241,8 +239,10 @@ def main():
         clean_density=not args.no_clean,
         simplify_target=0.0 if args.no_simplify else args.simplify,
         use_cuda=not args.no_gpu,
-        orient=args.orient
+        orient=args.orient,
+        color_transfer=not args.no_color_transfer
     )
+
 
 if __name__ == "__main__":
     main()

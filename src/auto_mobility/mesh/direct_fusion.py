@@ -5,13 +5,13 @@ direct_fusion.py — Direct Point Cloud Fusion Baseline (Bypassing TSDF).
 Backprojects Canonical RGB-D train frames into 3D world coordinates using trajectory poses:
   Canonical RGB-D Frames + Trajectory Poses
                      ↓
-  Backproject Depth Pixels to World 3D (R * p_cam + t)
+  Parallel Prefetch + Precomputed Camera Ray Backprojection (R * p_cam + t)
                      ↓
-  Accumulate Point Batches + Colors
+  Bounded Streaming Accumulation & Chunk Merge
                      ↓
   Voxel Downsample + Statistical Outlier Removal
                      ↓
-  Estimate & Orient Normals
+  Fast Multi-threaded Normal Estimation & Orientation
                      ↓
   Direct Point Cloud (.ply)
 """
@@ -32,6 +32,21 @@ from auto_mobility.dataset.frame_dataset import FrameDataset, CameraIntrinsics
 from auto_mobility.trajectory.io import Trajectory
 from auto_mobility.trajectory.association import associate_trajectory_to_frames
 from auto_mobility.evaluation.split import load_split_json
+from auto_mobility.benchmark.resources import DEFAULT_RESOURCE_POLICY, ResourcePolicy
+from auto_mobility.mesh.reconstruct_tsdf import AsyncFramePrefetcher
+
+
+def precompute_camera_rays(
+    intrinsics: CameraIntrinsics,
+    height: int = 480,
+    width: int = 640,
+    stride: int = 2
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Precompute pixel grid and normalized camera ray direction tables once per sequence."""
+    v_grid, u_grid = np.meshgrid(np.arange(0, height, stride), np.arange(0, width, stride), indexing='ij')
+    ray_x = ((u_grid - intrinsics.cx) / intrinsics.fx).astype(np.float32)
+    ray_y = ((v_grid - intrinsics.cy) / intrinsics.fy).astype(np.float32)
+    return ray_x, ray_y, v_grid, u_grid
 
 
 def backproject_frame_to_world(
@@ -41,16 +56,17 @@ def backproject_frame_to_world(
     intrinsics: CameraIntrinsics,
     depth_min_m: float = 0.3,
     depth_max_m: float = 3.0,
-    stride: int = 1
+    stride: int = 1,
+    precomputed_rays: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = None
 ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """Backproject a single depth image into 3D world coordinates with optional color."""
     h, w = depth_raw.shape[:2]
-    fx, fy = intrinsics.fx, intrinsics.fy
-    cx, cy = intrinsics.cx, intrinsics.cy
+    if precomputed_rays is not None:
+        ray_x, ray_y, v_grid, u_grid = precomputed_rays
+    else:
+        ray_x, ray_y, v_grid, u_grid = precompute_camera_rays(intrinsics, h, w, stride)
 
-    v_grid, u_grid = np.meshgrid(np.arange(0, h, stride), np.arange(0, w, stride), indexing='ij')
     depth_sub = depth_raw[v_grid, u_grid]
-
     min_mm = int(depth_min_m * 1000.0)
     max_mm = int(depth_max_m * 1000.0)
     valid = (depth_sub >= min_mm) & (depth_sub <= max_mm)
@@ -58,12 +74,9 @@ def backproject_frame_to_world(
     if not np.any(valid):
         return np.empty((0, 3), dtype=np.float32), (np.empty((0, 3), dtype=np.float32) if color_rgb is not None else None)
 
-    u_valid = u_grid[valid].astype(np.float32)
-    v_valid = v_grid[valid].astype(np.float32)
-    z_m = depth_sub[valid].astype(np.float32) / 1000.0
-
-    x_m = (u_valid - cx) * z_m / fx
-    y_m = (v_valid - cy) * z_m / fy
+    z_m = depth_sub[valid].astype(np.float32) * (1.0 / 1000.0)
+    x_m = ray_x[valid] * z_m
+    y_m = ray_y[valid] * z_m
     pts_cam = np.stack([x_m, y_m, z_m], axis=-1)
 
     R = T_world_camera[:3, :3].astype(np.float32)
@@ -93,12 +106,15 @@ def direct_pointcloud_fusion(
     no_color: bool = False,
     orient: str = "centroid",
     nb_neighbors: int = 20,
-    std_ratio: float = 2.0
+    std_ratio: float = 2.0,
+    policy: Optional[ResourcePolicy] = None
 ) -> o3d.geometry.PointCloud:
     """Fuse RGB-D frames directly into a clean, normal-oriented point cloud without TSDF grid."""
     t0 = time.time()
     if isinstance(dataset, (str, Path)):
         dataset = FrameDataset(dataset)
+
+    active_policy = policy or DEFAULT_RESOURCE_POLICY
 
     # Pose association
     if isinstance(trajectory, dict):
@@ -117,65 +133,83 @@ def direct_pointcloud_fusion(
 
     intr = dataset.intrinsics
     indices_to_integrate = set(train_indices) if train_indices is not None else set(range(len(dataset)))
-    target_indices = [idx for idx in range(0, len(dataset), max(1, int(stride))) if idx in indices_to_integrate]
+    target_indices = [
+        idx for idx in range(0, len(dataset), max(1, int(stride)))
+        if idx in indices_to_integrate and idx in poses and poses[idx] is not None
+    ]
 
     print(f"🚀 [Direct Point Cloud Fusion] Processing {len(target_indices)} frames (Voxel: {voxel_size*1000:.1f}mm, Stride: {stride})")
+
+    # Precompute camera rays once
+    h, w = 480, 640
+    if len(dataset) > 0:
+        d0 = dataset.get_depth(0)
+        if d0 is not None:
+            h, w = d0.shape[:2]
+    precomputed_rays = precompute_camera_rays(intr, h, w, pixel_stride)
 
     accumulated_pts: List[np.ndarray] = []
     accumulated_colors: List[np.ndarray] = []
     chunk_pts_count = 0
-    intermediate_clouds: List[o3d.geometry.PointCloud] = []
+    running_pcd = o3d.geometry.PointCloud()
 
     integrated = 0
     skipped = 0
 
-    for f_cnt, idx in enumerate(target_indices):
-        if idx not in poses or poses[idx] is None:
-            skipped += 1
-            continue
+    prefetcher = AsyncFramePrefetcher(
+        dataset, target_indices, no_color=no_color,
+        max_workers=active_policy.frame_prefetch_workers,
+        prefetch_size=active_policy.frame_prefetch_depth
+    )
 
-        depth = dataset.get_depth(idx)
-        if depth is None:
-            skipped += 1
-            continue
+    try:
+        for idx, depth, color in prefetcher:
+            if idx not in poses or poses[idx] is None or depth is None:
+                skipped += 1
+                continue
 
-        color = None if no_color else dataset.get_rgb_tensor(idx)
-        T_world_cam = poses[idx]
+            T_world_cam = poses[idx]
 
-        pts, cols = backproject_frame_to_world(
-            depth_raw=depth,
-            color_rgb=color,
-            T_world_camera=T_world_cam,
-            intrinsics=intr,
-            depth_min_m=depth_min,
-            depth_max_m=depth_max,
-            stride=pixel_stride
-        )
+            pts, cols = backproject_frame_to_world(
+                depth_raw=depth,
+                color_rgb=color,
+                T_world_camera=T_world_cam,
+                intrinsics=intr,
+                depth_min_m=depth_min,
+                depth_max_m=depth_max,
+                stride=pixel_stride,
+                precomputed_rays=precomputed_rays
+            )
 
-        if len(pts) > 0:
-            accumulated_pts.append(pts)
-            if cols is not None:
-                accumulated_colors.append(cols)
-            chunk_pts_count += len(pts)
-            integrated += 1
+            if len(pts) > 0:
+                accumulated_pts.append(pts)
+                if cols is not None:
+                    accumulated_colors.append(cols)
+                chunk_pts_count += len(pts)
+                integrated += 1
 
-        # Periodic intermediate voxel downsampling every ~25 frames to bound memory footprint
-        if chunk_pts_count >= 1_500_000:
-            chunk_xyz = np.concatenate(accumulated_pts, axis=0)
-            chunk_pcd = o3d.geometry.PointCloud()
-            chunk_pcd.points = o3d.utility.Vector3dVector(chunk_xyz.astype(np.float64))
-            if accumulated_colors:
-                chunk_rgb = np.concatenate(accumulated_colors, axis=0)
-                chunk_pcd.colors = o3d.utility.Vector3dVector(chunk_rgb.astype(np.float64))
+            # Bounded streaming merge: merge chunks into running accumulator
+            if chunk_pts_count >= 1_000_000:
+                chunk_xyz = np.concatenate(accumulated_pts, axis=0)
+                chunk_pcd = o3d.geometry.PointCloud()
+                chunk_pcd.points = o3d.utility.Vector3dVector(chunk_xyz.astype(np.float64))
+                if accumulated_colors:
+                    chunk_rgb = np.concatenate(accumulated_colors, axis=0)
+                    chunk_pcd.colors = o3d.utility.Vector3dVector(chunk_rgb.astype(np.float64))
 
-            chunk_pcd = chunk_pcd.voxel_down_sample(voxel_size)
-            intermediate_clouds.append(chunk_pcd)
-            accumulated_pts.clear()
-            accumulated_colors.clear()
-            chunk_pts_count = 0
+                chunk_pcd = chunk_pcd.voxel_down_sample(voxel_size)
+                running_pcd += chunk_pcd
+                if len(running_pcd.points) >= 2_000_000:
+                    running_pcd = running_pcd.voxel_down_sample(voxel_size)
 
-        if integrated % 30 == 0:
-            print(f"  integrated {integrated}/{len(target_indices)} frames...")
+                accumulated_pts.clear()
+                accumulated_colors.clear()
+                chunk_pts_count = 0
+
+            if integrated % 30 == 0:
+                print(f"  integrated {integrated}/{len(target_indices)} frames...")
+    finally:
+        prefetcher.shutdown()
 
     # Flush remaining points
     if accumulated_pts:
@@ -186,9 +220,9 @@ def direct_pointcloud_fusion(
             chunk_rgb = np.concatenate(accumulated_colors, axis=0)
             chunk_pcd.colors = o3d.utility.Vector3dVector(chunk_rgb.astype(np.float64))
         chunk_pcd = chunk_pcd.voxel_down_sample(voxel_size)
-        intermediate_clouds.append(chunk_pcd)
+        running_pcd += chunk_pcd
 
-    if not intermediate_clouds:
+    if len(running_pcd.points) == 0:
         print("⚠️ Direct fusion integrated 0 valid points! Returning empty PointCloud.")
         pcd = o3d.geometry.PointCloud()
         if output_ply:
@@ -196,25 +230,8 @@ def direct_pointcloud_fusion(
             o3d.io.write_point_cloud(output_ply, pcd)
         return pcd
 
-    # Merge intermediate clouds and perform global voxel downsampling
-    print(f"⚙️ Merging {len(intermediate_clouds)} chunks and performing global voxel filtering...")
-    merged_pts = []
-    merged_cols = []
-    has_cols = intermediate_clouds[0].has_colors()
-
-    for c in intermediate_clouds:
-        merged_pts.append(np.asarray(c.points))
-        if has_cols and c.has_colors():
-            merged_cols.append(np.asarray(c.colors))
-
-    full_pts = np.concatenate(merged_pts, axis=0)
-    final_pcd = o3d.geometry.PointCloud()
-    final_pcd.points = o3d.utility.Vector3dVector(full_pts)
-    if merged_cols:
-        final_pcd.colors = o3d.utility.Vector3dVector(np.concatenate(merged_cols, axis=0))
-
     # Global voxel downsampling
-    final_pcd = final_pcd.voxel_down_sample(voxel_size)
+    final_pcd = running_pcd.voxel_down_sample(voxel_size)
 
     # Statistical outlier removal
     if len(final_pcd.points) >= 10:

@@ -107,12 +107,13 @@ else
     setsid ros2 launch auto_mobility rtab_bag.launch.py \
         database_path:="$DB_PATH" \
         dense_mapping:="$DENSE_MAPPING" \
+        headless_benchmark:=true \
         use_compressed:=true >"$SLAM_LOG" 2>&1 &
     SLAM_PID=$!
     
     sleep 3
     echo "▶️ Rosbag 재생 시작 (배속: ${RATE}x)..."
-    ros2 bag play "$BAG_PATH" --clock --rate "$RATE"
+    ros2 bag play "$BAG_PATH" --clock --rate "$RATE" --read-ahead-queue-size 2000
     
     echo "▶️ RTAB-Map 정리 및 DB 저장..."
     sleep 2

@@ -6,8 +6,7 @@ benchmark(run_benchmark)에서 각 후보별로 별도 프로세스로 호출되
 SIGSEGV(OOM 등) 크래시가 발생해도 benchmark 자체는 생존한다.
 
 사용법:
-  python3 worker.py --dataset=PATH --trajectory=PATH --output-mesh=PATH \
-      --pcd-output=PATH --voxel=0.010 --split=PATH --no-color --no-gpu
+  python3 worker.py --dataset=PATH --trajectory=PATH --output-mesh=PATH       --pcd-output=PATH --voxel=0.010 --split=PATH --no-color --no-gpu
 
 종료 코드:
   0 = 성공
@@ -22,11 +21,7 @@ import argparse
 import time
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-# CPU-only: 충돌 방지용 환경 설정
-os.environ.setdefault("OMP_NUM_THREADS", "8")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "8")
-os.environ.setdefault("MKL_NUM_THREADS", "8")
-
+from auto_mobility.benchmark.resources import DEFAULT_RESOURCE_POLICY
 from auto_mobility.dataset.frame_dataset import FrameDataset
 from auto_mobility.mesh.reconstruct_tsdf import reconstruct
 from auto_mobility.evaluation.split import load_split_json
