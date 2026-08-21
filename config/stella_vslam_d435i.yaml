@@ -27,4 +27,4 @@ Feature:
 Mapping:
   baseline_dist_thr_ratio: 0.02
 Tracking:
-  min_num_tracked_keypoints: 15
+  min_num_tracked_keypoints: 22

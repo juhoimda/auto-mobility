@@ -76,9 +76,9 @@ SLAM_RUN_ARGS = {
     "rtab_dense_rate1.0": ("--slam=rtab", "--dense", "--rate=1.0"),
     "rtab_normal_rate0.5": ("--slam=rtab", "--rate=0.5"),
     "rtab_normal_rate1.0": ("--slam=rtab", "--rate=1.0"),
-    "orb_rgbd": ("--slam=orb_rgbd",),
+    "orb_rgbd": ("--slam=orb_rgbd", "--rate=0.5"),
     "orb_rgbdi": ("--slam=orb_rgbdi",),
-    "stella_rgbd": ("--slam=stella_rgbd",),
+    "stella_rgbd": ("--slam=stella_rgbd", "--rate=0.5"),
 }
 
 

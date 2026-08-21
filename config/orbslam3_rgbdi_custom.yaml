@@ -36,7 +36,7 @@ IMU.GyroWalk: 1e-6
 IMU.AccWalk: 1e-4
 IMU.Frequency: 200.0
 
-ORBextractor.nFeatures: 2000
+ORBextractor.nFeatures: 1500
 ORBextractor.scaleFactor: 1.2
 ORBextractor.nLevels: 8
 ORBextractor.iniThFAST: 15
