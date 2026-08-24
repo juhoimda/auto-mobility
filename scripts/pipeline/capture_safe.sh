@@ -158,11 +158,18 @@ rclpy.shutdown()
 PREFLIGHT_EOF
 
 # ── 경량 진단 (capture_guard) 백그라운드 시작 ───────────────────
+# --alerts: 촬영 중 카메라 끊김/수신율 저하/급회전/bag 녹화 정지를 터미널에 즉시 출력
 GUARD_BASE="$LOG_DIR/capture_safe_${NAME}"
-GUARD_ARGS="--interval 5 --headless --report ${GUARD_BASE}.md --json ${GUARD_BASE}.json"
-[ "$CAMERA_MODE" = "remote" ] && GUARD_ARGS="$GUARD_ARGS --remote"
-echo "📊 capture_guard 모니터링 시작 → ${GUARD_BASE}.md"
-python3 "$PROJECT_DIR/src/auto_mobility/monitor/capture_guard.py" $GUARD_ARGS &
+GUARD_ARGS=(--interval 2.0 --alerts
+            --report "${GUARD_BASE}.md" --json "${GUARD_BASE}.json")
+[ "$CAMERA_MODE" = "remote" ] && GUARD_ARGS+=(--remote)
+GUARD_ARGS+=(--bag-name "$NAME" --bag-parents "${RAM_BAG_DIR},${BAG_DIR}")
+echo "📊 capture_guard 실시간 모니터링 활성화 (주기: 2.0초):"
+echo "   - 🔴 스트림 끊김 (0Hz) / 프레임 드롭 / 녹화 정지 감지 시 터미널 즉시 경고"
+echo "   - 🟢 카메라 정상 복구 시 '정상 복구' 알림"
+echo "   - 🟡 카메라 급회전 (>45°/s, Visual SLAM 유실 위험) 실시간 경고"
+echo "   - ⏱️  2초 주기 실시간 상태 요약(FPS / 회전속도 / 녹화용량) 출력"
+python3 "$PROJECT_DIR/src/auto_mobility/monitor/capture_guard.py" "${GUARD_ARGS[@]}" &
 GUARD_PID=$!
 
 # ── 실시간 카메라 프리뷰 (옵션: --view) ────────────────────────

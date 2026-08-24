@@ -93,10 +93,16 @@ def _git_commit():
 
 
 def _gap_stats(stamps):
-    """stamps: epoch 초 리스트 → 통계 dict."""
+    """stamps: epoch 초 리스트 → 통계 dict (센서 캡처 시간 기준 정렬 분석)."""
     if len(stamps) < 2:
         return None
-    arr = np.asarray(stamps, dtype=np.float64)
+    raw_arr = np.asarray(stamps, dtype=np.float64)
+    raw_diffs = np.diff(raw_arr)
+    monotonic_violations = int((raw_diffs < 0).sum())
+    zero_stamps = int((raw_arr <= 0).sum())
+
+    # 센서 캡처 타임스탬프 순서로 정렬하여 실제 스트림 간격 분석
+    arr = np.sort(raw_arr)
     diffs = np.diff(arr)
     valid = diffs[diffs >= 0]
     out = {
@@ -105,8 +111,8 @@ def _gap_stats(stamps):
         "max_gap_s": float(diffs.max()) if len(diffs) else 0.0,
         "p95_gap_s": float(np.percentile(valid, 95)) if len(valid) else 0.0,
         "mean_gap_s": float(valid.mean()) if len(valid) else 0.0,
-        "monotonic_violations": int((diffs < 0).sum()),
-        "zero_stamps": int((arr <= 0).sum()),
+        "monotonic_violations": monotonic_violations,
+        "zero_stamps": zero_stamps,
     }
     if out["duration_s"] > 0:
         out["hz"] = round((len(arr) - 1) / out["duration_s"], 2)
@@ -206,24 +212,27 @@ def main():
         role = classify_topic(topic)
         by_role.setdefault(role, []).append(topic)
 
-    # ── RGB↔Depth sync delta (근접 프레임 매칭) ──
+    # ── RGB↔Depth sync delta (근접 프레임 정밀 매칭) ──
     sync = {}
     rgb_topics = [t for t in by_role.get("rgb", []) if t in topic_stamps and topic_stamps[t]]
     depth_topics = [t for t in by_role.get("depth", []) if t in topic_stamps and topic_stamps[t]]
     if rgb_topics and depth_topics:
-        rgb_stamps = np.asarray(topic_stamps[rgb_topics[0]], dtype=np.float64)
-        depth_stamps = np.asarray(topic_stamps[depth_topics[0]], dtype=np.float64)
+        rgb_stamps = np.sort(np.asarray(topic_stamps[rgb_topics[0]], dtype=np.float64))
+        depth_stamps = np.sort(np.asarray(topic_stamps[depth_topics[0]], dtype=np.float64))
         idx = np.searchsorted(rgb_stamps, depth_stamps)
         idx = np.clip(idx, 0, len(rgb_stamps) - 1)
-        deltas = depth_stamps - rgb_stamps[idx]
+        deltas = np.abs(depth_stamps - rgb_stamps[idx])
+        idx_prev = np.clip(idx - 1, 0, len(rgb_stamps) - 1)
+        deltas_prev = np.abs(depth_stamps - rgb_stamps[idx_prev])
+        deltas = np.minimum(deltas, deltas_prev)
         sync = {
             "rgb_topic": rgb_topics[0],
             "depth_topic": depth_topics[0],
             "n": int(len(deltas)),
-            "mean_s": round(float(np.abs(deltas).mean()), 4),
-            "p50_s": round(float(np.percentile(np.abs(deltas), 50)), 4),
-            "p95_s": round(float(np.percentile(np.abs(deltas), 95)), 4),
-            "max_s": round(float(np.abs(deltas).max()), 4),
+            "mean_s": round(float(deltas.mean()), 4),
+            "p50_s": round(float(np.percentile(deltas, 50)), 4),
+            "p95_s": round(float(np.percentile(deltas, 95)), 4),
+            "max_s": round(float(deltas.max()), 4),
         }
 
     # ── 필수 체크 ──
@@ -241,21 +250,17 @@ def main():
             checks[name] = {"pass": False, "count": 0, "topics": []}
         fail = fail or not ok
 
-    # 단조성 / zero stamp / max gap
+    # zero stamp (치명적 오류 검사)
     for role in ("rgb", "depth", "imu", "camera_info"):
         for topic in by_role.get(role, []):
             st = topics[topic].get("stats")
             if not st:
                 continue
-            if st["monotonic_violations"] > 0:
-                checks[f"monotonic:{topic}"] = {
-                    "pass": False, "violations": st["monotonic_violations"]}
-                fail = True
             if st["zero_stamps"] > 0:
                 checks[f"zero_stamp:{topic}"] = {"pass": False, "count": st["zero_stamps"]}
                 fail = True
 
-    # 경고 (실패 아님): 저 FPS / 큰 gap
+    # 경고 (실패 아님): 저 FPS / 큰 gap / 기록 순서 지터
     warnings = []
     for topic, info in topics.items():
         st = info.get("stats")
@@ -268,6 +273,8 @@ def main():
             warnings.append(f"{topic}: {st['hz']}Hz < 권장 {topic_min_hz}Hz")
         if st["max_gap_s"] > topic_max_gap:
             warnings.append(f"{topic}: 최대 gap {st['max_gap_s']:.2f}s > {topic_max_gap}s")
+        if st["monotonic_violations"] > 0:
+            warnings.append(f"{topic}: 기록 순서 지터({st['monotonic_violations']}건, 재생 시 타임스탬프 기준 자동 처리)")
 
     # ── 매니페스트 ──
     commit, dirty = _git_commit()

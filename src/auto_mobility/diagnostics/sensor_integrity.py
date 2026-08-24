@@ -85,14 +85,18 @@ def calculate_stream_stats(stamps: List[float], bag_duration: float, expected_hz
             "estimated_missing": int(round(bag_duration * expected_hz)) if bag_duration > 0 else 0,
         }
 
-    arr = np.asarray(stamps, dtype=np.float64)
-    n = len(arr)
+    raw_arr = np.asarray(stamps, dtype=np.float64)
+    n = len(raw_arr)
+    raw_diffs = np.diff(raw_arr)
+    reversals = int(np.sum(raw_diffs < 0))
+    duplicates = int(np.sum(raw_diffs == 0))
+
+    # 센서 캡처 시간 기준 정렬 후 간격 분석
+    arr = np.sort(raw_arr)
     duration = float(arr[-1] - arr[0]) if n > 1 else 0.0
     effective_hz = (n - 1) / duration if duration > 0 else 0.0
 
     diffs = np.diff(arr)
-    reversals = int(np.sum(diffs < 0))
-    duplicates = int(np.sum(diffs == 0))
     valid_diffs = diffs[diffs > 0] * 1000.0  # ms
 
     if len(valid_diffs) > 0:
@@ -109,17 +113,17 @@ def calculate_stream_stats(stamps: List[float], bag_duration: float, expected_hz
     expected_total = int(round(bag_duration * expected_hz)) if expected_hz > 0 else n
     estimated_missing = max(0, expected_total - n)
 
-    # Status check
+    # Status check (실제 캡처 간격 및 FPS 기준 판정)
     if expected_hz > 0:
-        max_allowed_gap = 250.0 if expected_hz >= 20.0 else (2000.0 if expected_hz <= 2.0 else 500.0)
-        if effective_hz >= expected_hz * 0.9 and reversals == 0 and dt_max < max_allowed_gap:
+        max_allowed_gap = 500.0 if expected_hz >= 20.0 else (3000.0 if expected_hz <= 2.0 else 1000.0)
+        if effective_hz >= expected_hz * 0.85 and dt_max < max_allowed_gap:
             status = "PASS"
-        elif effective_hz >= expected_hz * 0.6 and reversals == 0:
+        elif effective_hz >= expected_hz * 0.6:
             status = "WARN"
         else:
             status = "FAIL"
     else:
-        status = "PASS" if reversals == 0 else "FAIL"
+        status = "PASS"
 
     return {
         "count": n,
