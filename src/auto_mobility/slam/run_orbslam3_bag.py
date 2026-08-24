@@ -135,8 +135,37 @@ def run_orbslam3_on_bag(bag_input: str, out_trajectory: str = None, mode: str = 
     config_path = generate_orbslam3_config(intrinsics=intrinsics, is_inertial=is_inertial)
     sensor_mode_arg = "IMU_RGBD" if is_inertial else "RGBD"
 
-    node_exe = str(PROJECT_DIR / "install" / "auto_mobility" / "lib" / "auto_mobility" / "orbslam3_rgbd_node")
+    offline_exe = str(PROJECT_DIR / "install" / "auto_mobility" / "lib" / "auto_mobility" / "orbslam3_offline")
+    if not os.path.exists(offline_exe):
+        offline_exe = str(PROJECT_DIR / "build" / "auto_mobility" / "orbslam3_offline")
 
+    # Fast & Lossless Direct Offline Runner
+    if os.path.exists(offline_exe) and dataset_path.exists() and (dataset_path / "frames.csv").exists():
+        print("==========================================================")
+        print(f" 🚀 Running ORB-SLAM3 ({slam_name.upper()}) DIRECT OFFLINE (Zero Frame Drop)")
+        print(f" 📦 Dataset Path: {dataset_path}")
+        print(f" ⚙️ Sensor Mode:  {sensor_mode_arg}")
+        print(f" 📑 Output Traj:  {out_trajectory}")
+        print("==========================================================")
+        cmd = [
+            offline_exe,
+            "--dataset", str(dataset_path),
+            "--vocab", vocab_path,
+            "--config", config_path,
+            "--out", out_trajectory,
+            "--mode", "rgbdi" if is_inertial else "rgbd"
+        ]
+        res = subprocess.run(cmd)
+        if res.returncode == 0 and os.path.exists(out_trajectory) and os.path.getsize(out_trajectory) > 0:
+            traj = Trajectory.from_tum_file(out_trajectory)
+            metrics = traj.compute_metrics()
+            print(f"✅ ORB-SLAM3 ({slam_name}) Trajectory generated successfully!")
+            print(f"📊 Frames: {metrics.get('num_frames', 0)}, Length: {metrics.get('total_path_length_m', 0):.4f}m, MaxStep: {metrics.get('max_step_m', 0):.4f}m")
+            return out_trajectory
+        else:
+            print("⚠️ Direct offline runner returned non-zero code, falling back to ROS bag playback...")
+
+    node_exe = str(PROJECT_DIR / "install" / "auto_mobility" / "lib" / "auto_mobility" / "orbslam3_rgbd_node")
     if not os.path.exists(node_exe):
         node_exe = str(PROJECT_DIR / "build" / "auto_mobility" / "orbslam3_rgbd_node")
     if not os.path.exists(node_exe):
@@ -170,7 +199,7 @@ def run_orbslam3_on_bag(bag_input: str, out_trajectory: str = None, mode: str = 
     ]
     log_dir = PROJECT_DIR / "ros2_data" / "logs"
     os.makedirs(log_dir, exist_ok=True)
-    orbslam_log_path = log_dir / f"orbslam3_{bag_name}.log"
+    orbslam_log_path = log_dir / f"orbslam3_{bag_name}_{slam_name}_rate{rate}.log"
     orbslam_log_file = open(orbslam_log_path, "w")
 
     orbslam_proc = subprocess.Popen(

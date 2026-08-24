@@ -125,6 +125,39 @@ def run_stella_vslam_on_bag(bag_input: str, out_trajectory: Optional[str] = None
     config_path = str(PROJECT_DIR / "config" / "stella_vslam_d435i.yaml")
     generate_stella_config(intrinsics=intrinsics, output_path=config_path)
 
+    env = os.environ.copy()
+    stella_lib_dir = str(PROJECT_DIR / "third_party" / "installed" / "lib")
+    existing_ld = env.get("LD_LIBRARY_PATH", "")
+    env["LD_LIBRARY_PATH"] = f"{stella_lib_dir}:{existing_ld}" if existing_ld else stella_lib_dir
+
+    offline_exe = str(PROJECT_DIR / "install" / "auto_mobility" / "lib" / "auto_mobility" / "stella_offline")
+    if not os.path.exists(offline_exe):
+        offline_exe = str(PROJECT_DIR / "build" / "auto_mobility" / "stella_offline")
+
+    # Fast & Lossless Direct Offline Runner
+    if os.path.exists(offline_exe) and dataset_path.exists() and (dataset_path / "frames.csv").exists():
+        print("==========================================================")
+        print(f" 🚀 Running stella_vslam (RGB-D) DIRECT OFFLINE (Zero Frame Drop)")
+        print(f" 📦 Dataset Path: {dataset_path}")
+        print(f" 📑 Output Traj:  {out_trajectory}")
+        print("==========================================================")
+        cmd = [
+            offline_exe,
+            "--dataset", str(dataset_path),
+            "--vocab", vocab_path,
+            "--config", config_path,
+            "--out", out_trajectory
+        ]
+        res = subprocess.run(cmd, env=env)
+        if res.returncode == 0 and os.path.exists(out_trajectory) and os.path.getsize(out_trajectory) > 0:
+            traj = Trajectory.from_tum_file(out_trajectory)
+            metrics = traj.compute_metrics()
+            print(f"✅ stella_vslam Trajectory generated successfully!")
+            print(f"📊 Frames: {metrics.get('num_frames', 0)}, Length: {metrics.get('total_path_length_m', 0):.4f}m, MaxStep: {metrics.get('max_step_m', 0):.4f}m")
+            return out_trajectory
+        else:
+            print("⚠️ Direct offline runner returned non-zero code, falling back to ROS bag playback...")
+
     node_exe = str(PROJECT_DIR / "install" / "auto_mobility" / "lib" / "auto_mobility" / "stella_rgbd_node")
     if not os.path.exists(node_exe):
         node_exe = str(PROJECT_DIR / "build" / "auto_mobility" / "stella_rgbd_node")
@@ -137,11 +170,6 @@ def run_stella_vslam_on_bag(bag_input: str, out_trajectory: Optional[str] = None
     print(f" ⏩ Play Rate: {rate}x")
     print(f" 📑 Output Trajectory: {out_trajectory}")
     print("==========================================================")
-
-    env = os.environ.copy()
-    stella_lib_dir = str(PROJECT_DIR / "third_party" / "installed" / "lib")
-    existing_ld = env.get("LD_LIBRARY_PATH", "")
-    env["LD_LIBRARY_PATH"] = f"{stella_lib_dir}:{existing_ld}" if existing_ld else stella_lib_dir
 
     # 1. Start republish.py (decompress compressedDepth and compressed RGB)
     republish_cmd = [
@@ -162,7 +190,7 @@ def run_stella_vslam_on_bag(bag_input: str, out_trajectory: Optional[str] = None
     ]
     log_dir = PROJECT_DIR / "ros2_data" / "logs"
     os.makedirs(log_dir, exist_ok=True)
-    stella_log_path = log_dir / f"stella_{bag_name}.log"
+    stella_log_path = log_dir / f"stella_{bag_name}_rate{rate}.log"
     stella_log_file = open(stella_log_path, "w")
 
     stella_proc = subprocess.Popen(

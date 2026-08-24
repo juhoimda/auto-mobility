@@ -195,18 +195,50 @@ class BenchmarkOrchestrator:
                     except Exception as e:
                         print(f"⚠️ RTAB-Map 궤적 추출 실패: {e}")
 
-            # Optional automatic SLAM generation
-            if self.run_slam and key in SLAM_RUN_ARGS:
-                print(f"⚙️ SLAM 실행 (--run-slam): {key} → run_slam.sh {' '.join(SLAM_RUN_ARGS[key])}")
+        # Collect missing profiles to generate
+        missing_keys = [k for k in active_keys if k not in trajectories and k in SLAM_RUN_ARGS]
+        if self.run_slam and missing_keys:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            max_workers = min(3, len(missing_keys))
+            print(f"\n🚀 병렬 SLAM 생성 시작: {len(missing_keys)}개 후보군 (동시 실행 워커 수: {max_workers})")
+
+            def _run_single_slam(worker_idx: int, k: str):
+                s = get_slam_profile_spec(k)
+                t_fn = SLAM_TRAJ_FILES.get(k, lambda n: TRAJECTORY_DIR / get_trajectory_filename(n, k))
+                t_file = t_fn(self.bag_name)
+                env = os.environ.copy()
+                env["ROS_DOMAIN_ID"] = str(10 + (worker_idx % 80))
+
+                print(f"⚙️ [워커 #{worker_idx+1} | DOMAIN={env['ROS_DOMAIN_ID']}] SLAM 실행: {k} → run_slam.sh {' '.join(SLAM_RUN_ARGS[k])}")
                 script = PROJECT_DIR / "scripts" / "pipeline" / "run_slam.sh"
-                subprocess.run(["bash", str(script), self.bag_name, *SLAM_RUN_ARGS[key]], check=False)
-                if traj_file.exists() and traj_file.stat().st_size > 0:
-                    save_trajectory_metadata(traj_file, spec, bag_fingerprint=expected_fp)
-                    trajectories[key] = str(traj_file)
-                    traj_metrics[key] = Trajectory.from_tum_file(str(traj_file)).compute_metrics()
-                    traj_metrics[key]["slam_backend"] = spec.backend
-                    traj_metrics[key]["slam_profile"] = spec.profile
-                    traj_metrics[key]["replay_rate"] = spec.replay_rate
+                subprocess.run(["bash", str(script), self.bag_name, *SLAM_RUN_ARGS[k]], env=env, check=False)
+
+                if t_file.exists() and t_file.stat().st_size > 0:
+                    save_trajectory_metadata(t_file, s, bag_fingerprint=expected_fp)
+                    try:
+                        m = Trajectory.from_tum_file(str(t_file)).compute_metrics()
+                        m["slam_backend"] = s.backend
+                        m["slam_profile"] = s.profile
+                        m["replay_rate"] = s.replay_rate
+                        return k, str(t_file), m
+                    except Exception:
+                        return k, str(t_file), {"slam_backend": s.backend}
+                return k, None, None
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(_run_single_slam, idx, k): k
+                    for idx, k in enumerate(missing_keys)
+                }
+                for f in as_completed(futures):
+                    k_res, t_res, m_res = f.result()
+                    if t_res:
+                        trajectories[k_res] = t_res
+                        if m_res:
+                            traj_metrics[k_res] = m_res
+                        print(f"✅ SLAM 완료: {k_res} → {Path(t_res).name}")
+                    else:
+                        print(f"⚠️ SLAM 생성 실패: {k_res}")
 
         return trajectories, traj_metrics
 

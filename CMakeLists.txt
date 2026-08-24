@@ -117,6 +117,40 @@ if(EXISTS "${ORB_SLAM3_DIR}/lib/libORB_SLAM3.so")
     INSTALL_RPATH "${ORB_SLAM3_DIR}/lib;${ORB_SLAM3_DIR}/Thirdparty/DBoW2/lib;${ORB_SLAM3_DIR}/Thirdparty/g2o/lib;${PANGOLIN_DIR}/lib"
   )
   install(TARGETS orbslam3_rgbd_node DESTINATION lib/${PROJECT_NAME})
+
+  add_executable(orbslam3_offline src/auto_mobility/slam/orbslam3_offline.cpp)
+  target_compile_features(orbslam3_offline PRIVATE cxx_std_14)
+  target_include_directories(orbslam3_offline PRIVATE
+    ${ORB_SLAM3_DIR}
+    ${ORB_SLAM3_DIR}/include
+    ${ORB_SLAM3_DIR}/include/CameraModels
+    ${ORB_SLAM3_DIR}/Thirdparty/Sophus
+    ${PANGOLIN_DIR}/include
+    ${OpenCV_INCLUDE_DIRS}
+    ${EIGEN3_INCLUDE_DIR}
+    ${GLEW_INCLUDE_DIRS}
+  )
+  target_link_directories(orbslam3_offline PRIVATE
+    ${ORB_SLAM3_DIR}/lib
+    ${ORB_SLAM3_DIR}/Thirdparty/DBoW2/lib
+    ${ORB_SLAM3_DIR}/Thirdparty/g2o/lib
+    ${PANGOLIN_DIR}/lib
+  )
+  target_link_libraries(orbslam3_offline
+    ORB_SLAM3
+    DBoW2
+    g2o
+    pangolin
+    OpenGL::GL
+    ${GLEW_LIBRARIES}
+    pthread
+    ${OpenCV_LIBS}
+  )
+  set_target_properties(orbslam3_offline PROPERTIES
+    BUILD_RPATH "${ORB_SLAM3_DIR}/lib;${ORB_SLAM3_DIR}/Thirdparty/DBoW2/lib;${ORB_SLAM3_DIR}/Thirdparty/g2o/lib;${PANGOLIN_DIR}/lib"
+    INSTALL_RPATH "${ORB_SLAM3_DIR}/lib;${ORB_SLAM3_DIR}/Thirdparty/DBoW2/lib;${ORB_SLAM3_DIR}/Thirdparty/g2o/lib;${PANGOLIN_DIR}/lib"
+  )
+  install(TARGETS orbslam3_offline DESTINATION lib/${PROJECT_NAME})
 endif()
 
 set(STELLA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/installed)
@@ -150,6 +184,28 @@ if(EXISTS "${STELLA_DIR}/lib/libstella_vslam.so")
     INSTALL_RPATH "${STELLA_DIR}/lib"
   )
   install(TARGETS stella_rgbd_node DESTINATION lib/${PROJECT_NAME})
+
+  add_executable(stella_offline src/auto_mobility/slam/stella_offline.cpp)
+  target_compile_features(stella_offline PRIVATE cxx_std_17)
+  target_include_directories(stella_offline PRIVATE
+    ${STELLA_DIR}/include
+    ${OpenCV_INCLUDE_DIRS}
+    ${EIGEN3_INCLUDE_DIR}
+  )
+  target_link_directories(stella_offline PRIVATE
+    ${STELLA_DIR}/lib
+  )
+  target_link_libraries(stella_offline
+    stella_vslam
+    fbow
+    pthread
+    ${OpenCV_LIBS}
+  )
+  set_target_properties(stella_offline PROPERTIES
+    BUILD_RPATH "${STELLA_DIR}/lib"
+    INSTALL_RPATH "${STELLA_DIR}/lib"
+  )
+  install(TARGETS stella_offline DESTINATION lib/${PROJECT_NAME})
 endif()
 
 ament_package()

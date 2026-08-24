@@ -117,9 +117,9 @@ else
     
     echo "▶️ RTAB-Map 정리 및 DB 저장..."
     sleep 2
-    kill -SIGINT -- -$SLAM_PID 2>/dev/null || pkill -SIGINT -f "rtabmap" 2>/dev/null || true
+    kill -SIGINT -- -$SLAM_PID 2>/dev/null || true
     sleep 3
-    kill -SIGKILL -- -$SLAM_PID 2>/dev/null || pkill -SIGKILL -f "rtabmap" 2>/dev/null || true
+    kill -SIGKILL -- -$SLAM_PID 2>/dev/null || true
     
     # TUM Trajectory 내보내기
     python3 -c "from auto_mobility.trajectory.export_trajectory import export_from_db; export_from_db('$DB_PATH', '$OUT_TRAJ')"
