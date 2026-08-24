@@ -5,6 +5,7 @@ import sys
 import time
 import json
 import psutil
+import signal
 import hashlib
 import subprocess
 from dataclasses import dataclass, field, asdict
@@ -48,8 +49,8 @@ class ResourcePolicy:
     numexpr_threads: int = 6
 
     # Prefetch pipeline
-    frame_prefetch_workers: int = 4    # Sliding window async I/O worker count
-    frame_prefetch_depth: int = 8      # Max preloaded frames in queue
+    frame_prefetch_workers: int = 6    # Sliding window async I/O worker count
+    frame_prefetch_depth: int = 16     # Max preloaded frames in queue
 
     # Algorithmic parallel knobs
     poisson_threads: int = 6           # Open3D Poisson reconstruction thread count
@@ -58,12 +59,13 @@ class ResourcePolicy:
 
     # Memory budgets (in GB)
     tsdf_memory_budget_gb: float = 6.0
-    process_memory_budget_gb: float = 12.0
+    process_memory_budget_gb: float = 18.0
     system_ram_reserve_gb: float = 2.0
 
     # GPU execution policy
     gpu_mode: str = "cpu"              # "cpu" (safe default) | "cuda" | "auto"
     gpu_vram_reserve_mb: float = 1024.0
+    gpu_vram_budget_gb: float = 4.0    # TSDF VoxelBlockGrid VRAM 사전할당 상한 (재해싱 스파이크 여유 포함)
 
     def get_worker_env(self, base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         """Generate standardized environment variables enforcing thread limits."""
@@ -140,9 +142,25 @@ def get_default_resource_policy() -> ResourcePolicy:
     try:
         mem = psutil.virtual_memory()
         avail_gb = mem.available / 1e9
-        usable_tsdf_gb = max(2.0, min(8.0, round((avail_gb - 2.0) * 0.7, 1)))
+        usable_tsdf_gb = max(2.0, min(8.0, round((avail_gb - 2.0) * 0.4, 1)))
+        usable_process_gb = max(8.0, min(24.0, round(avail_gb - 3.0, 1)))
     except Exception:
         usable_tsdf_gb = 6.0
+        usable_process_gb = 18.0
+
+    # Detect VRAM budget (free VRAM 기반, 재해싱 스파이크 감안해 60%만 사용)
+    vram_budget_gb = 4.0
+    try:
+        smi_paths = ["/usr/lib/wsl/lib/nvidia-smi"]
+        for sp in smi_paths:
+            res = subprocess.run([sp, "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                                 capture_output=True, text=True, timeout=5)
+            if res.returncode == 0 and res.stdout.strip():
+                free_mb = float(res.stdout.strip().splitlines()[0])
+                vram_budget_gb = max(1.5, round(free_mb / 1024.0 * 0.6, 1))
+                break
+    except Exception:
+        pass
 
     # Detect CPU count & calibrate threads
     # Intel Core Ultra 7 265H has 6 P-cores + 8 E-cores. 6 threads achieves peak compute without E-core thrashing.
@@ -154,16 +172,17 @@ def get_default_resource_policy() -> ResourcePolicy:
         blas_threads=1,
         openmp_threads=calibrated_threads,
         numexpr_threads=calibrated_threads,
-        frame_prefetch_workers=4,
-        frame_prefetch_depth=8,
+        frame_prefetch_workers=calibrated_threads,
+        frame_prefetch_depth=16,
         poisson_threads=calibrated_threads,
         kdtree_workers=calibrated_threads,
         opencv_threads=1,
         tsdf_memory_budget_gb=usable_tsdf_gb,
-        process_memory_budget_gb=12.0,
+        process_memory_budget_gb=usable_process_gb,
         system_ram_reserve_gb=2.0,
-        gpu_mode="cpu",
-        gpu_vram_reserve_mb=1024.0
+        gpu_mode="cuda" if vram_budget_gb >= 1.5 else "cpu",
+        gpu_vram_reserve_mb=1024.0,
+        gpu_vram_budget_gb=vram_budget_gb
     )
 
 
@@ -171,13 +190,70 @@ def get_default_resource_policy() -> ResourcePolicy:
 DEFAULT_RESOURCE_POLICY = get_default_resource_policy()
 
 
+def _kill_process_group_and_tree(proc: subprocess.Popen, p: Optional[psutil.Process] = None, grace_sec: float = 0.5) -> None:
+    """Terminate the process group and all recursive child processes cleanly."""
+    if proc.poll() is not None:
+        return
+    # 1. Process group SIGTERM
+    try:
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, signal.SIGTERM)
+    except Exception:
+        pass
+
+    # 2. psutil recursive terminate
+    if p:
+        try:
+            children = p.children(recursive=True)
+            for c in children:
+                try:
+                    c.terminate()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            p.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    # 3. Wait grace period
+    t_end = time.time() + grace_sec
+    while time.time() < t_end:
+        if proc.poll() is not None:
+            return
+        time.sleep(0.05)
+
+    # 4. Force SIGKILL process group & children
+    try:
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, signal.SIGKILL)
+    except Exception:
+        pass
+
+    if p:
+        try:
+            children = p.children(recursive=True)
+            for c in children:
+                try:
+                    c.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            p.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+
 def run_monitored_subprocess(
     cmd: List[str],
     env: Optional[Dict[str, str]] = None,
     timeout: int = 1800,
-    sample_interval: float = 0.25
+    sample_interval: float = 0.25,
+    policy: Optional[ResourcePolicy] = None
 ) -> Tuple[int, str, str, ResourceUsage]:
-    """Execute command in subprocess with live process tree CPU and RSS telemetry monitoring."""
+    """Execute command in subprocess with live process tree CPU/RSS monitoring and memory safety guard."""
     # Check if subprocess.run has been mocked (e.g. during unit tests)
     from unittest.mock import MagicMock
     if isinstance(subprocess.run, MagicMock) or getattr(subprocess.run, '_mock_return_value', None) is not None or getattr(subprocess.run, 'side_effect', None) is not None:
@@ -189,6 +265,10 @@ def run_monitored_subprocess(
         except Exception as e:
             return 1, '', str(e), ResourceUsage(wall_time_sec=0.1)
 
+    active_policy = policy or DEFAULT_RESOURCE_POLICY
+    max_rss_bytes = int(active_policy.process_memory_budget_gb * 1024 * 1024 * 1024) if active_policy.process_memory_budget_gb > 0 else 0
+    min_reserve_mb = float(active_policy.system_ram_reserve_gb * 1024.0) if active_policy.system_ram_reserve_gb > 0 else 0.0
+
     t0 = time.time()
     min_avail_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
     
@@ -197,7 +277,8 @@ def run_monitored_subprocess(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env=env
+        env=env,
+        start_new_session=True
     )
     
     peak_rss_bytes = 0
@@ -215,23 +296,24 @@ def run_monitored_subprocess(
         p = None
 
     timed_out = False
+    memory_guard_triggered = False
+    guard_reason = ""
+    rss_violation_count = 0
+    reserve_violation_count = 0
     
     while proc.poll() is None:
         elapsed = time.time() - t0
         if elapsed > timeout:
             timed_out = True
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            _kill_process_group_and_tree(proc, p)
             break
             
         try:
+            cur_rss = 0
+            cur_vms = 0
+            cur_cpu = 0.0
+            
             if p and p.is_running():
-                cur_rss = 0
-                cur_vms = 0
-                cur_cpu = 0.0
-                
                 # Monitor parent + all children
                 procs = [p]
                 try:
@@ -255,6 +337,30 @@ def run_monitored_subprocess(
                     
             avail_now = psutil.virtual_memory().available / (1024 * 1024)
             min_avail_ram_mb = min(min_avail_ram_mb, avail_now)
+
+            # Memory Watchdog / Resource Guard check
+            if max_rss_bytes > 0 and cur_rss > max_rss_bytes:
+                rss_violation_count += 1
+            else:
+                rss_violation_count = 0
+
+            if min_reserve_mb > 0 and avail_now < min_reserve_mb:
+                reserve_violation_count += 1
+            else:
+                reserve_violation_count = 0
+
+            # Trigger after 3 consecutive samples to avoid single-sample transient spikes
+            if rss_violation_count >= 3:
+                memory_guard_triggered = True
+                guard_reason = f"Process RSS ({cur_rss / (1024**3):.2f} GB) exceeded policy budget ({active_policy.process_memory_budget_gb:.1f} GB)"
+                _kill_process_group_and_tree(proc, p)
+                break
+
+            if reserve_violation_count >= 3:
+                memory_guard_triggered = True
+                guard_reason = f"System available RAM ({avail_now / 1024:.2f} GB) fell below reserve ({active_policy.system_ram_reserve_gb:.1f} GB)"
+                _kill_process_group_and_tree(proc, p)
+                break
         except Exception:
             pass
             
@@ -266,6 +372,9 @@ def run_monitored_subprocess(
     if timed_out:
         rc = -15
         stderr = (stderr or '') + chr(10) + f'Process timed out after {timeout}s'
+    elif memory_guard_triggered:
+        rc = -9
+        stderr = (stderr or '') + chr(10) + f'KILLED_BY_RESOURCE_GUARD: {guard_reason}'
     else:
         rc = proc.returncode
 
@@ -276,7 +385,7 @@ def run_monitored_subprocess(
     io_write_mb = 0.0
     
     try:
-        if p:
+        if p and p.is_running():
             cpu_times = p.cpu_times()
             cpu_user = cpu_times.user
             cpu_sys = cpu_times.system

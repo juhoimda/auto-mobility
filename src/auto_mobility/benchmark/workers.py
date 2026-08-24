@@ -81,9 +81,9 @@ def _classify_returncode(rc: int, stderr: str = "", stdout: str = "") -> str:
     combined = (stderr + " " + stdout).lower()
     if "segmentation fault" in combined or "sigsegv" in combined:
         return WorkerStatus.FAIL_SEGFAULT
-    if "out of memory" in combined or "killed" in combined or "std::bad_alloc" in combined:
+    if "killed_by_resource_guard" in combined or "out of memory" in combined or "killed" in combined or "std::bad_alloc" in combined:
         return WorkerStatus.FAIL_OOM
-    if "timed out" in combined or "timeout" in combined or rc == 124:
+    if "timed out" in combined or "timeout" in combined or rc in (-15, 124):
         return WorkerStatus.FAIL_TIMEOUT
     if "skipped_unavailable" in combined:
         return WorkerStatus.SKIPPED_UNAVAILABLE
@@ -133,7 +133,7 @@ def run_tsdf_worker(
     worker_env = active_policy.get_worker_env(env)
 
     try:
-        rc, stdout, stderr, usage = run_monitored_subprocess(cmd, env=worker_env, timeout=timeout)
+        rc, stdout, stderr, usage = run_monitored_subprocess(cmd, env=worker_env, timeout=timeout, policy=active_policy)
         status = _classify_returncode(rc, stderr, stdout)
         err_msg = stderr.strip() if rc != 0 else None
         return WorkerResult(
@@ -197,7 +197,7 @@ def run_surface_worker(
     worker_env = active_policy.get_worker_env(env)
 
     try:
-        rc, stdout, stderr, usage = run_monitored_subprocess(cmd, env=worker_env, timeout=timeout)
+        rc, stdout, stderr, usage = run_monitored_subprocess(cmd, env=worker_env, timeout=timeout, policy=active_policy)
         status = _classify_returncode(rc, stderr, stdout)
         err_msg = stderr.strip() if rc != 0 else None
         return WorkerResult(
@@ -256,7 +256,7 @@ def run_direct_fusion_worker(
     worker_env = active_policy.get_worker_env(env)
 
     try:
-        rc, stdout, stderr, usage = run_monitored_subprocess(cmd, env=worker_env, timeout=timeout)
+        rc, stdout, stderr, usage = run_monitored_subprocess(cmd, env=worker_env, timeout=timeout, policy=active_policy)
         status = _classify_returncode(rc, stderr, stdout)
         err_msg = stderr.strip() if rc != 0 else None
         return WorkerResult(

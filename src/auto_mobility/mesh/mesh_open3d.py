@@ -124,11 +124,24 @@ def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_si
 
     elif m_lower == "bpa":
         print("Reconstructing surface using Ball Pivoting Algorithm (BPA)...")
-        distances = pcd.compute_nearest_neighbor_distance()
+        # BPA 실행시간은 입력 점 수에 비례하고 상수가 매우 크다 (실측: 885k pts -> 135s,
+        # 4M pts -> 600s+ timeout). dense cloud에서는 BPA 입력만 코스한 voxel로
+        # 제한한다. 품질 비교 공정성을 위해 축소 사실을 로그에 기록한다.
+        bpa_pcd = pcd
+        max_bpa_points = 400000
+        if len(pcd.points) > max_bpa_points:
+            bpa_voxel = max(voxel_size * 1.5, 0.015)
+            bpa_pcd = pcd.voxel_down_sample(bpa_voxel)
+            print(f"  ⚠️ BPA input decimated for tractability: {len(pcd.points):,} -> {len(bpa_pcd.points):,} pts (voxel {bpa_voxel*1000:.0f}mm)")
+            while len(bpa_pcd.points) > max_bpa_points and bpa_voxel < 0.05:
+                bpa_voxel *= 1.3
+                bpa_pcd = pcd.voxel_down_sample(bpa_voxel)
+                print(f"  ⚠️ BPA input still dense -> voxel {bpa_voxel*1000:.0f}mm ({len(bpa_pcd.points):,} pts)")
+        distances = bpa_pcd.compute_nearest_neighbor_distance()
         avg_dist = np.mean(distances) if len(distances) > 0 else voxel_size
         radii = [avg_dist * 0.5, avg_dist, avg_dist * 2.0, avg_dist * 4.0, avg_dist * 8.0]
         mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-            pcd, o3d.utility.DoubleVector(radii)
+            bpa_pcd, o3d.utility.DoubleVector(radii)
         )
     else:
         # 기본: Poisson (watertight, 구멍 없는 폐곡면)

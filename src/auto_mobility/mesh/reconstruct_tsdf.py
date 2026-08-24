@@ -27,6 +27,7 @@ if "MKL_NUM_THREADS" not in os.environ:
     os.environ["MKL_NUM_THREADS"] = str(DEFAULT_RESOURCE_POLICY.blas_threads)
 
 import time
+import gc
 import shutil
 import argparse
 import subprocess
@@ -63,13 +64,43 @@ def _fast_inv_se3(T: np.ndarray) -> np.ndarray:
     return inv_T
 
 
-def _bytes_per_block(no_color: bool, block_resolution: int = 16) -> int:
+def _bytes_per_block(no_color: bool = False, block_resolution: int = 16) -> int:
     """VoxelBlockGrid가 블록당 선할당하는 바이트 수.
     - tsdf(float32) + weight(float32) = 8B/voxel
     - + color(float32 x3) = 20B/voxel
+
+    주의: Open3D 0.19는 color 속성을 생략하면 extract_point_cloud가 실패하므로
+    no_color=True로 통합하더라도 color 버퍼(12B/voxel)가 항상 할당된다.
+    따라서 추정치는 항상 20B 기준으로 계산해야 실제 RSS와 정합한다 (실측, 2026-08-24).
     """
-    voxel_bytes = 8 if no_color else 20
+    voxel_bytes = 20
     return block_resolution ** 3 * voxel_bytes
+
+
+# 실측 캘리브레이션 (0819_test_2 @10mm): bbox 부피 대비 실제 활성 블록 비율 ~0.17.
+# 실내 장면의 frustum swept volume은 bbox의 일부만 차지하므로 occupancy factor로 보정.
+# 과소 할당은 Open3D 0.19 hashmap이 자동 재해싱하므로 안전하며(동일 출력 실측),
+# 과대 할당은 사전할당 메모리 낭비이므로 보수적으로 잡지 않는다.
+BLOCK_OCCUPANCY_FACTOR = 0.22
+
+
+def _query_vram_free_mb() -> Optional[float]:
+    """nvidia-smi로 가용 VRAM(MB) 조회. 실패 시 None."""
+    import shutil
+    smi_paths = ["/usr/lib/wsl/lib/nvidia-smi", shutil.which("nvidia-smi")]
+    for sp in smi_paths:
+        if not sp:
+            continue
+        try:
+            res = subprocess.run(
+                [sp, "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return float(res.stdout.strip().splitlines()[0])
+        except Exception:
+            continue
+    return None
 
 
 def _estimate_block_count(
@@ -78,8 +109,8 @@ def _estimate_block_count(
     depth_max: float,
     no_color: bool = False,
     block_resolution: int = 16,
-    safety_factor: float = 1.5,
-    min_blocks: int = 65536,
+    safety_factor: float = 1.25,
+    min_blocks: int = 16384,
     memory_budget_gb: float = DEFAULT_RESOURCE_POLICY.tsdf_memory_budget_gb,
 ) -> int:
     """궤적 범위(장면 규모)를 기반으로 VoxelBlockGrid의 block_count를 추정한다.
@@ -90,9 +121,10 @@ def _estimate_block_count(
 
     추정 방식:
       1) 궤적 bounding box를 depth_max(레이 최대 도달 거리)만큼 확장한 부피를
-         블록 부피(voxel_size * block_resolution)^3 로 나눠 필요한 블록 수 계산
-      2) safety_factor 배 여유 적용
-      3) memory_budget_gb 한도를 넘지 않도록 상한(모자이크 방지)
+         블록 부피(voxel_size * block_resolution)^3 로 나눠 bbox 블록 수 계산
+      2) BLOCK_OCCUPANCY_FACTOR로 실제 활성 비율 보정 + safety_factor 여유
+      3) memory_budget_gb 한도를 넘지 않도록 상한. 과소 시 hashmap 자동 확장되므로
+         하단 클리핑만 수행 (모자이크/품질 저하 없음을 실측으로 확인)
     """
     positions = []
     for T in poses.values():
@@ -113,7 +145,7 @@ def _estimate_block_count(
 
     block_size = voxel_size * block_resolution
     n_blocks = int(np.ceil(ext[0] / block_size) * np.ceil(ext[1] / block_size) * np.ceil(ext[2] / block_size))
-    n_blocks = int(n_blocks * safety_factor)
+    n_blocks = int(n_blocks * BLOCK_OCCUPANCY_FACTOR * safety_factor)
 
     max_by_mem = int(memory_budget_gb * 1e9 / _bytes_per_block(no_color, block_resolution))
     n_blocks = min(n_blocks, max_by_mem)
@@ -126,10 +158,14 @@ def estimate_vbg_memory_gb(
     depth_max: float = 3.0,
     no_color: bool = False,
     block_resolution: int = 16,
-    safety_factor: float = 1.5,
-    min_blocks: int = 65536,
+    safety_factor: float = 1.25,
+    min_blocks: int = 16384,
 ) -> float:
-    """Estimates the memory required in GB for VoxelBlockGrid TSDF reconstruction."""
+    """Estimates the memory required in GB for VoxelBlockGrid TSDF reconstruction.
+
+    _estimate_block_count와 동일한 occupancy 보정 수학을 사용하며, 실제 활성 블록
+    기준 메모리를 반환한다 (bbox 원부피 과대추정 제거, 2026-08-24 캘리브레이션).
+    """
     if isinstance(trajectory_or_poses, dict):
         poses = trajectory_or_poses
     elif isinstance(trajectory_or_poses, (str, Path)):
@@ -161,7 +197,7 @@ def estimate_vbg_memory_gb(
 
     block_size = voxel_size * block_resolution
     n_blocks = int(np.ceil(ext[0] / block_size) * np.ceil(ext[1] / block_size) * np.ceil(ext[2] / block_size))
-    n_blocks = max(min_blocks, int(n_blocks * safety_factor))
+    n_blocks = max(min_blocks, int(n_blocks * BLOCK_OCCUPANCY_FACTOR * safety_factor))
 
     bytes_total = n_blocks * _bytes_per_block(no_color, block_resolution)
     return round(bytes_total / 1e9, 3)
@@ -189,16 +225,18 @@ class AsyncFramePrefetcher:
         self.no_color = no_color
         self.max_workers = max(1, int(max_workers or DEFAULT_RESOURCE_POLICY.frame_prefetch_workers))
         self.prefetch_size = max(1, int(prefetch_size or DEFAULT_RESOURCE_POLICY.frame_prefetch_depth))
+        # OpenCV thread pool은 프로세스 전역 상태이므로 워커 시작 시 1회만 설정한다.
+        # 프레임마다 호출하면 불필요한 동기화 오버헤드가 발생한다.
+        try:
+            cv2.setNumThreads(DEFAULT_RESOURCE_POLICY.opencv_threads)
+        except Exception:
+            pass
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers)
         self._stop_event = False
 
     def _fetch_one(self, idx):
         if self._stop_event:
             return idx, None, None
-        try:
-            cv2.setNumThreads(DEFAULT_RESOURCE_POLICY.opencv_threads)
-        except Exception:
-            pass
         depth = self.dataset.get_depth(idx)
         color = None if self.no_color else self.dataset.get_rgb_tensor(idx)
         return idx, depth, color
@@ -280,7 +318,14 @@ def reconstruct(
         if assoc_summary.warning:
             print(f"⚠️ [TSDF Warning] {assoc_summary.warning}")
 
+    # Device selection: CUDA 우선 (실측 integrate 10x), 가용 VRAM 부족 시 CPU 폴백.
+    # CUDA 통합 중 OOM이 나면 CPU로 전체 재시도한다 (_integrate_frames의 반환값 참고).
     device = o3c.Device("CPU:0")
+    vram_budget_gb = float(getattr(DEFAULT_RESOURCE_POLICY, "gpu_vram_budget_gb", 4.0))
+    if not no_gpu and _cuda_available():
+        free_mb = _query_vram_free_mb()
+        if free_mb is None or free_mb >= 3072.0:
+            device = o3c.Device("CUDA:0")
     print(f"🖥️ TSDF Device: {device}, Voxel: {voxel_size*1000:.1f}mm, Total Frames: {len(dataset)}")
 
     intr = dataset.intrinsics
@@ -293,6 +338,13 @@ def reconstruct(
     bc = int(block_count) if block_count and block_count > 0 else _estimate_block_count(
         poses, voxel_size, depth_max, no_color=no_color
     )
+    if device.get_type() == o3c.Device.DeviceType.CUDA:
+        # VRAM 예산 상한: 활성 데이터 + 재해싱 일시 스파이크를 고려해 예산 내로 캡.
+        # 과소 시 hashmap이 자동 확장되므로 품질 영향은 없다.
+        max_by_vram = int(vram_budget_gb * 1e9 / _bytes_per_block(no_color))
+        if bc > max_by_vram:
+            print(f"🧮 block_count capped by VRAM budget ({vram_budget_gb:.1f}GB): {bc:,} -> {max_by_vram:,}")
+            bc = max_by_vram
     if block_count and block_count > 0:
         print(f"🧮 VoxelBlockGrid block_count (명시) = {bc:,} (~{bc * _bytes_per_block(no_color) / 1e9:.1f} GB)")
     else:
@@ -310,69 +362,84 @@ def reconstruct(
     # Frame filtering: filter only valid train frames with associated valid poses
     indices_to_integrate = set(train_indices) if train_indices is not None else set(range(len(dataset)))
 
-    integrated = 0
-    skipped = 0
-
     step_stride = max(1, int(stride))
     target_indices = [
         idx for idx in range(0, len(dataset), step_stride)
         if idx in indices_to_integrate and idx in poses and poses[idx] is not None
     ]
 
-    prefetcher = AsyncFramePrefetcher(
-        dataset, target_indices, no_color=no_color,
-        max_workers=DEFAULT_RESOURCE_POLICY.frame_prefetch_workers,
-        prefetch_size=DEFAULT_RESOURCE_POLICY.frame_prefetch_depth
-    )
+    def _integrate_on(vbg_grid, tgt_device):
+        """프레임 통합 루프. CUDA OOM 등 디바이스 오류 시 예외를 재발생시켜 상위에서 폴백 판단."""
+        integrated = 0
+        skipped = 0
+        t_coords_total = 0.0
+        t_integrate_total = 0.0
 
-    t_coords_total = 0.0
-    t_integrate_total = 0.0
+        prefetcher = AsyncFramePrefetcher(
+            dataset, target_indices, no_color=no_color,
+            max_workers=DEFAULT_RESOURCE_POLICY.frame_prefetch_workers,
+            prefetch_size=DEFAULT_RESOURCE_POLICY.frame_prefetch_depth
+        )
+        try:
+            for idx, depth, color_rgb in prefetcher:
+                if idx not in poses or poses[idx] is None or depth is None:
+                    skipped += 1
+                    continue
 
-    t0 = time.time()
-    try:
-        for idx, depth, color_rgb in prefetcher:
-            if idx not in poses or poses[idx] is None or depth is None:
-                skipped += 1
-                continue
+                T_world_cam = poses[idx]
+                # Open3D extrinsic: world to camera (using fast SE(3) inversion)
+                extrinsic = _fast_inv_se3(T_world_cam)
 
-            T_world_cam = poses[idx]
-            # Open3D extrinsic: world to camera (using fast SE(3) inversion)
-            extrinsic = _fast_inv_se3(T_world_cam)
+                if depth_min > 0:
+                    min_mm = int(depth_min * 1000.0)
+                    depth[depth < min_mm] = 0
 
-            if depth_min > 0:
-                min_mm = int(depth_min * 1000.0)
-                depth[depth < min_mm] = 0
+                depth_t = o3d.t.geometry.Image(o3c.Tensor(np.ascontiguousarray(depth), device=tgt_device))
+                extrinsic_t = o3c.Tensor(extrinsic.astype(np.float64))
 
-            depth_t = o3d.t.geometry.Image(o3c.Tensor(np.asarray(depth, dtype=np.uint16), device=device))
-            extrinsic_t = o3c.Tensor(extrinsic.astype(np.float64))
-
-            t_c0 = time.time()
-            try:
-                coords = vbg.compute_unique_block_coordinates(
+                t_c0 = time.time()
+                coords = vbg_grid.compute_unique_block_coordinates(
                     depth_t, intrinsic_t, extrinsic_t, depth_scale=1000.0,
                     depth_max=depth_max, trunc_voxel_multiplier=trunc_mult
                 )
-            except Exception:
-                skipped += 1
-                continue
-            t_coords_total += (time.time() - t_c0)
+                t_coords_total += (time.time() - t_c0)
 
-            t_i0 = time.time()
-            if no_color or color_rgb is None:
-                vbg.integrate(coords, depth_t, intrinsic_t, extrinsic_t,
-                              depth_scale=1000.0, depth_max=depth_max,
-                              trunc_voxel_multiplier=trunc_mult)
-            else:
-                color_t = o3d.t.geometry.Image(o3c.Tensor(np.asarray(color_rgb, dtype=np.uint8), device=device))
-                vbg.integrate(coords, depth_t, color_t, intrinsic_t, intrinsic_t,
-                              extrinsic_t, depth_scale=1000.0, depth_max=depth_max,
-                              trunc_voxel_multiplier=trunc_mult)
-            t_integrate_total += (time.time() - t_i0)
-            integrated += 1
-            if integrated % 30 == 0:
-                print(f"  integrate {integrated}/{len(target_indices)} frames")
-    finally:
-        prefetcher.shutdown()
+                t_i0 = time.time()
+                if no_color or color_rgb is None:
+                    vbg_grid.integrate(coords, depth_t, intrinsic_t, extrinsic_t,
+                                       depth_scale=1000.0, depth_max=depth_max,
+                                       trunc_voxel_multiplier=trunc_mult)
+                else:
+                    color_t = o3d.t.geometry.Image(o3c.Tensor(np.asarray(color_rgb, dtype=np.uint8), device=tgt_device))
+                    vbg_grid.integrate(coords, depth_t, color_t, intrinsic_t, intrinsic_t,
+                                       extrinsic_t, depth_scale=1000.0, depth_max=depth_max,
+                                       trunc_voxel_multiplier=trunc_mult)
+                t_integrate_total += (time.time() - t_i0)
+                integrated += 1
+                if integrated % 100 == 0:
+                    print(f"  integrate {integrated}/{len(target_indices)} frames")
+        finally:
+            prefetcher.shutdown()
+        return integrated, skipped, t_coords_total, t_integrate_total
+
+    t0 = time.time()
+    try:
+        integrated, skipped, t_coords_total, t_integrate_total = _integrate_on(vbg, device)
+    except Exception as cuda_err:
+        if device.get_type() != o3c.Device.DeviceType.CUDA:
+            raise
+        print(f"⚠️ CUDA TSDF 실패 ({type(cuda_err).__name__}: {str(cuda_err)[:200]}) → CPU 폴백 재시도")
+        del vbg
+        gc.collect()
+        device = o3c.Device("CPU:0")
+        vbg = o3d.t.geometry.VoxelBlockGrid(
+            attr_names=('tsdf', 'weight', 'color'),
+            attr_dtypes=(o3c.float32, o3c.float32, o3c.float32),
+            attr_channels=((1,), (1,), (3,)),
+            voxel_size=voxel_size, block_resolution=16,
+            block_count=bc, device=device
+        )
+        integrated, skipped, t_coords_total, t_integrate_total = _integrate_on(vbg, device)
 
     t_loop_total = time.time() - t0
     print(f"✅ TSDF 적분 완료 ({t_loop_total:.2f}s: Coords={t_coords_total:.2f}s, Integrate={t_integrate_total:.2f}s): {integrated} frames integrated (skipped {skipped})")
@@ -383,35 +450,18 @@ def reconstruct(
         mesh = o3d.geometry.TriangleMesh()
         pcd = o3d.geometry.PointCloud()
     else:
-        try:
-            vbg_cpu = vbg.to(o3c.Device("CPU:0"))
-        except Exception as e:
-            print(f"  ⚠️ Device CPU copy notice: {e}")
-            vbg_cpu = vbg
-
-        # ── Point Cloud 추출 + 즉시 저장 ──
-        print("  • PointCloud 추출 중...")
-        try:
-            pcd_t = vbg_cpu.extract_point_cloud(weight_threshold=weight_thr)
-            pcd = pcd_t.to_legacy()
-        except Exception as e:
-            print(f"  ⚠️ extract_point_cloud 실패: {e}. 빈 PointCloud 사용.")
-            pcd = o3d.geometry.PointCloud()
-
-        t_io0 = time.time()
-        if output_pcd:
-            os.makedirs(os.path.dirname(os.path.abspath(output_pcd)), exist_ok=True)
-            o3d.io.write_point_cloud(output_pcd, pcd)
-            print(f"☁️ PointCloud 저장: {output_pcd}")
-        t_io_pcd = time.time() - t_io0
+        # ── 디바이스에서 직접 추출 후 결과(정점/삼각형)만 호스트로 전송 ──
+        # 전체 그리드를 호스트로 복사(vbg.to(CPU))하면 사전할당 용량 전체가 RSS로
+        # 승격되어 수 GB 스파이크가 발생하므로 금지 (실측: +12GB, 2026-08-24).
 
         # ── Triangle Mesh 추출 ──
-        print("  • Triangle Mesh 추출 중...")
         mesh = o3d.geometry.TriangleMesh()
         if output_mesh:
             try:
-                mesh_t = vbg_cpu.extract_triangle_mesh(weight_threshold=weight_thr)
+                mesh_t = vbg.extract_triangle_mesh(weight_threshold=weight_thr)
                 mesh = mesh_t.to_legacy()
+                del mesh_t
+                gc.collect()
                 if len(mesh.vertices) > 0 and len(mesh.triangles) > 0:
                     mesh.remove_degenerate_triangles()
                     mesh.remove_duplicated_triangles()
@@ -421,13 +471,34 @@ def reconstruct(
                 raise RuntimeError(f"TSDF direct mesh extraction failed: {e}") from e
 
             print(f"🔺 Mesh 결과: {len(mesh.vertices):,} vertices / {len(mesh.triangles):,} triangles")
-            print(f"☁️ PointCloud 결과: {len(pcd.points):,} points")
 
-            t_io0 = time.time()
+        # ── Point Cloud 추출 + 즉시 저장 ──
+        print("  • PointCloud 추출 중...")
+        pcd = o3d.geometry.PointCloud()
+        try:
+            pcd_t = vbg.extract_point_cloud(weight_threshold=weight_thr)
+            pcd = pcd_t.to_legacy()
+            del pcd_t
+            gc.collect()
+        except Exception as e:
+            print(f"  ⚠️ extract_point_cloud 실패: {e}. 빈 PointCloud 사용.")
+            pcd = o3d.geometry.PointCloud()
+
+        print(f"☁️ PointCloud 결과: {len(pcd.points):,} points")
+
+        # 그리드 해제 후 디스크 I/O 수행 (호스트 메모리 피크 최소화)
+        del vbg
+        gc.collect()
+
+        if output_pcd:
+            os.makedirs(os.path.dirname(os.path.abspath(output_pcd)), exist_ok=True)
+            o3d.io.write_point_cloud(output_pcd, pcd)
+            print(f"☁️ PointCloud 저장: {output_pcd}")
+
+        if output_mesh and len(mesh.vertices) > 0:
             os.makedirs(os.path.dirname(os.path.abspath(output_mesh)), exist_ok=True)
             o3d.io.write_triangle_mesh(output_mesh, mesh)
             print(f"💾 Mesh 저장: {output_mesh}")
-            t_io_mesh = time.time() - t_io0
 
     t_total_elapsed = time.time() - t_start_total
     print(f"⏱️ [TSDF Total] {t_total_elapsed:.2f}s (Loop: {t_loop_total:.2f}s, Extract+IO: {time.time()-t_extract0:.2f}s)")

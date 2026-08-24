@@ -132,7 +132,8 @@ def compute_plane_quality_metrics(
 ) -> dict:
     """실내 환경 주요 평면(벽, 바닥) 검출 및 평면 오차(Planar Residual) 통계 계산."""
     if isinstance(mesh_or_pcd, o3d.geometry.TriangleMesh):
-        pcd = mesh_or_pcd.sample_points_uniformly(number_of_points=min(len(mesh_or_pcd.vertices) * 2, 50000))
+        # 대형 메쓰(수백만 정점)의 uniform sampling은 수십 초 소요 -> 30k로 상한 (2026-08-24)
+        pcd = mesh_or_pcd.sample_points_uniformly(number_of_points=min(len(mesh_or_pcd.vertices) * 2, 30000))
     elif isinstance(mesh_or_pcd, np.ndarray):
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(mesh_or_pcd)

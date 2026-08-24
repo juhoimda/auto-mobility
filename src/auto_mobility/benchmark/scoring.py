@@ -55,8 +55,8 @@ class HardGateFilter:
     @staticmethod
     def evaluate(summary: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
         """Returns (is_valid, failure_reason)."""
-        status = summary.get("status") or summary.get("overall_status")
-        if status in ("FAIL", "FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "FAIL_EXCEPTION",
+        status = summary.get("status")
+        if status in ("FAIL_CRASH", "FAIL_SEGFAULT", "FAIL_OOM", "FAIL_TIMEOUT", "FAIL_EXCEPTION",
                       "FAIL_TRAJECTORY", "FAIL_ALIGNMENT", "FAIL_RESOURCE", "SKIPPED_UNAVAILABLE", "BLOCKED", "NOT_EVALUATED"):
             return False, f"Candidate execution status was {status}: {summary.get('error', 'N/A')}"
 

@@ -19,6 +19,7 @@ import time
 import copy
 import json
 import hashlib
+import concurrent.futures
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple, Union
 
@@ -964,9 +965,15 @@ class SearchEngine:
         top_fusion_pipelines: List[dict],
         trajectories: Dict[str, str]
     ) -> Tuple[List[dict], List[dict]]:
-        """Runs Phase C Surface exploration with unsimplified fair baseline and selects Top-3 Finalists."""
+        """Runs Phase C Surface exploration with unsimplified fair baseline and selects Top-3 Finalists.
+
+        Surface worker(서브프로세스)는 파이프라인당 최대 2개까지 병렬 선실행한다.
+        각 워커는 6 OMP 스레드 상한을 유지하므로 총 12T <= 16 core이며, 메모리 추정 합
+        (worst-case alpha 2회 ~12GB)도 process budget 내에 있다. 평가(evaluate_reconstruction)
+        는 결정적 순서 보장을 위해 순차 실행한다.
+        """
         print("\n==========================================================")
-        print(f" 🚀 [PHASE C] Surface Reconstruction Exploration (across {len(top_fusion_pipelines)} Fusion Pipelines, Mode: {self.mode.upper()})")
+        print(f" 🚀 [PHASE C] Surface Reconstruction Exploration (across {len(top_fusion_pipelines)} Fusion Pipelines, Mode: {self.mode.upper()}, Workers: 2-way)")
         print("==========================================================")
 
         surface_eval_results: List[dict] = []
@@ -988,6 +995,8 @@ class SearchEngine:
             v_mm = int(round(voxel_m * 1000))
             pcd_file = pipe_summary.get("pcd_path") or str(self.artifact_mgr.get_pcd_path(slam_backend, v_mm))
 
+            # ── Prepare: 후보별 컨텍스트/캐시 판정을 먼저 확정한다 ──
+            jobs: List[dict] = []
             for sm in all_methods:
                 if fusion_method == "direct_pointcloud" and sm == "tsdf_direct":
                     continue
@@ -1012,115 +1021,179 @@ class SearchEngine:
                 )
                 spec_hash = spec.compute_spec_hash()
 
-                print(f"▶️ Evaluating Surface Method: {cand_name}")
+                job = {
+                    "sm": sm, "cand_name": cand_name, "mesh_out": mesh_out, "meta_out": meta_out,
+                    "eval_dir": eval_dir, "spec": spec, "spec_hash": spec_hash,
+                    "action": "worker", "w_res": None, "pcd_missing": False,
+                }
 
                 # If TSDF direct, use TSDF direct mesh directly
                 if sm == "tsdf_direct" and pipe_summary.get("direct_tsdf_mesh_path") and Path(pipe_summary["direct_tsdf_mesh_path"]).exists():
+                    job["action"] = "reuse_tsdf_direct"
+                elif self.artifact_mgr.should_reuse_evaluation(
+                    cand_name, self.force, expected_spec_hash=spec_hash,
+                    dataset_fingerprint=self.dataset_fingerprint, split_hash=self.split_hash
+                ):
+                    job["action"] = "reuse_cache"
+                elif self.artifact_mgr.should_reuse_reconstruction(
+                    mesh_out, None, candidate_spec=spec, dataset_fingerprint=self.dataset_fingerprint,
+                    trajectory_sha256=compute_file_sha256(traj_path), split_hash=self.split_hash, meta_path=meta_out, force=self.force
+                ):
+                    job["action"] = "reuse_mesh"
+                elif not is_artifact_valid(pcd_file):
+                    job["action"] = "skip_missing_pcd"
+
+                jobs.append(job)
+
+            # ── Parallel pre-pass: worker가 필요한 후보를 2-way로 동시 생성 ──
+            run_jobs = [j for j in jobs if j["action"] == "worker"]
+            if len(run_jobs) > 1:
+                print(f"⚡ [Phase C] {len(run_jobs)} surface workers 병렬 실행 (2-way)")
+
+            def _exec_surface_worker(job: dict):
+                return run_surface_worker(
+                    input_ply=str(pcd_file),
+                    output_mesh=str(job["mesh_out"]),
+                    method=job["sm"],
+                    voxel=voxel_m,
+                    depth=8,
+                    simplify=0.0,
+                    no_simplify=True,
+                    no_color_transfer=True
+                )
+
+            if run_jobs:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                    future_map = {executor.submit(_exec_surface_worker, j): j for j in run_jobs}
+                    for fut in concurrent.futures.as_completed(future_map):
+                        j = future_map[fut]
+                        try:
+                            j["w_res"] = fut.result()
+                        except Exception as exc:
+                            j["w_res"] = None
+                            j["worker_exception"] = str(exc)
+                        name = j["w_res"].status if j["w_res"] else "EXCEPTION"
+                        print(f"  ⚙️ surface worker done: {j['cand_name']} ({name})")
+
+            # ── Evaluate (결정적 순서, 순차) ──
+            for job in jobs:
+                sm = job["sm"]
+                cand_name = job["cand_name"]
+                mesh_out = job["mesh_out"]
+                spec = job["spec"]
+                surf_t = 0.0
+                w_res = job.get("w_res")
+
+                if job["action"] == "reuse_tsdf_direct":
                     tsdf_dir_summary = copy.deepcopy(pipe_summary)
                     tsdf_dir_summary["candidate_name"] = cand_name
                     tsdf_dir_summary["surface_method"] = "tsdf_direct"
                     tsdf_dir_summary["mesh_path"] = pipe_summary["direct_tsdf_mesh_path"]
                     tsdf_dir_summary["spec"] = spec.to_metadata_dict()
+                    tsdf_dir_summary["spec_hash"] = job["spec_hash"]
+                    tsdf_dir_summary["dataset_fingerprint"] = self.dataset_fingerprint
+                    tsdf_dir_summary["split_hash"] = self.split_hash
                     self.stats["cached_count"] += 1
                     self._log_decision("Phase C (Surface)", cand_name, "REUSED_TSDF_DIRECT", "Reused direct TSDF mesh")
                     surface_eval_results.append(tsdf_dir_summary)
                     continue
 
-                cached_summary = self.artifact_mgr.should_reuse_evaluation(
-                    cand_name, self.force, expected_spec_hash=spec_hash,
-                    dataset_fingerprint=self.dataset_fingerprint, split_hash=self.split_hash
-                )
-                if cached_summary:
-                    print(f"⏭️ Evaluation 재사용: {cand_name}")
-                    cached_summary["surface_method"] = sm
-                    cached_summary["fusion_method"] = fusion_method
-                    cached_summary["voxel_size_m"] = voxel_m
-                    cached_summary["spec"] = spec.to_metadata_dict()
-                    cached_summary["trajectory_path"] = traj_path
-                    self.stats["cached_count"] += 1
-                    self._log_decision("Phase C (Surface)", cand_name, "REUSED_CACHE", "Reused evaluation from cache")
-                    surface_eval_results.append(cached_summary)
-                    continue
-
-                surf_t = 0.0
-                if self.artifact_mgr.should_reuse_reconstruction(
-                    mesh_out, None, candidate_spec=spec, dataset_fingerprint=self.dataset_fingerprint,
-                    trajectory_sha256=compute_file_sha256(traj_path), split_hash=self.split_hash, meta_path=meta_out, force=self.force
-                ):
-                    print(f"⏭️ Mesh 재사용: {mesh_out.name}")
-                    self._log_decision("Phase C (Surface)", cand_name, "REUSED_MESH", "Reused existing surface mesh")
-                else:
-                    if not is_artifact_valid(pcd_file):
-                        print(f"  ❌ PCD missing for surface worker: {pcd_file}")
+                if job["action"] == "reuse_cache":
+                    cached_summary = self.artifact_mgr.should_reuse_evaluation(
+                        cand_name, self.force, expected_spec_hash=job["spec_hash"],
+                        dataset_fingerprint=self.dataset_fingerprint, split_hash=self.split_hash
+                    )
+                    if cached_summary:
+                        print(f"⏭️ Evaluation 재사용: {cand_name}")
+                        cached_summary["surface_method"] = sm
+                        cached_summary["fusion_method"] = fusion_method
+                        cached_summary["voxel_size_m"] = voxel_m
+                        cached_summary["spec"] = spec.to_metadata_dict()
+                        cached_summary["trajectory_path"] = traj_path
+                        self.stats["cached_count"] += 1
+                        self._log_decision("Phase C (Surface)", cand_name, "REUSED_CACHE", "Reused evaluation from cache")
+                        surface_eval_results.append(cached_summary)
                         continue
 
-                    w_res = run_surface_worker(
-                        input_ply=str(pcd_file),
-                        output_mesh=str(mesh_out),
-                        method=sm,
-                        voxel=voxel_m,
-                        depth=8,
-                        simplify=0.0,
-                        no_simplify=True,
-                        no_color_transfer=True
-                    )
-                    surf_t = w_res.runtime_sec
-                    self.stats["total_runtime_sec"] += surf_t
-                    if not w_res.is_success:
-                        print(f"  ❌ Surface {sm} 생성 실패: {w_res.status} ({w_res.error_message})")
-                        self._log_decision("Phase C (Surface)", cand_name, "FAILED", f"Surface worker failed: {w_res.status}")
-                        fail_rec = self._fail_summary(cand_name, w_res.error_message or "surface failure", status=w_res.status)
+                if job["action"] in ("reuse_mesh", "worker"):
+                    if job["action"] == "reuse_mesh":
+                        print(f"⏭️ Mesh 재사용: {mesh_out.name}")
+                        self._log_decision("Phase C (Surface)", cand_name, "REUSED_MESH", "Reused existing surface mesh")
+                    else:
+                        if w_res is None:
+                            err = job.get("worker_exception", "surface worker exception")
+                            print(f"  ❌ Surface {sm} 생성 실패: EXCEPTION ({err})")
+                            self._log_decision("Phase C (Surface)", cand_name, "FAILED", f"Surface worker exception: {err}")
+                            fail_rec = self._fail_summary(cand_name, err, status="FAIL_EXCEPTION")
+                            fail_rec["surface_method"] = sm
+                            fail_rec["fusion_method"] = fusion_method
+                            fail_rec["voxel_size_m"] = voxel_m
+                            fail_rec["spec"] = spec.to_metadata_dict()
+                            fail_rec["trajectory_path"] = traj_path
+                            surface_eval_results.append(fail_rec)
+                            continue
+
+                        surf_t = w_res.runtime_sec
+                        self.stats["total_runtime_sec"] += surf_t
+                        if not w_res.is_success:
+                            print(f"  ❌ Surface {sm} 생성 실패: {w_res.status} ({w_res.error_message})")
+                            self._log_decision("Phase C (Surface)", cand_name, "FAILED", f"Surface worker failed: {w_res.status}")
+                            fail_rec = self._fail_summary(cand_name, w_res.error_message or "surface failure", status=w_res.status)
+                            fail_rec["surface_method"] = sm
+                            fail_rec["fusion_method"] = fusion_method
+                            fail_rec["voxel_size_m"] = voxel_m
+                            fail_rec["spec"] = spec.to_metadata_dict()
+                            fail_rec["trajectory_path"] = traj_path
+                            if w_res.resources:
+                                fail_rec["resources"] = w_res.resources.to_dict()
+                            surface_eval_results.append(fail_rec)
+                            continue
+
+                        self.artifact_mgr.save_artifact_metadata(
+                            job["meta_out"], spec, self.dataset_fingerprint, compute_file_sha256(traj_path), self.split_hash
+                        )
+
+                    try:
+                        summary = evaluate_reconstruction(
+                            dataset_input=self.dataset,
+                            trajectory_input=traj_path,
+                            mesh_input=str(mesh_out),
+                            output_dir=job["eval_dir"],
+                            candidate_name=cand_name,
+                            split_json=str(self.split_file),
+                            runtime_sec=surf_t,
+                            cheap=True,
+                            max_holdout_samples=self.stage1_samples
+                        )
+                        summary["surface_method"] = sm
+                        summary["fusion_method"] = fusion_method
+                        summary["voxel_size_m"] = voxel_m
+                        summary["pcd_path"] = str(pcd_file)
+                        summary["mesh_path"] = str(mesh_out)
+                        summary["trajectory_path"] = traj_path
+                        summary["spec"] = spec.to_metadata_dict()
+                        summary["spec_hash"] = job["spec_hash"]
+                        summary["dataset_fingerprint"] = self.dataset_fingerprint
+                        summary["split_hash"] = self.split_hash
+                        if w_res is not None and w_res.resources:
+                            summary["resources"] = w_res.resources.to_dict()
+                        self.stats["evaluated_count"] += 1
+                        self._log_decision("Phase C (Surface)", cand_name, "EXECUTED", "Evaluated surface candidate")
+                        surface_eval_results.append(summary)
+                    except Exception as e:
+                        print(f"❌ Phase C {cand_name} 평가 실패: {e}")
+                        self._log_decision("Phase C (Surface)", cand_name, "FAILED", f"Surface eval exception: {str(e)}")
+                        fail_rec = self._fail_summary(cand_name, str(e), status="FAIL_EXCEPTION")
                         fail_rec["surface_method"] = sm
                         fail_rec["fusion_method"] = fusion_method
                         fail_rec["voxel_size_m"] = voxel_m
                         fail_rec["spec"] = spec.to_metadata_dict()
                         fail_rec["trajectory_path"] = traj_path
-                        if w_res.resources:
-                            fail_rec["resources"] = w_res.resources.to_dict()
                         surface_eval_results.append(fail_rec)
-                        continue
 
-                    self.artifact_mgr.save_artifact_metadata(
-                        meta_out, spec, self.dataset_fingerprint, compute_file_sha256(traj_path), self.split_hash
-                    )
-
-                try:
-                    summary = evaluate_reconstruction(
-                        dataset_input=self.dataset,
-                        trajectory_input=traj_path,
-                        mesh_input=str(mesh_out),
-                        output_dir=eval_dir,
-                        candidate_name=cand_name,
-                        split_json=str(self.split_file),
-                        runtime_sec=surf_t,
-                        cheap=True,
-                        max_holdout_samples=self.stage1_samples
-                    )
-                    summary["surface_method"] = sm
-                    summary["fusion_method"] = fusion_method
-                    summary["voxel_size_m"] = voxel_m
-                    summary["pcd_path"] = str(pcd_file)
-                    summary["mesh_path"] = str(mesh_out)
-                    summary["trajectory_path"] = traj_path
-                    summary["spec"] = spec.to_metadata_dict()
-                    summary["spec_hash"] = spec_hash
-                    summary["dataset_fingerprint"] = self.dataset_fingerprint
-                    summary["split_hash"] = self.split_hash
-                    if 'w_res' in locals() and w_res.resources:
-                        summary["resources"] = w_res.resources.to_dict()
-                    self.stats["evaluated_count"] += 1
-                    self._log_decision("Phase C (Surface)", cand_name, "EXECUTED", "Evaluated surface candidate")
-                    surface_eval_results.append(summary)
-                except Exception as e:
-                    print(f"❌ Phase C {cand_name} 평가 실패: {e}")
-                    self._log_decision("Phase C (Surface)", cand_name, "FAILED", f"Surface eval exception: {str(e)}")
-                    fail_rec = self._fail_summary(cand_name, str(e), status="FAIL_EXCEPTION")
-                    fail_rec["surface_method"] = sm
-                    fail_rec["fusion_method"] = fusion_method
-                    fail_rec["voxel_size_m"] = voxel_m
-                    fail_rec["spec"] = spec.to_metadata_dict()
-                    fail_rec["trajectory_path"] = traj_path
-                    surface_eval_results.append(fail_rec)
+                elif job["action"] == "skip_missing_pcd":
+                    print(f"  ❌ PCD missing for surface worker: {pcd_file}")
+                    self.stats["total_candidates"] -= 1
 
         # Rank Phase C candidates to select Top-3 Finalists for Full Rebuild
         ranked_c = rank_candidate_summaries(surface_eval_results)

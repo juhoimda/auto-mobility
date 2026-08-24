@@ -138,3 +138,34 @@ def test_tsdf_nocolor_extraction_safety():
     pcd_t = vbg.extract_point_cloud(weight_threshold=0.1)
     pcd = pcd_t.to_legacy()
     assert isinstance(pcd, o3d.geometry.PointCloud)
+
+
+def test_monitored_subprocess_memory_guard_termination():
+    """Verify that a runaway memory consumer is safely killed by the memory watchdog without orphan processes."""
+    # Policy with 0.05 GB (50 MB) budget
+    low_mem_policy = ResourcePolicy(process_memory_budget_gb=0.05, system_ram_reserve_gb=0.0)
+    
+    # Subprocess that allocates ~150 MB and holds it
+    cmd = [
+        sys.executable, "-c",
+        "import time, numpy as np; a = np.ones((20000, 2000), dtype=np.float64); time.sleep(5.0)"
+    ]
+    rc, stdout, stderr, usage = run_monitored_subprocess(cmd, timeout=10, sample_interval=0.05, policy=low_mem_policy)
+    
+    assert rc == -9
+    assert "KILLED_BY_RESOURCE_GUARD" in stderr
+    assert "exceeded policy budget" in stderr
+    assert usage.peak_rss_mb > 40.0
+
+
+def test_monitored_subprocess_timeout_process_tree():
+    """Verify that a timing out process and its children are killed without leaving orphan processes."""
+    cmd = [
+        sys.executable, "-c",
+        "import time, subprocess, sys; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); time.sleep(60)"
+    ]
+    rc, stdout, stderr, usage = run_monitored_subprocess(cmd, timeout=1, sample_interval=0.05)
+    
+    assert rc == -15
+    assert "timed out after 1s" in stderr
+

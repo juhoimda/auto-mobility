@@ -11,6 +11,9 @@ Trajectory (TUM format)와 RGB-D Frame Timestamp 정밀 매칭 및 보간 모듈
 
 import os
 import csv
+import hashlib
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Union
 import numpy as np
@@ -51,8 +54,50 @@ def associate_trajectory_to_frames(
 ) -> Tuple[Dict[int, np.ndarray], List[PoseAssociationResult], AssociationSummary]:
     """Frame timestamps와 Trajectory 간 timestamp 매칭 및 SLERP 보간 수행.
 
+    동일 (timestamps, trajectory 내용, 파라미터) 조합의 반복 호출은 결과를 재사용한다.
+    benchmark는 후보마다 evaluator/reconstruct가 동일 궤적에 대해 이 함수를 반복 호출하므로
+    SLERP 전체 재계산(O(F log P))을 생략할 수 있다.
+
+    주의: 반환된 dict/list는 캐시된 객체이므로 수정하지 않는다 (read-only 계약).
+    """
+    frame_stamps = np.ascontiguousarray(frame_timestamps, dtype=np.float64)
+    h = hashlib.sha1()
+    h.update(frame_stamps.tobytes())
+    h.update(np.ascontiguousarray(trajectory.timestamps, dtype=np.float64).tobytes())
+    h.update(np.ascontiguousarray(trajectory.positions, dtype=np.float64).tobytes())
+    h.update(np.ascontiguousarray(trajectory.orientations, dtype=np.float64).tobytes())
+    key = (h.hexdigest(), len(trajectory), float(max_pose_gap_ms), bool(enable_interpolation))
+
+    with _ASSOC_CACHE_LOCK:
+        cached = _ASSOC_CACHE.get(key)
+        if cached is not None:
+            _ASSOC_CACHE.move_to_end(key)
+            return cached
+
+    result = _associate_trajectory_to_frames_impl(frame_stamps, trajectory, max_pose_gap_ms, enable_interpolation)
+
+    with _ASSOC_CACHE_LOCK:
+        _ASSOC_CACHE[key] = result
+        while len(_ASSOC_CACHE) > _ASSOC_CACHE_MAX:
+            _ASSOC_CACHE.popitem(last=False)
+    return result
+
+
+_ASSOC_CACHE_MAX = 8
+_ASSOC_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
+_ASSOC_CACHE_LOCK = threading.Lock()
+
+
+def _associate_trajectory_to_frames_impl(
+    frame_stamps: np.ndarray,
+    trajectory: Trajectory,
+    max_pose_gap_ms: float = 50.0,
+    enable_interpolation: bool = True
+) -> Tuple[Dict[int, np.ndarray], List[PoseAssociationResult], AssociationSummary]:
+    """Frame timestamps와 Trajectory 간 timestamp 매칭 및 SLERP 보간 수행 (캐시 없는 본체).
+
     Args:
-        frame_timestamps: (N,) float 초 단위 프레임 타임스탬프 리스트 또는 배열
+        frame_stamps: (N,) float64 초 단위 프레임 타임스탬프 배열
         trajectory: Trajectory 객체 (TUM 형식: timestamp, x,y,z, qx,qy,qz,qw)
         max_pose_gap_ms: 허용 최대 타임스탬프 오차 (ms)
         enable_interpolation: 두 포즈 사이 시간인 경우 선형 보간 + SLERP 수행 여부
@@ -62,7 +107,6 @@ def associate_trajectory_to_frames(
         records: List[PoseAssociationResult]
         summary: AssociationSummary
     """
-    frame_stamps = np.asarray(frame_timestamps, dtype=np.float64)
     n_frames = len(frame_stamps)
 
     if len(trajectory) == 0:

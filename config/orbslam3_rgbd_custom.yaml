@@ -18,7 +18,7 @@ Stereo.ThDepth: 40.0
 Stereo.b: 0.0745
 RGBD.DepthMapFactor: 1000.0
 
-ORBextractor.nFeatures: 1500
+ORBextractor.nFeatures: 2000
 ORBextractor.scaleFactor: 1.2
 ORBextractor.nLevels: 8
 ORBextractor.iniThFAST: 15
