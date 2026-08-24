@@ -117,18 +117,43 @@ def get_trajectory_meta_path(trajectory_path: Union[str, Path]) -> Path:
     return p.parent / f"{p.stem}.meta.json"
 
 
+def count_tum_poses(trajectory_path: Union[str, Path]) -> int:
+    """Counts valid pose rows (non-comment, >= 8 columns) in a TUM trajectory file."""
+    p = Path(trajectory_path)
+    if not p.exists():
+        return 0
+    count = 0
+    try:
+        with open(p, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if len(line.split()) >= 8:
+                    count += 1
+    except OSError:
+        return 0
+    return count
+
+
 def save_trajectory_metadata(
     trajectory_path: Union[str, Path],
     profile_spec: SlamProfileSpec,
     bag_fingerprint: str = "unknown",
     slam_config_hash: str = "unknown",
     git_commit: str = "unknown",
-    pose_count: int = 0
+    pose_count: Optional[int] = None
 ) -> Path:
-    """Saves trajectory provenance metadata alongside the TUM trajectory file."""
+    """Saves trajectory provenance metadata alongside the TUM trajectory file.
+
+    If pose_count is None (default), it is counted automatically from the
+    trajectory file so the metadata always reflects actual content.
+    """
     traj_path = Path(trajectory_path)
     meta_path = get_trajectory_meta_path(traj_path)
     traj_sha = compute_file_sha256(traj_path) if traj_path.exists() else "missing"
+    if pose_count is None:
+        pose_count = count_tum_poses(traj_path)
 
     meta = {
         "candidate_key": profile_spec.candidate_key,
