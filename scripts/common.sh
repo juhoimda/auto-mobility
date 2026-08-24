@@ -127,6 +127,10 @@ if [ -z "${RMW_IMPLEMENTATION:-}" ]; then
     RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 fi
 export RMW_IMPLEMENTATION
+
+# CycloneDDS IP 동적 동기화 (WSL ↔ Windows 간 IP 자동 매핑)
+python3 "$PROJECT_DIR/scripts/utils/sync_dds_config.py" 2>/dev/null || true
+
 # CycloneDDS 설정 파일 (Windows와의 정적 피어 포함). 없으면 기본(멀티캐스트)으로 동작.
 if [ -z "${CYCLONEDDS_URI:-}" ] && [ -f "$PROJECT_DIR/config/dds/cyclonedds_camera.xml" ]; then
     export CYCLONEDDS_URI="file://$PROJECT_DIR/config/dds/cyclonedds_camera.xml"

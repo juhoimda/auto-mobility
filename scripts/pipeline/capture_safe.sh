@@ -68,7 +68,10 @@ start_windows_camera() {
         echo "  ... 카메라 토픽 대기 중 (${i}/20)"
         sleep 1
     done
-    echo "❌ 카메라 토픽이 20초 내 감지되지 않았습니다. camera_guard.ps1(watcher) 확인."
+    echo "❌ 카메라 토픽이 20초 내 감지되지 않았습니다."
+    echo "💡 해결 방법 (아래 중 하나 실행):"
+    echo "   1) Windows 바탕화면의 [카메라_가드_시작.bat] 또는 C:\\ros2_humble\\start_camera_guard.vbs 실행"
+    echo "   2) 또는 Windows 바탕화면의 [카메라_직접_실행.bat] 실행"
     return 1
 }
 

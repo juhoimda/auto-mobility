@@ -54,23 +54,29 @@ class TestMeshOpen3DUnit(unittest.TestCase):
             self.assertTrue(os.path.exists(obj_path))
 
     def test_cgal_polygonal_surface_reconstruction(self):
-        from auto_mobility.mesh.cgal_surface import reconstruct_cgal_polygonal, is_cgal_available
-        
-        # Synthetic box/cube room point cloud
+        """CGAL 미설치 환경의 planar-proxy 폴백 분기를 검증한다 (외부 바이너리 비의존).
+
+        실제 바이너리 경로는 third_party/installed/bin 설치 후 통합 레벨에서 검증.
+        """
+        from unittest.mock import patch
+        import auto_mobility.mesh.cgal_surface as cgal_surface
+
         box = o3d.geometry.TriangleMesh.create_box(width=2.0, height=2.0, depth=2.0)
         pcd = box.sample_points_poisson_disk(number_of_points=500)
-        
+
         with tempfile.TemporaryDirectory() as tmpdir:
             obj_path = os.path.join(tmpdir, "cgal_room.obj")
-            mesh = reconstruct_cgal_polygonal(pcd, obj_path)
+            with patch.object(cgal_surface, "is_cgal_available", return_value=(False, "patched for unit test")):
+                mesh = cgal_surface.reconstruct_cgal_polygonal(pcd, obj_path)
             self.assertTrue(os.path.exists(obj_path))
             self.assertGreater(len(mesh.triangles), 0)
             self.assertGreater(len(mesh.vertices), 0)
 
             # Empty cloud handling
             empty_pcd = o3d.geometry.PointCloud()
-            with self.assertRaises(ValueError):
-                reconstruct_cgal_polygonal(empty_pcd, os.path.join(tmpdir, "empty.obj"))
+            with patch.object(cgal_surface, "is_cgal_available", return_value=(False, "patched for unit test")):
+                with self.assertRaises(ValueError):
+                    cgal_surface.reconstruct_cgal_polygonal(empty_pcd, os.path.join(tmpdir, "empty.obj"))
 
 
 if __name__ == "__main__":

@@ -90,11 +90,18 @@ def test_timeout_isolation_in_tsdf_worker(mock_subproc):
 
 @patch("auto_mobility.benchmark.workers.is_cgal_available", return_value=(False, "CGAL binary not found"))
 def test_cgal_skipped_unavailable_when_missing(mock_cgal):
+    # 참고: SKIPPED_UNAVAILABLE 분기는 서브프로세스(worker_surface.py) 안에서
+    # 실제 바이너리 부재에 의해 결정된다. 이 테스트는 패치와 무관하게 실제 환경에서
+    # 바이너리가 없을 때만 스킵 경로를 단정할 수 있다.
+    from auto_mobility.mesh.cgal_surface import is_cgal_available as _real_avail
     result = run_surface_worker(
         input_ply="/fake/cloud.ply",
         output_mesh="/fake/mesh.obj",
         method="cgal_polygonal"
     )
+    if _real_avail()[0]:
+        assert not result.is_success  # 실행 시도했으나 /fake 입력이라 실패가 정상
+        return
     assert result.status == WorkerStatus.SKIPPED_UNAVAILABLE
     assert result.returncode == 2
     assert not result.is_success
