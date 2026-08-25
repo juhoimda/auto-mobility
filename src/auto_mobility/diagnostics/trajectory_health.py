@@ -258,9 +258,15 @@ def check_trajectory_health(
         cause = "EXTREME_BBOX"
         warnings.append(f"Excessive bounding box diagonal: {bbox_diag:.1f}m > {max_bbox_diagonal_m}m")
     elif step_max > max(max_step_physical_limit_m, step_p95 * relative_step_multiplier) and step_max > 2.0:
-        status = "FAIL_TRAJECTORY"
-        cause = "EXTREME_JUMP"
-        warnings.append(f"Extreme translation jump: {step_max:.2f}m (median: {step_med:.3f}m, P95: {step_p95:.3f}m)")
+        jump_ratio = isolated_jumps / max(n_poses - 1, 1)
+        if jump_ratio > 0.005 or isolated_jumps > 5:
+            status = "FAIL_TRAJECTORY"
+            cause = "EXTREME_JUMP"
+            warnings.append(f"Extreme translation jumps: {step_max:.2f}m ({isolated_jumps} jumps, {jump_ratio:.2%} of poses)")
+        else:
+            status = "WARN"
+            cause = "ISOLATED_JUMP"
+            warnings.append(f"Isolated translation jump(s): {step_max:.2f}m ({isolated_jumps} jump(s), {jump_ratio:.2%} of poses — allowing with WARN)")
     elif vel_max > max_velocity_physical_limit_mps:
         status = "FAIL_TRAJECTORY"
         cause = "EXTREME_VELOCITY"

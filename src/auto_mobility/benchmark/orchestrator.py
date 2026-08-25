@@ -61,22 +61,11 @@ SLAM_TRAJ_FILES = {
 
 SLAM_RUN_ARGS = {
     "rtab_dense_rate0.5": ("--slam=rtab", "--dense", "--rate=0.5"),
-    "rtab_dense_rate1.0": ("--slam=rtab", "--dense", "--rate=1.0"),
     "rtab_normal_rate0.5": ("--slam=rtab", "--rate=0.5"),
-    "rtab_normal_rate1.0": ("--slam=rtab", "--rate=1.0"),
     "orb_rgbd_rate0.5": ("--slam=orb_rgbd", "--rate=0.5"),
-    "orb_rgbd_rate1.0": ("--slam=orb_rgbd", "--rate=1.0"),
     "orb_rgbdi_rate0.5": ("--slam=orb_rgbdi", "--rate=0.5"),
-    "orb_rgbdi_rate1.0": ("--slam=orb_rgbdi", "--rate=1.0"),
     "stella_rgbd_rate0.5": ("--slam=stella_rgbd", "--rate=0.5"),
-    "stella_rgbd_rate1.0": ("--slam=stella_rgbd", "--rate=1.0"),
 }
-
-# Offline runners (orbslam3_offline / stella_offline) process the full canonical
-# frame dataset and ignore the replay rate entirely (direct-offline path in
-# run_orbslam3_bag.py / run_stella_bag.py). A rate1.0 trajectory is therefore
-# byte-equivalent input for any rate variant of these backends.
-RATE_AGNOSTIC_OFFLINE_BACKENDS = {"orb_rgbd", "orb_rgbdi", "stella_rgbd"}
 
 # Hard ceiling for a single SLAM generation job (covers 0.5x RTAB dense replays).
 SLAM_GENERATION_TIMEOUT_SEC = 3600
@@ -169,7 +158,7 @@ class BenchmarkOrchestrator:
         expected_fp = dataset_fingerprint or getattr(self, "dataset_fingerprint", None)
 
         active_keys = list(STANDARD_SLAM_PROFILES.keys()) if (self.mode != "quick") else [
-            "rtab_normal_rate1.0", "orb_rgbd_rate1.0", "orb_rgbdi_rate1.0", "stella_rgbd_rate1.0"
+            "rtab_normal_rate0.5", "orb_rgbd_rate0.5", "orb_rgbdi_rate0.5", "stella_rgbd_rate0.5"
         ]
 
         for key in active_keys:
@@ -235,41 +224,6 @@ class BenchmarkOrchestrator:
 
         # Collect missing profiles to generate
         missing_keys = [k for k in active_keys if k not in trajectories and k in SLAM_RUN_ARGS]
-
-        def _offline_source_key(k: str) -> Optional[str]:
-            spec_k = get_slam_profile_spec(k)
-            if spec_k.backend not in RATE_AGNOSTIC_OFFLINE_BACKENDS:
-                return None
-            if abs(spec_k.replay_rate - 1.0) < 1e-3:
-                return None
-            return f"{spec_k.backend}_rate1.0"
-
-        def _propagate_offline_duplicates(keys: List[str]) -> None:
-            """Reuse rate1.0 offline results for rate variants (identical output)."""
-            for k in keys:
-                if k in trajectories:
-                    continue
-                src_key = _offline_source_key(k)
-                if src_key is None or src_key not in trajectories:
-                    continue
-                spec_k = get_slam_profile_spec(k)
-                dst_fn = SLAM_TRAJ_FILES.get(k, lambda n: TRAJECTORY_DIR / get_trajectory_filename(n, k))
-                dst_file = dst_fn(self.bag_name)
-                try:
-                    shutil.copyfile(trajectories[src_key], dst_file)
-                    save_trajectory_metadata(dst_file, spec_k, bag_fingerprint=expected_fp)
-                    m = Trajectory.from_tum_file(str(dst_file)).compute_metrics()
-                    m["slam_backend"] = spec_k.backend
-                    m["slam_profile"] = spec_k.profile
-                    m["replay_rate"] = spec_k.replay_rate
-                    trajectories[k] = str(dst_file)
-                    traj_metrics[k] = m
-                    print(f"⏭️ Offline 중복 절약: {k} ← {src_key} 결과 재사용 (offline runner는 rate 무관)")
-                except Exception as exc:
-                    print(f"⚠️ Offline duplicate 복사 실패 ({k}): {exc}")
-
-        _propagate_offline_duplicates(missing_keys)
-        missing_keys = [k for k in missing_keys if k not in trajectories]
 
         if self.run_slam and missing_keys:
             from concurrent.futures import ThreadPoolExecutor, as_completed

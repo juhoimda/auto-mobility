@@ -162,10 +162,10 @@ def get_default_resource_policy() -> ResourcePolicy:
     except Exception:
         pass
 
-    # Detect CPU count & calibrate threads
-    # Intel Core Ultra 7 265H has 6 P-cores + 8 E-cores. 6 threads achieves peak compute without E-core thrashing.
+    # Detect CPU count & calibrate threads dynamically
     logical_cpus = psutil.cpu_count(logical=True) or 8
-    calibrated_threads = 6 if logical_cpus >= 12 else max(2, min(4, logical_cpus))
+    physical_cpus = psutil.cpu_count(logical=False) or (logical_cpus // 2)
+    calibrated_threads = min(physical_cpus, 12) if physical_cpus >= 6 else max(2, min(4, physical_cpus))
 
     return ResourcePolicy(
         cpu_threads=calibrated_threads,

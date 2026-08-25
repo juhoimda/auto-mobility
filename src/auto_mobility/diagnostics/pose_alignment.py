@@ -100,11 +100,15 @@ def diagnose_pose_alignment(
     )
     max_step, max_rot = _motion_metrics(trajectory)
 
-    offsets = np.arange(-offset_search_s, offset_search_s + offset_step_s * 0.5, offset_step_s)
-    coverages = [_coverage(frames, trajectory, float(off), max_pose_gap_ms) for off in offsets]
-    best_idx = int(np.argmax(coverages)) if coverages else 0
-    best_offset = float(offsets[best_idx]) if len(offsets) else 0.0
-    best_coverage = float(coverages[best_idx]) if coverages else float(assoc.pose_coverage_ratio)
+    if assoc.pose_coverage_ratio >= 0.98:
+        best_offset = 0.0
+        best_coverage = float(assoc.pose_coverage_ratio)
+    else:
+        offsets = np.arange(-offset_search_s, offset_search_s + offset_step_s * 0.5, offset_step_s)
+        coverages = [_coverage(frames, trajectory, float(off), max_pose_gap_ms) for off in offsets]
+        best_idx = int(np.argmax(coverages)) if coverages else 0
+        best_offset = float(offsets[best_idx]) if len(offsets) else 0.0
+        best_coverage = float(coverages[best_idx]) if coverages else float(assoc.pose_coverage_ratio)
 
     warnings: list[str] = []
     cause = "NONE"

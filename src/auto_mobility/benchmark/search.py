@@ -63,7 +63,7 @@ class SearchEngine:
         force: bool = False,
         beam_width_slam: int = 2,
         beam_width_fusion: int = 3,
-        finalists_count: int = 3
+        finalists_count: int = 2
     ):
         self.bag_name = bag_name
         self.dataset = dataset
@@ -1027,90 +1027,6 @@ class SearchEngine:
                     else:
                         self._log_decision("Phase B (Fusion)", cand_5mm_name, "FAILED", f"5mm worker failed: {w_res.status}")
 
-        # 4. Phase B2: Truncation Multiplier Refinement on Top TSDF Candidates
-        if self.mode != "quick":
-            valid_b_tsdf = [r for r in rank_candidate_summaries(fusion_eval_results) if r.get("hard_gate_pass", False) and r["summary_data"].get("fusion_method") == "tsdf"]
-            if valid_b_tsdf:
-                top_tsdf_summary = valid_b_tsdf[0]["summary_data"]
-                top_tsdf_spec_dict = top_tsdf_summary.get("spec", {}).get("requested_params", {})
-                v_m = top_tsdf_spec_dict.get("fusion_params", {}).get("voxel_size_m", 0.008)
-                v_mm = int(round(v_m * 1000))
-                s_key = f"{top_tsdf_spec_dict.get('slam_backend')}_{top_tsdf_spec_dict.get('slam_profile')}_rate{float(top_tsdf_spec_dict.get('replay_rate', 1.0)):g}"
-                t_path = top_tsdf_summary.get("trajectory_path")
-
-                # Test trunc_mult options [3.0, 6.0]
-                for t_mult in [3.0, 6.0]:
-                    refine_cand_name = f"{s_key}_tsdf{v_mm}mm_trunc{int(t_mult)}"
-                    refine_mesh = self.artifact_mgr.get_candidate_artifact_dir(refine_cand_name) / f"mesh.obj"
-                    refine_pcd = self.artifact_mgr.get_candidate_artifact_dir(refine_cand_name) / f"cloud.ply"
-                    refine_adapter = self.artifact_mgr.get_candidate_artifact_dir(refine_cand_name) / f"adapter.obj"
-                    refine_eval_dir = self.artifact_mgr.get_candidate_eval_dir(refine_cand_name)
-
-                    refine_spec = CandidateSpec(
-                        dataset_name=self.bag_name,
-                        slam_backend=top_tsdf_spec_dict.get("slam_backend"),
-                        slam_profile=top_tsdf_spec_dict.get("slam_profile", "normal"),
-                        replay_rate=float(top_tsdf_spec_dict.get("replay_rate", 1.0)),
-                        fusion_method="tsdf",
-                        fusion_params={"voxel_size_m": v_m, "depth_min_m": self.depth_min, "depth_max_m": self.depth_max, "trunc_mult": t_mult, "weight_threshold": 1.5},
-                        surface_method="poisson",
-                        surface_params={"depth": 8},
-                        postprocess_params={"clean_density": True, "simplify_target": 0.0},
-                        frame_stride=self._screening_stride()
-                    )
-
-                    w_res = run_tsdf_worker(
-                        dataset_dir=str(self.dataset.dataset_dir),
-                        traj_file=t_path,
-                        mesh_path=str(refine_mesh),
-                        pcd_path=str(refine_pcd),
-                        voxel=v_m,
-                        depth_max=self.depth_max,
-                        trunc_mult=t_mult,
-                        stride=self._screening_stride(),
-                        split_file=str(self.split_file),
-                        quick=self.quick,
-                        no_color=True
-                    )
-                    if w_res.is_success:
-                        w_surf = run_surface_worker(
-                            input_ply=str(refine_pcd),
-                            output_mesh=str(refine_adapter),
-                            method="poisson",
-                            voxel=v_m,
-                            depth=8,
-                            simplify=0.0,
-                            no_simplify=True,
-                            no_color_transfer=True
-                        )
-                        if w_surf.is_success:
-                            try:
-                                ref_sum = evaluate_reconstruction(
-                                    dataset_input=self.dataset,
-                                    trajectory_input=t_path,
-                                    mesh_input=str(refine_adapter),
-                                    output_dir=refine_eval_dir,
-                                    candidate_name=refine_cand_name,
-                                    split_json=str(self.split_file),
-                                    runtime_sec=w_res.runtime_sec + w_surf.runtime_sec,
-                                    cheap=True,
-                                    max_holdout_samples=self.stage1_samples
-                                )
-                                ref_sum["fusion_method"] = "tsdf"
-                                ref_sum["voxel_size_m"] = v_m
-                                ref_sum["pcd_path"] = str(refine_pcd)
-                                ref_sum["mesh_path"] = str(refine_adapter)
-                                ref_sum["direct_tsdf_mesh_path"] = str(refine_mesh)
-                                ref_sum["trajectory_path"] = t_path
-                                ref_sum["spec"] = refine_spec.to_metadata_dict()
-                                ref_sum["spec_hash"] = refine_spec.compute_spec_hash()
-                                if w_res.resources:
-                                    ref_sum["resources"] = w_res.resources.to_dict()
-                                fusion_eval_results.append(ref_sum)
-                                self._log_decision("Phase B2 (Refinement)", refine_cand_name, "EXECUTED", f"Evaluated truncation multiplier {t_mult}")
-                            except Exception:
-                                pass
-
         # Rank Phase B candidates to select Top-K Fusion pipelines with diversity retention
         ranked_b = rank_candidate_summaries(fusion_eval_results)
         valid_b = [r for r in ranked_b if r.get("hard_gate_pass", False)]
@@ -1143,12 +1059,11 @@ class SearchEngine:
         top_fusion_pipelines: List[dict],
         trajectories: Dict[str, str]
     ) -> Tuple[List[dict], List[dict]]:
-        """Runs Phase C Surface exploration with unsimplified fair baseline and selects Top-3 Finalists.
+        """Runs Phase C Surface exploration with unsimplified fair baseline and selects Top Finalists.
 
         Surface worker(서브프로세스)는 파이프라인당 최대 2개까지 병렬 선실행한다.
-        각 워커는 6 OMP 스레드 상한을 유지하므로 총 12T <= 16 core이며, 메모리 추정 합
-        (worst-case alpha 2회 ~12GB)도 process budget 내에 있다. 평가(evaluate_reconstruction)
-        는 결정적 순서 보장을 위해 순차 실행한다.
+        각 워커는 CPU 스레드 상한을 유지하며, 메모리 추정도 process budget 내에 있다.
+        평가(evaluate_reconstruction)는 결정적 순서 보장을 위해 순차 실행한다.
         """
         print("\n==========================================================")
         print(f" 🚀 [PHASE C] Surface Reconstruction Exploration (across {len(top_fusion_pipelines)} Fusion Pipelines, Mode: {self.mode.upper()}, Workers: 2-way)")
@@ -1157,7 +1072,7 @@ class SearchEngine:
         surface_eval_results: List[dict] = []
 
         tier_1 = ["tsdf_direct", "poisson"]
-        tier_2 = ["alpha_shape", "bpa", "cgal_polygonal"] if (self.mode != "quick") else ["alpha_shape"]
+        tier_2 = ["alpha_shape", "bpa", "cgal_polygonal"] if (self.mode == "full") else ["alpha_shape"]
         all_methods = tier_1 + tier_2
 
         for pipe_summary in top_fusion_pipelines:
@@ -1456,6 +1371,22 @@ class SearchEngine:
                     self._log_decision("Phase D (Full Rebuild)", rebuild_cand_name, "SKIPPED_RESOURCE", f"Estimated memory {est_mem_gb:.1f}GB > {self.max_memory_gb_5mm:.1f}GB")
                     continue
 
+            # Cache check for Phase D Full Rebuild
+            cached_rebuild = self.artifact_mgr.should_reuse_evaluation(
+                rebuild_cand_name, self.force, expected_spec_hash=full_spec_hash,
+                dataset_fingerprint=self.dataset_fingerprint, split_hash=self.split_hash
+            )
+            if cached_rebuild:
+                print(f"⏭️ [Full Rebuild 캐시 재사용] {rebuild_cand_name}")
+                cached_rebuild["is_full_rebuild"] = True
+                cached_rebuild["trajectory_metrics"] = f_summary.get("trajectory_metrics", {})
+                cached_rebuild["spec"] = full_spec.to_metadata_dict()
+                cached_rebuild["spec_hash"] = full_spec_hash
+                self.stats["cached_count"] += 1
+                self._log_decision("Phase D (Full Rebuild)", rebuild_cand_name, "REUSED_CACHE", "Reused full rebuild from cache")
+                rebuilt_eval_results.append(cached_rebuild)
+                continue
+
             self.stats["total_candidates"] += 1
             t_rb_start = time.time()
 
@@ -1493,7 +1424,7 @@ class SearchEngine:
                     dataset_dir=str(self.dataset.dataset_dir),
                     traj_file=traj_path,
                     mesh_path=str(rebuild_mesh) if surface_method == "tsdf_direct" else None,
-                    pcd_path=str(rebuild_pcd),
+                    pcd_path=None if surface_method == "tsdf_direct" else str(rebuild_pcd),
                     voxel=voxel_m,
                     depth_max=self.depth_max,
                     trunc_mult=t_mult,

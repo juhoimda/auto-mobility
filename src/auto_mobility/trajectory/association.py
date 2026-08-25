@@ -83,7 +83,7 @@ def associate_trajectory_to_frames(
     return result
 
 
-_ASSOC_CACHE_MAX = 8
+_ASSOC_CACHE_MAX = 32
 _ASSOC_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
 _ASSOC_CACHE_LOCK = threading.Lock()
 

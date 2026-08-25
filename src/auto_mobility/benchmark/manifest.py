@@ -217,9 +217,11 @@ class BenchmarkManifestExporter:
             cov = f"{gm.get('depth_coverage_ratio', 0)*100:.1f}%" if gm.get('depth_coverage_ratio') is not None else "N/A"
             fs = f"{gm.get('free_space_correctness_ratio', 1.0)*100:.1f}%" if gm.get('free_space_correctness_ratio') is not None else "100%"
             runtime = s.get("runtime_sec") or s.get("performance", {}).get("runtime_sec", 0)
-            from auto_mobility.benchmark.scoring import compute_absolute_scores
-            sc = compute_absolute_scores(s)
-            lines.append(f"| **{s['candidate_name']}** | ✅ | {sc['quality_score']:.1f} | {tm.get('num_frames', 'N/A')} | {cov} | {mae} | {p95} | {fs} | {runtime:.2f}s |")
+            q_score = s.get("quality_score")
+            if q_score is None:
+                from auto_mobility.benchmark.scoring import compute_absolute_scores
+                q_score = compute_absolute_scores(s)["quality_score"]
+            lines.append(f"| **{s['candidate_name']}** | ✅ | {q_score:.1f} | {tm.get('num_frames', 'N/A')} | {cov} | {mae} | {p95} | {fs} | {runtime:.2f}s |")
 
         # 3. Fusion Screening
         lines.append("\n## 3. [Fusion Screening: Phase B (Common Surface Adapter)]\n")
@@ -240,9 +242,11 @@ class BenchmarkManifestExporter:
             compl = f"{gm.get('observed_surface_completeness', 0)*100:.1f}%" if gm.get('observed_surface_completeness') is not None else "N/A"
             tri = f"{mm.get('num_triangles', 0):,}"
             runtime = s.get("runtime_sec") or s.get("performance", {}).get("runtime_sec", 0)
-            from auto_mobility.benchmark.scoring import compute_absolute_scores
-            sc = compute_absolute_scores(s)
-            lines.append(f"| **{s['candidate_name']}** | {fusion_backend} | {v_str} | ✅ | {sc['quality_score']:.1f} | {mae} | {cov} | {compl} | {tri} | {runtime:.2f}s |")
+            q_score = s.get("quality_score")
+            if q_score is None:
+                from auto_mobility.benchmark.scoring import compute_absolute_scores
+                q_score = compute_absolute_scores(s)["quality_score"]
+            lines.append(f"| **{s['candidate_name']}** | {fusion_backend} | {v_str} | ✅ | {q_score:.1f} | {mae} | {cov} | {compl} | {tri} | {runtime:.2f}s |")
 
         # 4. Surface Screening
         lines.append("\n## 4. [Surface Screening: Phase C (Fair No-Simplification Baseline)]\n")
@@ -262,9 +266,11 @@ class BenchmarkManifestExporter:
             nm = f"{mm.get('non_manifold_edges', 0):,}"
             tri = f"{mm.get('num_triangles', 0):,}"
             runtime = s.get("runtime_sec") or s.get("performance", {}).get("runtime_sec", 0)
-            from auto_mobility.benchmark.scoring import compute_absolute_scores
-            sc = compute_absolute_scores(s)
-            lines.append(f"| **{s['candidate_name']}** | {surf_method} | ✅ | {sc['quality_score']:.1f} | {mae} | {p95} | {fs} | {nm} | {tri} | {runtime:.2f}s |")
+            q_score = s.get("quality_score")
+            if q_score is None:
+                from auto_mobility.benchmark.scoring import compute_absolute_scores
+                q_score = compute_absolute_scores(s)["quality_score"]
+            lines.append(f"| **{s['candidate_name']}** | {surf_method} | ✅ | {q_score:.1f} | {mae} | {p95} | {fs} | {nm} | {tri} | {runtime:.2f}s |")
 
         # 5. Overall Full Rebuilt Multi-Metric Joint Ranking
         if overall_rankings:

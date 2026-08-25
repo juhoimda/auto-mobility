@@ -69,14 +69,6 @@ STANDARD_SLAM_PROFILES: Dict[str, SlamProfileSpec] = {
         run_args=["--slam=rtab", "--dense", "--rate=0.5"],
         description="RTAB-Map dense offline mapping at 0.5x playback"
     ),
-    "rtab_dense_rate1.0": SlamProfileSpec(
-        candidate_key="rtab_dense_rate1.0",
-        backend="rtab",
-        profile="dense",
-        replay_rate=1.0,
-        run_args=["--slam=rtab", "--dense", "--rate=1.0"],
-        description="RTAB-Map dense offline mapping at 1.0x playback"
-    ),
     "rtab_normal_rate0.5": SlamProfileSpec(
         candidate_key="rtab_normal_rate0.5",
         backend="rtab",
@@ -84,14 +76,6 @@ STANDARD_SLAM_PROFILES: Dict[str, SlamProfileSpec] = {
         replay_rate=0.5,
         run_args=["--slam=rtab", "--rate=0.5"],
         description="RTAB-Map default keyframe mapping at 0.5x playback"
-    ),
-    "rtab_normal_rate1.0": SlamProfileSpec(
-        candidate_key="rtab_normal_rate1.0",
-        backend="rtab",
-        profile="normal",
-        replay_rate=1.0,
-        run_args=["--slam=rtab", "--rate=1.0"],
-        description="RTAB-Map default keyframe mapping at 1.0x playback"
     ),
     "orb_rgbd_rate0.5": SlamProfileSpec(
         candidate_key="orb_rgbd_rate0.5",
@@ -101,14 +85,6 @@ STANDARD_SLAM_PROFILES: Dict[str, SlamProfileSpec] = {
         run_args=["--slam=orb_rgbd", "--rate=0.5"],
         description="ORB-SLAM3 RGB-D at 0.5x playback"
     ),
-    "orb_rgbd_rate1.0": SlamProfileSpec(
-        candidate_key="orb_rgbd_rate1.0",
-        backend="orb_rgbd",
-        profile="normal",
-        replay_rate=1.0,
-        run_args=["--slam=orb_rgbd", "--rate=1.0"],
-        description="ORB-SLAM3 RGB-D at 1.0x playback"
-    ),
     "orb_rgbdi_rate0.5": SlamProfileSpec(
         candidate_key="orb_rgbdi_rate0.5",
         backend="orb_rgbdi",
@@ -117,14 +93,6 @@ STANDARD_SLAM_PROFILES: Dict[str, SlamProfileSpec] = {
         run_args=["--slam=orb_rgbdi", "--rate=0.5"],
         description="ORB-SLAM3 RGB-D-Inertial at 0.5x playback"
     ),
-    "orb_rgbdi_rate1.0": SlamProfileSpec(
-        candidate_key="orb_rgbdi_rate1.0",
-        backend="orb_rgbdi",
-        profile="normal",
-        replay_rate=1.0,
-        run_args=["--slam=orb_rgbdi", "--rate=1.0"],
-        description="ORB-SLAM3 RGB-D-Inertial at 1.0x playback"
-    ),
     "stella_rgbd_rate0.5": SlamProfileSpec(
         candidate_key="stella_rgbd_rate0.5",
         backend="stella_rgbd",
@@ -132,14 +100,6 @@ STANDARD_SLAM_PROFILES: Dict[str, SlamProfileSpec] = {
         replay_rate=0.5,
         run_args=["--slam=stella_rgbd", "--rate=0.5"],
         description="stella_vslam RGB-D at 0.5x playback"
-    ),
-    "stella_rgbd_rate1.0": SlamProfileSpec(
-        candidate_key="stella_rgbd_rate1.0",
-        backend="stella_rgbd",
-        profile="normal",
-        replay_rate=1.0,
-        run_args=["--slam=stella_rgbd", "--rate=1.0"],
-        description="stella_vslam RGB-D at 1.0x playback"
     ),
 }
 

@@ -51,7 +51,7 @@ evaluation:
     coverage_weight: 0.25
     artifact_weight: 0.20
     topology_weight: 0.15
-    performance_weight: 0.10
+    performance_weight: 0.00
     quality_tie_epsilon: 0.5
     cost_tiebreak_enabled: true
 
@@ -110,4 +110,4 @@ quality_weights:
   geometry_coverage: 0.25      # Depth coverage ratio, within 20mm ratio
   artifact_penalty: 0.20       # Free space correctness, small component ratio
   topology: 0.15               # Degenerate triangles, dominant plane consistency
-  performance: 0.10            # Runtime, Memory
+  performance: 0.00            # Cost/Runtime handled separately in cost score

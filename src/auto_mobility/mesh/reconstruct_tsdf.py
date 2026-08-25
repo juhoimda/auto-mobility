@@ -284,7 +284,7 @@ def reconstruct(
     output_pcd: Optional[str] = None,
     train_indices: Optional[List[int]] = None,
     trunc_mult: float = 5.0,
-    depth_max: float = 4.0,
+    depth_max: float = 3.0,
     depth_min: float = 0.3,
     weight_thr: float = 1.5,
     block_count: int = 0,
@@ -593,7 +593,7 @@ def main():
     parser.add_argument("--holdout-split", default=None, help="split.json 경로 (지정 시 train 프레임만 적분)")
     parser.add_argument("--voxel", type=float, default=0.02, help="TSDF Voxel 크기 (m, 기본 0.02)")
     parser.add_argument("--trunc-mult", type=float, default=5.0, help="truncation multiplier (기본 5.0)")
-    parser.add_argument("--depth-max", type=float, default=4.0, help="최대 depth (m, 기본 4.0)")
+    parser.add_argument("--depth-max", type=float, default=3.0, help="최대 depth (m, 기본 3.0)")
     parser.add_argument("--depth-min", type=float, default=0.3, help="최소 depth (m, 기본 0.3)")
     parser.add_argument("--poses-opt", type=int, default=0, choices=[0, 2], help="Legacy DB export opt: 0=전역 최적화, 2=DB 원본")
     parser.add_argument("--weight-thr", type=float, default=1.5, help="표면 추출 weight 임계값 (기본 1.5)")
