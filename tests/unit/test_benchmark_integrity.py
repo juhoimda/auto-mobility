@@ -40,10 +40,10 @@ from auto_mobility.benchmark.rebuild import rebuild_from_config
 
 def test_trajectory_provenance_strict_validation(tmp_path):
     """Verifies that trajectory files without valid metadata or with mismatched spec are rejected in strict mode."""
-    traj_file = tmp_path / "rtab_dense_rate0.5_test_trajectory.txt"
+    traj_file = tmp_path / "rtab_dense_test_trajectory.txt"
     traj_file.write_text("1.0 0 0 0 0 0 0 1\n2.0 1 0 0 0 0 0 1\n" * 5)
     
-    spec = STANDARD_SLAM_PROFILES["rtab_dense_rate0.5"]
+    spec = STANDARD_SLAM_PROFILES["rtab_dense"]
     
     # 1. Unverified legacy trajectory in strict mode -> False
     is_valid, status, meta = verify_trajectory_provenance(traj_file, spec, strict=True)
@@ -51,7 +51,7 @@ def test_trajectory_provenance_strict_validation(tmp_path):
     assert status == "LEGACY_UNVERIFIED"
     
     # 2. Save metadata with wrong backend/profile
-    wrong_spec = STANDARD_SLAM_PROFILES["orb_rgbd_rate1.0"]
+    wrong_spec = STANDARD_SLAM_PROFILES["orb_rgbd"]
     save_trajectory_metadata(traj_file, wrong_spec, bag_fingerprint="ds_123")
     
     # 3. Provenance mismatch against requested spec -> False
@@ -111,7 +111,7 @@ def test_adaptive_5mm_memory_gate(tmp_path):
     traj_p.write_text("1.0 0 0 0 0 0 0 1\n2.0 10 10 10 0 0 0 1\n" * 10)
     
     top_slams = [SlamChampion(
-        profile_spec=STANDARD_SLAM_PROFILES["rtab_normal_rate1.0"],
+        profile_spec=STANDARD_SLAM_PROFILES["rtab_normal"],
         trajectory_path=str(traj_p),
         trajectory_sha256="sha123",
         phase_a_summary={}

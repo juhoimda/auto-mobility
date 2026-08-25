@@ -169,8 +169,6 @@ class BenchmarkOrchestrator:
             # Check primary filename, then fallback legacy filenames
             if not traj_file.exists() or traj_file.stat().st_size == 0:
                 legacy_candidates = [
-                    TRAJECTORY_DIR / f"{key}_rate1.0_{self.bag_name}_trajectory.txt",
-                    TRAJECTORY_DIR / f"{key}_rate0.5_{self.bag_name}_trajectory.txt",
                     TRAJECTORY_DIR / f"{spec.backend}_{self.bag_name}_trajectory.txt"
                 ]
                 for leg in legacy_candidates:
@@ -214,7 +212,7 @@ class BenchmarkOrchestrator:
 
             # RTAB-Map DB export if db exists
             if "rtab" in key:
-                db_name = get_rtab_db_filename(self.bag_name, spec.profile, spec.replay_rate)
+                db_name = get_rtab_db_filename(self.bag_name, spec.profile)
                 db = DB_DIR / db_name
                 if not db.exists():
                     db_legacy_name = f"{self.bag_name}_dense.db" if spec.profile == "dense" else f"{self.bag_name}.db"
@@ -351,9 +349,6 @@ class BenchmarkOrchestrator:
                         print(f"✅ SLAM 완료: {k_res} → {Path(t_res).name}")
                     else:
                         print(f"⚠️ SLAM 생성 실패: {k_res}")
-
-            # 생성된 rate1.0 결과를 나머지 offline rate 변형에 전파 (중복 실행 제거)
-            _propagate_offline_duplicates([k for k in active_keys if k not in trajectories and k in SLAM_RUN_ARGS])
 
         return trajectories, traj_metrics
 

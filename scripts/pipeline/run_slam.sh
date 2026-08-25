@@ -10,7 +10,6 @@ export ROS_LOG_DIR="${ROS_LOG_DIR:-$LOG_DIR/ros}"
 mkdir -p "$ROS_LOG_DIR"
 
 SLAM_TYPE="rtab"
-RATE="1.0"
 BAG_NAME=""
 DENSE_MAPPING="false"
 
@@ -18,9 +17,6 @@ for arg in "$@"; do
     case $arg in
         --slam=*)
             SLAM_TYPE="${arg#*=}"
-            ;;
-        --rate=*)
-            RATE="${arg#*=}"
             ;;
         --dense)
             DENSE_MAPPING="true"
@@ -44,7 +40,7 @@ done
 
 if [ -z "$BAG_NAME" ]; then
     echo "=========================================================="
-    echo " 사용법: $0 BAG_NAME [--slam=rtab|orb] [--rate=1.0] [--dense]"
+    echo " 사용법: $0 BAG_NAME [--slam=rtab|orb] [--dense]"
     echo " 예시  : $0 my_dataset --slam=rtab"
     echo " 예시  : $0 my_dataset --slam=orb"
     echo "=========================================================="

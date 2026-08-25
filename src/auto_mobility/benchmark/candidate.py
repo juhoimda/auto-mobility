@@ -16,7 +16,7 @@ import json
 
 @dataclass
 class SlamProfileSpec:
-    candidate_key: str              # e.g. "rtab_dense_rate0.5", "orb_rgbd_rate0.5"
+    candidate_key: str              # e.g. "rtab_dense", "orb_rgbd"
     backend: str                    # "rtab", "orb_rgbd", "orb_rgbdi", "stella_rgbd"
     profile: str = "normal"         # "normal", "dense"
     replay_rate: float = 1.0        # 1.0, 0.5, 0.75, 0.25
@@ -54,9 +54,9 @@ def get_trajectory_filename(bag_name: str, key_or_spec: Union[str, SlamProfileSp
     return f"{spec.candidate_key}_{bag_name}_trajectory.txt"
 
 
-def get_rtab_db_filename(bag_name: str, profile: str = "normal", rate: float = 1.0) -> str:
+def get_rtab_db_filename(bag_name: str, profile: str = "normal") -> str:
     """Returns deterministic standard RTAB database filename."""
-    return f"{bag_name}_rtab_{profile}_rate{rate:g}.db"
+    return f"{bag_name}_rtab_{profile}.db"
 
 
 # Standard SLAM Profile Registry (Frame-based direct execution)

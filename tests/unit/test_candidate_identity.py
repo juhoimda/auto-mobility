@@ -20,12 +20,13 @@ from auto_mobility.benchmark.artifacts import ArtifactManager
 
 
 def test_slam_profile_candidate_hashes_unique():
-    """Test 1: rtab dense 0.5, rtab dense 1.0, rtab normal 0.5, rtab normal 1.0 have unique hashes."""
-    keys = ["rtab_dense_rate0.5", "rtab_dense_rate1.0", "rtab_normal_rate0.5", "rtab_normal_rate1.0"]
+    """Test 1: All registered SLAM profiles have unique spec hashes."""
+    keys = list(STANDARD_SLAM_PROFILES.keys())
+    assert len(keys) >= 2, "Expected at least 2 registered SLAM profiles"
     specs = [get_slam_profile_spec(k) for k in keys]
     hashes = [s.compute_spec_hash() for s in specs]
-    
-    assert len(set(hashes)) == 4, f"All 4 SLAM profile hashes must be unique: {hashes}"
+
+    assert len(set(hashes)) == len(keys), f"SLAM profile hashes must be unique: {hashes}"
 
 
 def test_orb_rate_identities_distinguished():

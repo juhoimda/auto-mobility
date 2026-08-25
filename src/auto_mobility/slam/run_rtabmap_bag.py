@@ -22,8 +22,7 @@ def run_rtabmap_on_bag(
     bag_input: str,
     out_trajectory: str = None,
     out_db: str = None,
-    profile: str = "normal",
-    rate: float = 1.0
+    profile: str = "normal"
 ) -> str:
     bag_path = Path(bag_input)
     if not bag_path.is_absolute():
@@ -88,18 +87,6 @@ def run_rtabmap_on_bag(
         # Save trajectory metadata
         spec = SlamProfileSpec(candidate_key=key, backend="rtab", profile=profile, replay_rate=1.0)
         save_trajectory_metadata(out_trajectory, spec)
-        
-        # Copy legacy aliases for seamless backward compatibility
-        try:
-            import shutil
-            alt_traj = str(TRAJECTORY_DIR / f"rtab_{profile}_rate1.0_{bag_name}_trajectory.txt")
-            alt_db = str(DB_DIR / f"{bag_name}_rtab_{profile}_rate1.0.db")
-            if out_trajectory != alt_traj:
-                shutil.copyfile(out_trajectory, alt_traj)
-            if out_db != alt_db:
-                shutil.copyfile(out_db, alt_db)
-        except Exception:
-            pass
 
         return out_trajectory
     else:
@@ -112,10 +99,9 @@ def main():
     parser.add_argument("--out", default=None, help="Output TUM trajectory path (.txt)")
     parser.add_argument("--db", default=None, help="Output RTAB-Map database path (.db)")
     parser.add_argument("--profile", default="normal", choices=["normal", "dense"], help="Profile (default: normal)")
-    parser.add_argument("--rate", type=float, default=1.0, help="Replay rate tag (default: 1.0)")
     args = parser.parse_args()
 
-    run_rtabmap_on_bag(args.bag, args.out, out_db=args.db, profile=args.profile, rate=args.rate)
+    run_rtabmap_on_bag(args.bag, args.out, out_db=args.db, profile=args.profile)
 
 
 if __name__ == "__main__":
