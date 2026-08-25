@@ -291,6 +291,7 @@ class ArtifactManager:
         meta = {
             "candidate_id": candidate_spec.compute_candidate_id(),
             "candidate_spec_hash": candidate_spec.compute_spec_hash(),
+            "fusion_hash": candidate_spec.compute_fusion_hash(),
             "dataset_fingerprint": dataset_fingerprint,
             "trajectory_sha256": trajectory_sha256,
             "split_hash": split_hash,
@@ -307,6 +308,7 @@ class ArtifactManager:
         mesh_path: Optional[Path],
         pcd_path: Optional[Path],
         candidate_spec: Optional[Union[CandidateSpec, str]] = None,
+        fusion_hash: Optional[str] = None,
         dataset_fingerprint: Optional[str] = None,
         trajectory_sha256: Optional[str] = None,
         split_hash: Optional[str] = None,
@@ -314,9 +316,14 @@ class ArtifactManager:
         force: bool = False
     ) -> bool:
         """Strict content-aware cache validation for reconstruction artifacts.
-        
+
         If validation criteria are supplied, metadata file is strictly required.
         Missing or mismatched metadata causes a CACHE MISS.
+
+        fusion_hash: when supplied, reconstruction identity is validated against
+        the stored fusion_hash instead of the full candidate_spec_hash. This lets
+        candidates whose fusion kernels are byte-identical (e.g. identical TSDF
+        params under different surface_method labels) share one reconstruction.
         """
         if force:
             return False
@@ -329,6 +336,7 @@ class ArtifactManager:
         # If strict content validation criteria are supplied:
         has_content_checks = (
             isinstance(candidate_spec, CandidateSpec) or
+            fusion_hash is not None or
             dataset_fingerprint is not None or
             trajectory_sha256 is not None or
             split_hash is not None or
@@ -340,7 +348,10 @@ class ArtifactManager:
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
-                if candidate_spec and isinstance(candidate_spec, CandidateSpec):
+                if fusion_hash is not None:
+                    if meta.get("fusion_hash") != fusion_hash:
+                        return False
+                elif candidate_spec and isinstance(candidate_spec, CandidateSpec):
                     if meta.get("candidate_spec_hash") != candidate_spec.compute_spec_hash():
                         return False
                 if dataset_fingerprint is not None and meta.get("dataset_fingerprint") != dataset_fingerprint:

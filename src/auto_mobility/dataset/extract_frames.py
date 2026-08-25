@@ -245,18 +245,34 @@ def extract_dataset_from_bag(bag_path_or_name: str, out_dir: Optional[str] = Non
     if not rgb_frames or not depth_frames:
         raise RuntimeError("No valid RGB or Depth frames extracted from bag!")
 
+    # ⏱️ MCAP 청크 버퍼링 지터 제거: 실제 센서 타임스탬프(header.stamp) 기준 엄격한 시간순 정렬
+    rgb_frames.sort(key=lambda f: f[0])
+    depth_frames.sort(key=lambda f: f[0])
+    imu_records.sort(key=lambda r: r["timestamp"])
+
+    # 중복 타임스탬프 필터링 (Strict Monotonicity 보장)
+    filtered_imu: List[dict] = []
+    last_imu_ts = -1.0
+    for rec in imu_records:
+        if rec["timestamp"] > last_imu_ts:
+            filtered_imu.append(rec)
+            last_imu_ts = rec["timestamp"]
+    imu_records = filtered_imu
+
     rgb_stamps = np.array([f[0] for f in rgb_frames], dtype=np.float64)
     depth_stamps = np.array([f[0] for f in depth_frames], dtype=np.float64)
 
     # Match RGB frames to Depth frames
     matched_pairs: List[dict] = []
     used_depth_indices = set()
+    last_matched_rgb_ts = -1.0
 
     for r_idx, (r_stamp, r_bag_stamp, r_data, r_type, r_fid) in enumerate(rgb_frames):
         d_idx = int(np.argmin(np.abs(depth_stamps - r_stamp)))
         dt_ms = abs(depth_stamps[d_idx] - r_stamp) * 1000.0
-        if dt_ms <= max_sync_dt_ms and d_idx not in used_depth_indices:
+        if dt_ms <= max_sync_dt_ms and d_idx not in used_depth_indices and r_stamp > last_matched_rgb_ts:
             used_depth_indices.add(d_idx)
+            last_matched_rgb_ts = r_stamp
             d_stamp, d_bag_stamp, d_data, d_type, d_fid = depth_frames[d_idx]
             matched_pairs.append({
                 "rgb_stamp": r_stamp,

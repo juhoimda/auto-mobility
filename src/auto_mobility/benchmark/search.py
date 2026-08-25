@@ -218,10 +218,9 @@ class SearchEngine:
         # 2. Phase A1: Evaluate and select Backend Champions
         backend_champions: List[SlamChampion] = []
 
+        # ── Job planning: cache/reuse decisions for every profile up-front ──
+        profile_jobs: List[dict] = []
         for backend_name, profile_keys in backend_families.items():
-            print(f"\n🔬 [Phase A1: Profile Calibration] Backend `{backend_name}` ({len(profile_keys)} profiles)")
-            family_results: List[dict] = []
-
             for prof_key in profile_keys:
                 traj_file = trajectories[prof_key]
                 traj_sha = compute_file_sha256(traj_file)
@@ -233,7 +232,6 @@ class SearchEngine:
                 mesh_out = self.artifact_mgr.get_mesh_path(prof_key, 10)
                 pcd_out = self.artifact_mgr.get_pcd_path(prof_key, 10)
                 meta_out = self.artifact_mgr.get_artifact_meta_path(mesh_out)
-                eval_dir = self.artifact_mgr.get_candidate_eval_dir(cand_name)
 
                 spec = CandidateSpec(
                     dataset_name=self.bag_name,
@@ -247,7 +245,22 @@ class SearchEngine:
                 )
                 spec_hash = spec.compute_spec_hash()
 
-                # Reuse evaluation if valid
+                job = {
+                    "backend_name": backend_name,
+                    "prof_key": prof_key,
+                    "traj_file": traj_file,
+                    "traj_sha": traj_sha,
+                    "spec": spec,
+                    "spec_hash": spec_hash,
+                    "cand_name": cand_name,
+                    "mesh_out": mesh_out,
+                    "pcd_out": pcd_out,
+                    "meta_out": meta_out,
+                    "action": "worker",
+                    "cached_summary": None,
+                    "w_res": None,
+                }
+
                 cached_summary = self.artifact_mgr.should_reuse_evaluation(
                     cand_name, self.force, expected_spec_hash=spec_hash,
                     dataset_fingerprint=self.dataset_fingerprint, split_hash=self.split_hash
@@ -256,92 +269,146 @@ class SearchEngine:
                     print(f"⏭️ Evaluation 재사용: {cand_name}")
                     self.stats["cached_count"] += 1
                     self._log_decision("Phase A (SLAM)", cand_name, "REUSED_CACHE", "Reused evaluation from cache")
-                    cached_summary["trajectory_metrics"] = traj_metrics.get(prof_key, {})
-                    cached_summary["trajectory_path"] = traj_file
-                    cached_summary["mesh_path"] = str(mesh_out)
-                    cached_summary["pcd_path"] = str(pcd_out)
-                    cached_summary["spec"] = spec.to_metadata_dict()
-                    slam_eval_results.append(cached_summary)
-                    family_results.append(cached_summary)
-                    continue
-
-                recon_t = 0.0
-                if self.artifact_mgr.should_reuse_reconstruction(
-                    mesh_out, pcd_out, candidate_spec=spec, dataset_fingerprint=self.dataset_fingerprint,
+                    job["action"] = "reuse_eval"
+                    job["cached_summary"] = cached_summary
+                elif self.artifact_mgr.should_reuse_reconstruction(
+                    mesh_out, pcd_out, candidate_spec=spec, fusion_hash=spec.compute_fusion_hash(),
+                    dataset_fingerprint=self.dataset_fingerprint,
                     trajectory_sha256=traj_sha, split_hash=self.split_hash, meta_path=meta_out, force=self.force
                 ):
                     print(f"⏭️ Mesh & PCD 재사용: {mesh_out.name}")
                     self._log_decision("Phase A (SLAM)", cand_name, "REUSED_MESH", "Reused existing mesh/pcd")
+                    job["action"] = "reuse_mesh"
                 else:
-                    stride = self._screening_stride()
-                    w_res = run_tsdf_worker(
-                        dataset_dir=str(self.dataset.dataset_dir),
-                        traj_file=traj_file,
-                        mesh_path=str(mesh_out),
-                        pcd_path=str(pcd_out),
-                        voxel=0.010,
-                        depth_max=self.depth_max,
-                        trunc_mult=self.trunc_mult,
-                        stride=stride,
-                        split_file=str(self.split_file),
-                        quick=self.quick,
-                        no_color=True
-                    )
-                    recon_t = w_res.runtime_sec
-                    self.stats["total_runtime_sec"] += recon_t
-                    if not w_res.is_success:
-                        print(f"  ❌ SLAM {prof_key} reconstruct 실패: {w_res.status} ({w_res.error_message})")
-                        self._log_decision("Phase A (SLAM)", cand_name, "FAILED", f"TSDF worker failed: {w_res.status}")
-                        fail_rec = self._fail_summary(cand_name, w_res.error_message or "worker crash", status=w_res.status)
-                        fail_rec["spec"] = spec.to_metadata_dict()
-                        fail_rec["trajectory_path"] = traj_file
-                        if w_res.resources:
-                            fail_rec["resources"] = w_res.resources.to_dict()
-                        slam_eval_results.append(fail_rec)
-                        family_results.append(fail_rec)
-                        continue
+                    job["stride"] = self._screening_stride()
 
-                    # Save artifact metadata on successful worker generation
-                    self.artifact_mgr.save_artifact_metadata(
-                        meta_out, spec, self.dataset_fingerprint, traj_sha, self.split_hash
-                    )
+                profile_jobs.append(job)
 
-                try:
-                    summary = evaluate_reconstruction(
-                        dataset_input=self.dataset,
-                        trajectory_input=traj_file,
-                        mesh_input=str(mesh_out),
-                        output_dir=eval_dir,
-                        candidate_name=cand_name,
-                        split_json=str(self.split_file),
-                        runtime_sec=recon_t,
-                        cheap=True,
-                        max_holdout_samples=self.stage1_samples
-                    )
-                    summary["trajectory_metrics"] = traj_metrics.get(prof_key, {})
-                    summary["trajectory_path"] = traj_file
-                    summary["mesh_path"] = str(mesh_out)
-                    summary["pcd_path"] = str(pcd_out)
-                    summary["spec"] = spec.to_metadata_dict()
-                    summary["spec_hash"] = spec_hash
-                    summary["dataset_fingerprint"] = self.dataset_fingerprint
-                    summary["split_hash"] = self.split_hash
-                    if 'w_res' in locals() and w_res.resources:
-                        summary["resources"] = w_res.resources.to_dict()
-                    self.stats["evaluated_count"] += 1
-                    self._log_decision("Phase A (SLAM)", cand_name, "EXECUTED", "Evaluated with cheap screening")
-                    slam_eval_results.append(summary)
-                    family_results.append(summary)
-                except Exception as e:
-                    print(f"❌ Phase A {prof_key} 평가 실패: {e}")
-                    self._log_decision("Phase A (SLAM)", cand_name, "FAILED", f"Evaluation exception: {str(e)}")
-                    fail_rec = self._fail_summary(cand_name, str(e), status="FAIL_EXCEPTION")
-                    fail_rec["spec"] = spec.to_metadata_dict()
+        # ── Parallel pre-pass: TSDF screening workers 2-way 동시 실행 ──
+        run_jobs = [j for j in profile_jobs if j["action"] == "worker"]
+        if len(run_jobs) > 1:
+            print(f"⚡ [Phase A] {len(run_jobs)} TSDF screening workers 병렬 실행 (2-way)")
+
+        def _exec_phase_a_tsdf(job: dict):
+            return run_tsdf_worker(
+                dataset_dir=str(self.dataset.dataset_dir),
+                traj_file=job["traj_file"],
+                mesh_path=str(job["mesh_out"]),
+                pcd_path=str(job["pcd_out"]),
+                voxel=0.010,
+                depth_max=self.depth_max,
+                trunc_mult=self.trunc_mult,
+                stride=job["stride"],
+                split_file=str(self.split_file),
+                quick=self.quick,
+                no_color=True
+            )
+
+        if run_jobs:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                future_map = {executor.submit(_exec_phase_a_tsdf, j): j for j in run_jobs}
+                for fut in concurrent.futures.as_completed(future_map):
+                    j = future_map[fut]
+                    try:
+                        j["w_res"] = fut.result()
+                    except Exception as exc:
+                        j["w_res"] = None
+                        j["worker_exception"] = str(exc)
+                    status = j["w_res"].status if j["w_res"] else "EXCEPTION"
+                    print(f"  ⚙️ TSDF screening worker done: {j['cand_name']} ({status})")
+
+        # ── Sequential deterministic evaluation pass ──
+        family_results_map: Dict[str, List[dict]] = {}
+        for job in profile_jobs:
+            backend_name = job["backend_name"]
+            prof_key = job["prof_key"]
+            cand_name = job["cand_name"]
+            traj_file = job["traj_file"]
+            recon_t = 0.0
+            family_results = family_results_map.setdefault(backend_name, [])
+
+            if job["action"] == "reuse_eval":
+                cached_summary = job["cached_summary"]
+                cached_summary["trajectory_metrics"] = traj_metrics.get(prof_key, {})
+                cached_summary["trajectory_path"] = traj_file
+                cached_summary["mesh_path"] = str(job["mesh_out"])
+                cached_summary["pcd_path"] = str(job["pcd_out"])
+                cached_summary["spec"] = job["spec"].to_metadata_dict()
+                slam_eval_results.append(cached_summary)
+                family_results.append(cached_summary)
+                continue
+
+            if job["action"] == "worker":
+                w_res = job.get("w_res")
+                if w_res is None:
+                    err = job.get("worker_exception", "tsdf worker exception")
+                    print(f"  ❌ SLAM {prof_key} reconstruct 실패: EXCEPTION ({err})")
+                    self._log_decision("Phase A (SLAM)", cand_name, "FAILED", f"TSDF worker exception: {err}")
+                    fail_rec = self._fail_summary(cand_name, err, status="FAIL_EXCEPTION")
+                    fail_rec["spec"] = job["spec"].to_metadata_dict()
                     fail_rec["trajectory_path"] = traj_file
                     slam_eval_results.append(fail_rec)
                     family_results.append(fail_rec)
+                    continue
 
-            # Rank family results and pick champion
+                recon_t = w_res.runtime_sec
+                self.stats["total_runtime_sec"] += recon_t
+                if not w_res.is_success:
+                    print(f"  ❌ SLAM {prof_key} reconstruct 실패: {w_res.status} ({w_res.error_message})")
+                    self._log_decision("Phase A (SLAM)", cand_name, "FAILED", f"TSDF worker failed: {w_res.status}")
+                    fail_rec = self._fail_summary(cand_name, w_res.error_message or "worker crash", status=w_res.status)
+                    fail_rec["spec"] = job["spec"].to_metadata_dict()
+                    fail_rec["trajectory_path"] = traj_file
+                    if w_res.resources:
+                        fail_rec["resources"] = w_res.resources.to_dict()
+                    slam_eval_results.append(fail_rec)
+                    family_results.append(fail_rec)
+                    continue
+
+                # Save artifact metadata on successful worker generation
+                self.artifact_mgr.save_artifact_metadata(
+                    job["meta_out"], job["spec"], self.dataset_fingerprint, job["traj_sha"], self.split_hash
+                )
+
+            try:
+                summary = evaluate_reconstruction(
+                    dataset_input=self.dataset,
+                    trajectory_input=traj_file,
+                    mesh_input=str(job["mesh_out"]),
+                    output_dir=self.artifact_mgr.get_candidate_eval_dir(cand_name),
+                    candidate_name=cand_name,
+                    split_json=str(self.split_file),
+                    runtime_sec=recon_t,
+                    cheap=True,
+                    max_holdout_samples=self.stage1_samples
+                )
+                summary["trajectory_metrics"] = traj_metrics.get(prof_key, {})
+                summary["trajectory_path"] = traj_file
+                summary["mesh_path"] = str(job["mesh_out"])
+                summary["pcd_path"] = str(job["pcd_out"])
+                summary["spec"] = job["spec"].to_metadata_dict()
+                summary["spec_hash"] = job["spec_hash"]
+                summary["dataset_fingerprint"] = self.dataset_fingerprint
+                summary["split_hash"] = self.split_hash
+                w_res = job.get("w_res")
+                if w_res is not None and w_res.resources:
+                    summary["resources"] = w_res.resources.to_dict()
+                self.stats["evaluated_count"] += 1
+                self._log_decision("Phase A (SLAM)", cand_name, "EXECUTED", "Evaluated with cheap screening")
+                slam_eval_results.append(summary)
+                family_results.append(summary)
+            except Exception as e:
+                print(f"❌ Phase A {prof_key} 평가 실패: {e}")
+                self._log_decision("Phase A (SLAM)", cand_name, "FAILED", f"Evaluation exception: {str(e)}")
+                fail_rec = self._fail_summary(cand_name, str(e), status="FAIL_EXCEPTION")
+                fail_rec["spec"] = job["spec"].to_metadata_dict()
+                fail_rec["trajectory_path"] = traj_file
+                slam_eval_results.append(fail_rec)
+                family_results.append(fail_rec)
+
+        # Rank family results and pick champion
+        for backend_name in backend_families.keys():
+            family_results = family_results_map.get(backend_name, [])
             ranked_fam = rank_candidate_summaries(family_results)
             valid_fam = [r for r in ranked_fam if r.get("hard_gate_pass", False)]
             if valid_fam:
@@ -470,18 +537,18 @@ class SearchEngine:
             traj_path = champ.trajectory_path
             traj_sha = champ.trajectory_sha256
 
-            # 1. TSDF Resolution Search
+            # 1. TSDF Resolution Search — plan all voxel jobs up-front
+            voxel_jobs: List[dict] = []
             for v in voxel_options:
                 v_mm = int(round(v * 1000))
                 cand_name = f"{slam_name}_tsdf{v_mm}mm"
                 mesh_tsdf = self.artifact_mgr.get_mesh_path(slam_name, v_mm)
                 pcd_tsdf = self.artifact_mgr.get_pcd_path(slam_name, v_mm)
                 meta_tsdf = self.artifact_mgr.get_artifact_meta_path(mesh_tsdf)
-                
+
                 # Common surface adapter mesh (Poisson depth=8, no simplification) for fair fusion comparison
                 adapter_mesh = self.artifact_mgr.get_mesh_path(f"{slam_name}_tsdf", v_mm, method="poisson")
                 adapter_meta = self.artifact_mgr.get_artifact_meta_path(adapter_mesh)
-                eval_dir = self.artifact_mgr.get_candidate_eval_dir(cand_name)
 
                 spec = CandidateSpec(
                     dataset_name=self.bag_name,
@@ -500,47 +567,165 @@ class SearchEngine:
                 print(f"▶️ Evaluating TSDF Voxel: {cand_name} ({v_mm}mm) with common Poisson adapter")
                 self.stats["total_candidates"] += 1
 
+                job = {
+                    "v": v,
+                    "v_mm": v_mm,
+                    "cand_name": cand_name,
+                    "mesh_tsdf": mesh_tsdf,
+                    "pcd_tsdf": pcd_tsdf,
+                    "meta_tsdf": meta_tsdf,
+                    "adapter_mesh": adapter_mesh,
+                    "adapter_meta": adapter_meta,
+                    "spec": spec,
+                    "spec_hash": spec_hash,
+                    "action": "worker_tsdf",
+                    "cached_summary": None,
+                    "w_res": None,
+                    "w_surf": None,
+                    "needs_adapter": False,
+                }
+
                 cached_summary = self.artifact_mgr.should_reuse_evaluation(
                     cand_name, self.force, expected_spec_hash=spec_hash,
                     dataset_fingerprint=self.dataset_fingerprint, split_hash=self.split_hash
                 )
                 if cached_summary:
                     print(f"⏭️ Evaluation 재사용: {cand_name}")
-                    cached_summary["fusion_method"] = "tsdf"
-                    cached_summary["voxel_size_m"] = v
-                    cached_summary["pcd_path"] = str(pcd_tsdf)
-                    cached_summary["mesh_path"] = str(adapter_mesh)
-                    cached_summary["direct_tsdf_mesh_path"] = str(mesh_tsdf)
-                    cached_summary["trajectory_path"] = traj_path
-                    cached_summary["spec"] = spec.to_metadata_dict()
+                    job["action"] = "reuse_eval"
+                    job["cached_summary"] = cached_summary
                     self.stats["cached_count"] += 1
                     self._log_decision("Phase B (Fusion)", cand_name, "REUSED_CACHE", "Reused evaluation from cache")
-                    fusion_eval_results.append(cached_summary)
-                    continue
-
-                recon_t = 0.0
-                # Check TSDF PCD reuse
-                if self.artifact_mgr.should_reuse_reconstruction(
-                    None, pcd_tsdf, candidate_spec=spec, dataset_fingerprint=self.dataset_fingerprint,
+                elif self.artifact_mgr.should_reuse_reconstruction(
+                    None, pcd_tsdf, candidate_spec=spec, fusion_hash=spec.compute_fusion_hash(),
+                    dataset_fingerprint=self.dataset_fingerprint,
                     trajectory_sha256=traj_sha, split_hash=self.split_hash, meta_path=meta_tsdf, force=self.force
                 ):
                     print(f"⏭️ TSDF PCD 재사용: {pcd_tsdf.name}")
                     self._log_decision("Phase B (Fusion)", cand_name, "REUSED_PCD", "Reused existing TSDF PCD")
+                    job["action"] = "pcd_ready"
                 else:
-                    stride = self._screening_stride()
-                    w_res = run_tsdf_worker(
-                        dataset_dir=str(self.dataset.dataset_dir),
-                        traj_file=traj_path,
-                        mesh_path=str(mesh_tsdf),
-                        pcd_path=str(pcd_tsdf),
-                        voxel=v,
-                        depth_max=self.depth_max,
-                        trunc_mult=self.trunc_mult,
-                        stride=stride,
-                        split_file=str(self.split_file),
-                        quick=self.quick,
-                        no_color=True
-                    )
+                    job["stride"] = self._screening_stride()
+
+                voxel_jobs.append(job)
+
+            # ── Stage 1: TSDF workers 2-way 병렬 실행 ──
+            tsdf_run_jobs = [j for j in voxel_jobs if j["action"] == "worker_tsdf"]
+            if len(tsdf_run_jobs) > 1:
+                print(f"⚡ [Phase B] {len(tsdf_run_jobs)} TSDF workers 병렬 실행 (2-way)")
+
+            def _exec_phase_b_tsdf(job: dict):
+                return run_tsdf_worker(
+                    dataset_dir=str(self.dataset.dataset_dir),
+                    traj_file=traj_path,
+                    mesh_path=str(job["mesh_tsdf"]),
+                    pcd_path=str(job["pcd_tsdf"]),
+                    voxel=job["v"],
+                    depth_max=self.depth_max,
+                    trunc_mult=self.trunc_mult,
+                    stride=job["stride"],
+                    split_file=str(self.split_file),
+                    quick=self.quick,
+                    no_color=True
+                )
+
+            if tsdf_run_jobs:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                    future_map = {executor.submit(_exec_phase_b_tsdf, j): j for j in tsdf_run_jobs}
+                    for fut in concurrent.futures.as_completed(future_map):
+                        j = future_map[fut]
+                        try:
+                            j["w_res"] = fut.result()
+                        except Exception as exc:
+                            j["w_res"] = None
+                            j["worker_exception"] = str(exc)
+                        status = j["w_res"].status if j["w_res"] else "EXCEPTION"
+                        print(f"  ⚙️ TSDF worker done: {j['cand_name']} ({status})")
+
+                for j in tsdf_run_jobs:
+                    if j["w_res"] is not None and j["w_res"].is_success:
+                        self.artifact_mgr.save_artifact_metadata(
+                            j["meta_tsdf"], j["spec"], self.dataset_fingerprint, traj_sha, self.split_hash
+                        )
+
+            # ── Stage 2: Common Surface Adapter (Poisson depth=8) 2-way 병렬 실행 ──
+            surf_run_jobs = []
+            for j in voxel_jobs:
+                if j["action"] == "reuse_eval":
+                    continue
+                if j["action"] == "worker_tsdf" and (j["w_res"] is None or not j["w_res"].is_success):
+                    continue
+                # PCD must exist by now (reused or freshly generated)
+                if is_artifact_valid(j["pcd_tsdf"]) and (not is_artifact_valid(j["adapter_mesh"]) or self.force):
+                    j["needs_adapter"] = True
+                    surf_run_jobs.append(j)
+
+            if len(surf_run_jobs) > 1:
+                print(f"⚡ [Phase B] {len(surf_run_jobs)} Poisson adapter workers 병렬 실행 (2-way)")
+
+            def _exec_phase_b_adapter(job: dict):
+                return run_surface_worker(
+                    input_ply=str(job["pcd_tsdf"]),
+                    output_mesh=str(job["adapter_mesh"]),
+                    method="poisson",
+                    voxel=job["v"],
+                    depth=8,
+                    simplify=0.0,
+                    no_simplify=True,
+                    no_color_transfer=True
+                )
+
+            if surf_run_jobs:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                    future_map = {executor.submit(_exec_phase_b_adapter, j): j for j in surf_run_jobs}
+                    for fut in concurrent.futures.as_completed(future_map):
+                        j = future_map[fut]
+                        try:
+                            j["w_surf"] = fut.result()
+                        except Exception as exc:
+                            j["w_surf"] = None
+                            j["surf_exception"] = str(exc)
+                        status = j["w_surf"].status if j["w_surf"] else "EXCEPTION"
+                        print(f"  ⚙️ Adapter worker done: {j['cand_name']} ({status})")
+
+                for j in surf_run_jobs:
+                    if j["w_surf"] is not None and j["w_surf"].is_success:
+                        self.artifact_mgr.save_artifact_metadata(
+                            j["adapter_meta"], j["spec"], self.dataset_fingerprint, traj_sha, self.split_hash
+                        )
+
+            # ── Stage 3: Sequential deterministic evaluation ──
+            for job in voxel_jobs:
+                v = job["v"]
+                v_mm = job["v_mm"]
+                cand_name = job["cand_name"]
+                recon_t = 0.0
+
+                if job["action"] == "reuse_eval":
+                    cached_summary = job["cached_summary"]
+                    cached_summary["fusion_method"] = "tsdf"
+                    cached_summary["voxel_size_m"] = v
+                    cached_summary["pcd_path"] = str(job["pcd_tsdf"])
+                    cached_summary["mesh_path"] = str(job["adapter_mesh"])
+                    cached_summary["direct_tsdf_mesh_path"] = str(job["mesh_tsdf"])
+                    cached_summary["trajectory_path"] = traj_path
+                    cached_summary["spec"] = job["spec"].to_metadata_dict()
+                    fusion_eval_results.append(cached_summary)
+                    continue
+
+                w_res = job["w_res"]
+                if job["action"] == "worker_tsdf":
+                    if w_res is None:
+                        err = job.get("worker_exception", "tsdf worker exception")
+                        print(f"  ❌ TSDF {v_mm}mm reconstruct 실패: EXCEPTION ({err})")
+                        self._log_decision("Phase B (Fusion)", cand_name, "FAILED", f"Worker exception: {err}")
+                        fail_rec = self._fail_summary(cand_name, err, status="FAIL_EXCEPTION")
+                        fail_rec["fusion_method"] = "tsdf"
+                        fail_rec["voxel_size_m"] = v
+                        fail_rec["spec"] = job["spec"].to_metadata_dict()
+                        fail_rec["trajectory_path"] = traj_path
+                        fusion_eval_results.append(fail_rec)
+                        continue
+
                     recon_t += w_res.runtime_sec
                     self.stats["total_runtime_sec"] += w_res.runtime_sec
                     if not w_res.is_success:
@@ -549,30 +734,27 @@ class SearchEngine:
                         fail_rec = self._fail_summary(cand_name, w_res.error_message or "worker crash", status=w_res.status)
                         fail_rec["fusion_method"] = "tsdf"
                         fail_rec["voxel_size_m"] = v
-                        fail_rec["spec"] = spec.to_metadata_dict()
+                        fail_rec["spec"] = job["spec"].to_metadata_dict()
                         fail_rec["trajectory_path"] = traj_path
                         if w_res.resources:
                             fail_rec["resources"] = w_res.resources.to_dict()
                         fusion_eval_results.append(fail_rec)
                         continue
 
-                    # Save TSDF artifact metadata
-                    self.artifact_mgr.save_artifact_metadata(
-                        meta_tsdf, spec, self.dataset_fingerprint, traj_sha, self.split_hash
-                    )
+                # Common surface adapter result check
+                w_surf = job["w_surf"]
+                if job["needs_adapter"]:
+                    if w_surf is None:
+                        err = job.get("surf_exception", "surface worker exception")
+                        print(f"  ❌ TSDF common adapter failed: EXCEPTION ({err})")
+                        fail_rec = self._fail_summary(cand_name, err, status="FAIL_EXCEPTION")
+                        fail_rec["fusion_method"] = "tsdf"
+                        fail_rec["voxel_size_m"] = v
+                        fail_rec["spec"] = job["spec"].to_metadata_dict()
+                        fail_rec["trajectory_path"] = traj_path
+                        fusion_eval_results.append(fail_rec)
+                        continue
 
-                # Run Common Surface Adapter (Poisson depth=8, no simplification) on TSDF PCD
-                if not is_artifact_valid(adapter_mesh) or self.force:
-                    w_surf = run_surface_worker(
-                        input_ply=str(pcd_tsdf),
-                        output_mesh=str(adapter_mesh),
-                        method="poisson",
-                        voxel=v,
-                        depth=8,
-                        simplify=0.0,
-                        no_simplify=True,
-                        no_color_transfer=True
-                    )
                     recon_t += w_surf.runtime_sec
                     self.stats["total_runtime_sec"] += w_surf.runtime_sec
                     if not w_surf.is_success:
@@ -580,21 +762,17 @@ class SearchEngine:
                         fail_rec = self._fail_summary(cand_name, w_surf.error_message or "adapter failure", status=w_surf.status)
                         fail_rec["fusion_method"] = "tsdf"
                         fail_rec["voxel_size_m"] = v
-                        fail_rec["spec"] = spec.to_metadata_dict()
+                        fail_rec["spec"] = job["spec"].to_metadata_dict()
                         fail_rec["trajectory_path"] = traj_path
                         fusion_eval_results.append(fail_rec)
                         continue
-
-                    self.artifact_mgr.save_artifact_metadata(
-                        adapter_meta, spec, self.dataset_fingerprint, traj_sha, self.split_hash
-                    )
 
                 try:
                     summary = evaluate_reconstruction(
                         dataset_input=self.dataset,
                         trajectory_input=traj_path,
-                        mesh_input=str(adapter_mesh),
-                        output_dir=eval_dir,
+                        mesh_input=str(job["adapter_mesh"]),
+                        output_dir=self.artifact_mgr.get_candidate_eval_dir(cand_name),
                         candidate_name=cand_name,
                         split_json=str(self.split_file),
                         runtime_sec=recon_t,
@@ -603,13 +781,13 @@ class SearchEngine:
                     )
                     summary["fusion_method"] = "tsdf"
                     summary["voxel_size_m"] = v
-                    summary["pcd_path"] = str(pcd_tsdf)
-                    summary["mesh_path"] = str(adapter_mesh)
-                    summary["direct_tsdf_mesh_path"] = str(mesh_tsdf)
+                    summary["pcd_path"] = str(job["pcd_tsdf"])
+                    summary["mesh_path"] = str(job["adapter_mesh"])
+                    summary["direct_tsdf_mesh_path"] = str(job["mesh_tsdf"])
                     summary["trajectory_path"] = traj_path
-                    summary["spec"] = spec.to_metadata_dict()
-                    summary["spec_hash"] = spec_hash
-                    if 'w_res' in locals() and w_res.resources:
+                    summary["spec"] = job["spec"].to_metadata_dict()
+                    summary["spec_hash"] = job["spec_hash"]
+                    if w_res is not None and w_res.resources:
                         summary["resources"] = w_res.resources.to_dict()
                     summary["dataset_fingerprint"] = self.dataset_fingerprint
                     summary["split_hash"] = self.split_hash
@@ -622,7 +800,7 @@ class SearchEngine:
                     fail_rec = self._fail_summary(cand_name, str(e), status="FAIL_EXCEPTION")
                     fail_rec["fusion_method"] = "tsdf"
                     fail_rec["voxel_size_m"] = v
-                    fail_rec["spec"] = spec.to_metadata_dict()
+                    fail_rec["spec"] = job["spec"].to_metadata_dict()
                     fail_rec["trajectory_path"] = traj_path
                     fusion_eval_results.append(fail_rec)
 
@@ -1268,6 +1446,15 @@ class SearchEngine:
             print(f"\n🔨 [Full Rebuild #{rank_idx}] Candidate: `{rebuild_cand_name}`")
             print(f"   SLAM: {slam_backend} (profile={slam_profile}, rate={replay_rate}), Fusion: {fusion_method} ({v_mm}mm), Surface: {surface_method}, Stride: 1 (FULL)")
             print(f"   Isolated Output Mesh: {rebuild_mesh.name}")
+
+            # Pre-flight memory gate: stride=1 full rebuild은 screening보다 훨씬 큰
+            # VBG를 할당한다. 워치독이 죽을 만한 후보는 실행 전에 걸러낸다.
+            if fusion_method != "direct_pointcloud":
+                est_mem_gb = estimate_vbg_memory_gb(traj_path, voxel_size=voxel_m, depth_max=self.depth_max)
+                if est_mem_gb > self.max_memory_gb_5mm:
+                    print(f"⏭️ [Full Rebuild Skipped] Estimated memory {est_mem_gb:.1f}GB exceeds limit {self.max_memory_gb_5mm:.1f}GB.")
+                    self._log_decision("Phase D (Full Rebuild)", rebuild_cand_name, "SKIPPED_RESOURCE", f"Estimated memory {est_mem_gb:.1f}GB > {self.max_memory_gb_5mm:.1f}GB")
+                    continue
 
             self.stats["total_candidates"] += 1
             t_rb_start = time.time()

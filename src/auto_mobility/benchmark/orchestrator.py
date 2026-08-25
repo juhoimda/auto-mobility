@@ -8,7 +8,9 @@ import os
 import sys
 import time
 import json
+import shutil
 import random
+import signal
 import numpy as np
 import subprocess
 from datetime import datetime
@@ -42,6 +44,7 @@ from auto_mobility.benchmark.artifacts import (
     save_trajectory_metadata,
     verify_trajectory_provenance
 )
+from auto_mobility.benchmark.resources import DEFAULT_RESOURCE_POLICY
 from auto_mobility.benchmark.search import SearchEngine
 from auto_mobility.benchmark.scoring import rank_candidate_summaries
 from auto_mobility.benchmark.manifest import (
@@ -68,6 +71,41 @@ SLAM_RUN_ARGS = {
     "stella_rgbd_rate0.5": ("--slam=stella_rgbd", "--rate=0.5"),
     "stella_rgbd_rate1.0": ("--slam=stella_rgbd", "--rate=1.0"),
 }
+
+# Offline runners (orbslam3_offline / stella_offline) process the full canonical
+# frame dataset and ignore the replay rate entirely (direct-offline path in
+# run_orbslam3_bag.py / run_stella_bag.py). A rate1.0 trajectory is therefore
+# byte-equivalent input for any rate variant of these backends.
+RATE_AGNOSTIC_OFFLINE_BACKENDS = {"orb_rgbd", "orb_rgbdi", "stella_rgbd"}
+
+# Hard ceiling for a single SLAM generation job (covers 0.5x RTAB dense replays).
+SLAM_GENERATION_TIMEOUT_SEC = 3600
+
+
+def _kill_tree(proc: subprocess.Popen, p=None) -> None:
+    """Terminate a SLAM generation job: process group + full recursive child tree.
+
+    run_slam.sh 내부의 setsid ros2 launch는 별도 세션이므로 killpg만으로는
+    정리되지 않는다 — psutil 재귀 kill을 병행한다.
+    """
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        pass
+    if p is not None:
+        try:
+            for c in p.children(recursive=True):
+                try:
+                    c.kill()
+                except Exception:
+                    pass
+            p.kill()
+        except Exception:
+            pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
 
 
 class BenchmarkOrchestrator:
@@ -197,10 +235,59 @@ class BenchmarkOrchestrator:
 
         # Collect missing profiles to generate
         missing_keys = [k for k in active_keys if k not in trajectories and k in SLAM_RUN_ARGS]
+
+        def _offline_source_key(k: str) -> Optional[str]:
+            spec_k = get_slam_profile_spec(k)
+            if spec_k.backend not in RATE_AGNOSTIC_OFFLINE_BACKENDS:
+                return None
+            if abs(spec_k.replay_rate - 1.0) < 1e-3:
+                return None
+            return f"{spec_k.backend}_rate1.0"
+
+        def _propagate_offline_duplicates(keys: List[str]) -> None:
+            """Reuse rate1.0 offline results for rate variants (identical output)."""
+            for k in keys:
+                if k in trajectories:
+                    continue
+                src_key = _offline_source_key(k)
+                if src_key is None or src_key not in trajectories:
+                    continue
+                spec_k = get_slam_profile_spec(k)
+                dst_fn = SLAM_TRAJ_FILES.get(k, lambda n: TRAJECTORY_DIR / get_trajectory_filename(n, k))
+                dst_file = dst_fn(self.bag_name)
+                try:
+                    shutil.copyfile(trajectories[src_key], dst_file)
+                    save_trajectory_metadata(dst_file, spec_k, bag_fingerprint=expected_fp)
+                    m = Trajectory.from_tum_file(str(dst_file)).compute_metrics()
+                    m["slam_backend"] = spec_k.backend
+                    m["slam_profile"] = spec_k.profile
+                    m["replay_rate"] = spec_k.replay_rate
+                    trajectories[k] = str(dst_file)
+                    traj_metrics[k] = m
+                    print(f"⏭️ Offline 중복 절약: {k} ← {src_key} 결과 재사용 (offline runner는 rate 무관)")
+                except Exception as exc:
+                    print(f"⚠️ Offline duplicate 복사 실패 ({k}): {exc}")
+
+        _propagate_offline_duplicates(missing_keys)
+        missing_keys = [k for k in missing_keys if k not in trajectories]
+
         if self.run_slam and missing_keys:
             from concurrent.futures import ThreadPoolExecutor, as_completed
             max_workers = min(3, len(missing_keys))
             print(f"\n🚀 병렬 SLAM 생성 시작: {len(missing_keys)}개 후보군 (동시 실행 워커 수: {max_workers})")
+
+            # LPT (Longest Processing Time first): 긴 작업(0.5x RTAB 등)을 먼저
+            # 투입해 3-worker makespan을 최소화한다.
+            def _job_cost(k: str) -> float:
+                s = get_slam_profile_spec(k)
+                unit = 1.0
+                if s.backend == "rtab":
+                    unit = 3.0 if s.profile == "dense" else 2.0
+                elif s.backend == "orb_rgbdi":
+                    unit = 1.2
+                return unit / max(s.replay_rate, 0.1)
+
+            missing_keys.sort(key=_job_cost, reverse=True)
 
             def _run_single_slam(worker_idx: int, k: str):
                 s = get_slam_profile_spec(k)
@@ -211,7 +298,66 @@ class BenchmarkOrchestrator:
 
                 print(f"⚙️ [워커 #{worker_idx+1} | DOMAIN={env['ROS_DOMAIN_ID']}] SLAM 실행: {k} → run_slam.sh {' '.join(SLAM_RUN_ARGS[k])}")
                 script = PROJECT_DIR / "scripts" / "pipeline" / "run_slam.sh"
-                subprocess.run(["bash", str(script), self.bag_name, *SLAM_RUN_ARGS[k]], env=env, check=False)
+
+                # 로그 파일 직접 기록 (PIPE 미사용 → ros2 verbose 출력으로 인한
+                # 파이프 버퍼 full 데드락 방지) + 타임아웃/메모리 워치독.
+                log_dir = self.report_dir / "slam_logs"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                log_path = log_dir / f"run_slam_{k}.log"
+                max_rss_bytes = int(DEFAULT_RESOURCE_POLICY.process_memory_budget_gb * (1024 ** 3))
+
+                proc = subprocess.Popen(
+                    ["bash", str(script), self.bag_name, *SLAM_RUN_ARGS[k]],
+                    env=env,
+                    stdout=open(log_path, "w"),
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True
+                )
+                rc = None
+                t0 = time.time()
+                try:
+                    import psutil
+                    p = psutil.Process(proc.pid)
+                except Exception:
+                    p = None
+
+                while True:
+                    try:
+                        rc = proc.wait(timeout=5.0)
+                        break
+                    except subprocess.TimeoutExpired:
+                        pass
+
+                    elapsed = time.time() - t0
+                    if elapsed > SLAM_GENERATION_TIMEOUT_SEC:
+                        print(f"⏱️ SLAM {k} 타임아웃 ({SLAM_GENERATION_TIMEOUT_SEC}s) → 프로세스 트리 종료")
+                        _kill_tree(proc, p)
+                        rc = -9
+                        break
+
+                    if p is not None:
+                        try:
+                            tree_rss = sum(
+                                c.memory_info().rss for c in [p, *p.children(recursive=True)]
+                                if c.is_running()
+                            )
+                            if tree_rss > max_rss_bytes:
+                                print(f"🛑 SLAM {k} RSS 가드 ({tree_rss / (1024**3):.1f}GB > "
+                                      f"{DEFAULT_RESOURCE_POLICY.process_memory_budget_gb:.0f}GB) → 종료")
+                                _kill_tree(proc, p)
+                                rc = -9
+                                break
+                        except Exception:
+                            pass
+
+                if rc != 0:
+                    try:
+                        with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
+                            tail = "".join(fh.readlines()[-15:])
+                    except Exception:
+                        tail = ""
+                    print(f"❌ SLAM {k} 실패 (rc={rc}, {time.time()-t0:.0f}s):\n{tail}")
+                    return k, None, None
 
                 if t_file.exists() and t_file.stat().st_size > 0:
                     save_trajectory_metadata(t_file, s, bag_fingerprint=expected_fp)
@@ -239,6 +385,9 @@ class BenchmarkOrchestrator:
                         print(f"✅ SLAM 완료: {k_res} → {Path(t_res).name}")
                     else:
                         print(f"⚠️ SLAM 생성 실패: {k_res}")
+
+            # 생성된 rate1.0 결과를 나머지 offline rate 변형에 전파 (중복 실행 제거)
+            _propagate_offline_duplicates([k for k in active_keys if k not in trajectories and k in SLAM_RUN_ARGS])
 
         return trajectories, traj_metrics
 

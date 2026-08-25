@@ -242,6 +242,30 @@ class CandidateSpec:
         s = json.dumps(d, sort_keys=True)
         return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
 
+    def compute_fusion_hash(self) -> str:
+        """Deterministic hash of ONLY the parameters that affect raw reconstruction
+        output (mesh/PCD from the fusion worker).
+
+        The TSDF/direct-fusion workers receive voxel/depth_max/trunc_mult/stride and
+        the split — surface method, postprocess, and unused passthrough params
+        (e.g. weight_threshold) do not influence reconstruction bytes. Candidates
+        sharing this hash can safely reuse the same mesh/PCD artifacts.
+        """
+        d = {
+            "schema": "fh1",
+            "dataset_name": self.dataset_name,
+            "slam_backend": self.slam_backend,
+            "slam_profile": self.slam_profile,
+            "replay_rate": self.replay_rate,
+            "frame_stride": self.frame_stride,
+            "fusion_method": self.fusion_method,
+            "fusion_params": {
+                k: v for k, v in self.fusion_params.items() if k != "weight_threshold"
+            },
+        }
+        s = json.dumps(d, sort_keys=True)
+        return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
+
     def to_metadata_dict(self) -> dict:
         return {
             "candidate_id": self.compute_candidate_id(),
