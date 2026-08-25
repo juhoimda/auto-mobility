@@ -208,5 +208,23 @@ if(EXISTS "${STELLA_DIR}/lib/libstella_vslam.so")
   install(TARGETS stella_offline DESTINATION lib/${PROJECT_NAME})
 endif()
 
+find_package(RTABMap QUIET)
+if(RTABMap_FOUND)
+  add_executable(rtabmap_offline src/auto_mobility/slam/rtabmap_offline.cpp)
+  target_compile_features(rtabmap_offline PRIVATE cxx_std_17)
+  target_include_directories(rtabmap_offline PRIVATE
+    ${RTABMap_INCLUDE_DIRS}
+    ${OpenCV_INCLUDE_DIRS}
+    ${EIGEN3_INCLUDE_DIR}
+  )
+  target_link_libraries(rtabmap_offline
+    rtabmap::core
+    rtabmap::utilite
+    ${OpenCV_LIBS}
+    pthread
+  )
+  install(TARGETS rtabmap_offline DESTINATION lib/${PROJECT_NAME})
+endif()
+
 ament_package()
 

@@ -87,48 +87,21 @@ elif [ "$SLAM_TYPE" == "stella" ] || [ "$SLAM_TYPE" == "stella_rgbd" ]; then
     python3 -c "from auto_mobility.benchmark.artifacts import save_trajectory_metadata; from auto_mobility.benchmark.candidate import SlamProfileSpec; save_trajectory_metadata('$OUT_TRAJ', SlamProfileSpec(candidate_key='$KEY', backend='stella_rgbd', profile='normal', replay_rate=float('$RATE')))" 2>/dev/null || true
     echo "✅ stella_vslam RGB-D 완료 -> $OUT_TRAJ"
 else
-    # RTAB-Map
+    # RTAB-Map (Frame-based synchronous zero-drop execution)
     if [ "$DENSE_MAPPING" = "true" ]; then
         PROFILE="dense"
-        KEY="rtab_dense_rate${RATE}"
-        DB_PATH="$DB_DIR/${BAG_NAME}_rtab_dense_rate${RATE}.db"
-        OUT_TRAJ="$TRAJECTORY_DIR/rtab_dense_rate${RATE}_${BAG_NAME}_trajectory.txt"
-        ALT_TRAJ="$TRAJECTORY_DIR/rtab_dense_${BAG_NAME}_trajectory.txt"
     else
         PROFILE="normal"
-        KEY="rtab_normal_rate${RATE}"
-        DB_PATH="$DB_DIR/${BAG_NAME}_rtab_normal_rate${RATE}.db"
-        OUT_TRAJ="$TRAJECTORY_DIR/rtab_normal_rate${RATE}_${BAG_NAME}_trajectory.txt"
-        ALT_TRAJ="$TRAJECTORY_DIR/rtab_${BAG_NAME}_trajectory.txt"
     fi
+    KEY="rtab_${PROFILE}_rate${RATE}"
+    OUT_TRAJ="$TRAJECTORY_DIR/${KEY}_${BAG_NAME}_trajectory.txt"
+    DB_PATH="$DB_DIR/${BAG_NAME}_${KEY}.db"
     
-    echo "▶️ RTAB-Map 백그라운드 시작..."
-    SLAM_LOG="$LOG_DIR/rtab_${BAG_NAME}_${PROFILE}_rate${RATE}.log"
-    setsid ros2 launch auto_mobility rtab_bag.launch.py \
-        database_path:="$DB_PATH" \
-        dense_mapping:="$DENSE_MAPPING" \
-        headless_benchmark:=true \
-        use_compressed:=true >"$SLAM_LOG" 2>&1 &
-    SLAM_PID=$!
-    
-    sleep 3
-    echo "▶️ Rosbag 재생 시작 (배속: ${RATE}x)..."
-    ros2 bag play "$BAG_PATH" --clock --rate "$RATE" --read-ahead-queue-size 2000
-    
-    echo "▶️ RTAB-Map 정리 및 DB 저장..."
-    sleep 2
-    kill -SIGINT -- -$SLAM_PID 2>/dev/null || true
-    sleep 3
-    kill -SIGKILL -- -$SLAM_PID 2>/dev/null || true
-    
-    # TUM Trajectory 내보내기
-    python3 -c "from auto_mobility.trajectory.export_trajectory import export_from_db; export_from_db('$DB_PATH', '$OUT_TRAJ')"
-    if [ ! -s "$OUT_TRAJ" ] || [ "$(grep -vc '^#' "$OUT_TRAJ")" -lt 2 ]; then
-        echo "❌ RTAB-Map trajectory export produced fewer than two poses: $OUT_TRAJ" >&2
-        exit 1
-    fi
-    python3 -c "from auto_mobility.benchmark.artifacts import save_trajectory_metadata; from auto_mobility.benchmark.candidate import SlamProfileSpec; save_trajectory_metadata('$OUT_TRAJ', SlamProfileSpec(candidate_key='$KEY', backend='rtab', profile='$PROFILE', replay_rate=float('$RATE')))" 2>/dev/null || true
-    cp "$OUT_TRAJ" "$ALT_TRAJ"
+    python3 "$PROJECT_DIR/src/auto_mobility/slam/run_rtabmap_bag.py" "$BAG_PATH" \
+        --out "$OUT_TRAJ" \
+        --db "$DB_PATH" \
+        --profile "$PROFILE" \
+        --rate "$RATE"
     
     echo "✅ RTAB-Map 완료 -> DB: $DB_PATH | Trajectory: $OUT_TRAJ"
 fi
