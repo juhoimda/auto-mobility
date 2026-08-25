@@ -60,11 +60,11 @@ SLAM_TRAJ_FILES = {
 }
 
 SLAM_RUN_ARGS = {
-    "rtab_dense_rate0.5": ("--slam=rtab", "--dense", "--rate=0.5"),
-    "rtab_normal_rate0.5": ("--slam=rtab", "--rate=0.5"),
-    "orb_rgbd_rate0.5": ("--slam=orb_rgbd", "--rate=0.5"),
-    "orb_rgbdi_rate0.5": ("--slam=orb_rgbdi", "--rate=0.5"),
-    "stella_rgbd_rate0.5": ("--slam=stella_rgbd", "--rate=0.5"),
+    "rtab_normal": ("--slam=rtab",),
+    "rtab_dense": ("--slam=rtab", "--dense"),
+    "orb_rgbd": ("--slam=orb_rgbd",),
+    "orb_rgbdi": ("--slam=orb_rgbdi",),
+    "stella_rgbd": ("--slam=stella_rgbd",),
 }
 
 # Hard ceiling for a single SLAM generation job (covers 0.5x RTAB dense replays).
@@ -158,13 +158,25 @@ class BenchmarkOrchestrator:
         expected_fp = dataset_fingerprint or getattr(self, "dataset_fingerprint", None)
 
         active_keys = list(STANDARD_SLAM_PROFILES.keys()) if (self.mode != "quick") else [
-            "rtab_normal_rate0.5", "orb_rgbd_rate0.5", "orb_rgbdi_rate0.5", "stella_rgbd_rate0.5"
+            "rtab_normal", "orb_rgbd", "orb_rgbdi", "stella_rgbd"
         ]
 
         for key in active_keys:
             spec = get_slam_profile_spec(key)
             traj_fn = SLAM_TRAJ_FILES.get(key, lambda n: TRAJECTORY_DIR / get_trajectory_filename(n, key))
             traj_file = traj_fn(self.bag_name)
+
+            # Check primary filename, then fallback legacy filenames
+            if not traj_file.exists() or traj_file.stat().st_size == 0:
+                legacy_candidates = [
+                    TRAJECTORY_DIR / f"{key}_rate1.0_{self.bag_name}_trajectory.txt",
+                    TRAJECTORY_DIR / f"{key}_rate0.5_{self.bag_name}_trajectory.txt",
+                    TRAJECTORY_DIR / f"{spec.backend}_{self.bag_name}_trajectory.txt"
+                ]
+                for leg in legacy_candidates:
+                    if leg.exists() and leg.stat().st_size > 0:
+                        traj_file = leg
+                        break
 
             if traj_file.exists() and traj_file.stat().st_size > 0 and not self.force:
                 is_valid, status, meta = verify_trajectory_provenance(traj_file, spec, expected_bag_fingerprint=expected_fp, strict=False)

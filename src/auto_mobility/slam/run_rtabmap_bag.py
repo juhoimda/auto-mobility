@@ -33,7 +33,7 @@ def run_rtabmap_on_bag(
             raise FileNotFoundError(f"Rosbag not found: {bag_input}")
 
     bag_name = bag_path.name
-    key = f"rtab_{profile}_rate{rate:g}"
+    key = f"rtab_{profile}"
     if out_trajectory is None:
         out_trajectory = str(TRAJECTORY_DIR / f"{key}_{bag_name}_trajectory.txt")
     out_trajectory = os.path.abspath(out_trajectory)
@@ -86,19 +86,20 @@ def run_rtabmap_on_bag(
         print(f"📊 Frames: {metrics.get('num_frames', 0)}, Length: {metrics.get('total_path_length_m', 0):.4f}m, MaxStep: {metrics.get('max_step_m', 0):.4f}m")
         
         # Save trajectory metadata
-        spec = SlamProfileSpec(candidate_key=key, backend="rtab", profile=profile, replay_rate=float(rate))
+        spec = SlamProfileSpec(candidate_key=key, backend="rtab", profile=profile, replay_rate=1.0)
         save_trajectory_metadata(out_trajectory, spec)
         
-        # Also copy legacy aliases if normal profile
-        if profile == "normal" and rate == 1.0:
-            alt_traj = str(TRAJECTORY_DIR / f"rtab_{bag_name}_trajectory.txt")
-            alt_db = str(DB_DIR / f"{bag_name}_rtab.db")
-            try:
-                import shutil
+        # Copy legacy aliases for seamless backward compatibility
+        try:
+            import shutil
+            alt_traj = str(TRAJECTORY_DIR / f"rtab_{profile}_rate1.0_{bag_name}_trajectory.txt")
+            alt_db = str(DB_DIR / f"{bag_name}_rtab_{profile}_rate1.0.db")
+            if out_trajectory != alt_traj:
                 shutil.copyfile(out_trajectory, alt_traj)
+            if out_db != alt_db:
                 shutil.copyfile(out_db, alt_db)
-            except Exception:
-                pass
+        except Exception:
+            pass
 
         return out_trajectory
     else:

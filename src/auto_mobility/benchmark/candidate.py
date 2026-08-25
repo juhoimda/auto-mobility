@@ -59,47 +59,47 @@ def get_rtab_db_filename(bag_name: str, profile: str = "normal", rate: float = 1
     return f"{bag_name}_rtab_{profile}_rate{rate:g}.db"
 
 
-# Standard SLAM Profile Registry
+# Standard SLAM Profile Registry (Frame-based direct execution)
 STANDARD_SLAM_PROFILES: Dict[str, SlamProfileSpec] = {
-    "rtab_dense_rate0.5": SlamProfileSpec(
-        candidate_key="rtab_dense_rate0.5",
+    "rtab_normal": SlamProfileSpec(
+        candidate_key="rtab_normal",
+        backend="rtab",
+        profile="normal",
+        replay_rate=1.0,
+        run_args=["--slam=rtab"],
+        description="RTAB-Map default keyframe mapping"
+    ),
+    "rtab_dense": SlamProfileSpec(
+        candidate_key="rtab_dense",
         backend="rtab",
         profile="dense",
-        replay_rate=0.5,
-        run_args=["--slam=rtab", "--dense", "--rate=0.5"],
-        description="RTAB-Map dense offline mapping at 0.5x playback"
+        replay_rate=1.0,
+        run_args=["--slam=rtab", "--dense"],
+        description="RTAB-Map dense keyframe mapping"
     ),
-    "rtab_normal_rate0.5": SlamProfileSpec(
-        candidate_key="rtab_normal_rate0.5",
-        backend="rtab",
-        profile="normal",
-        replay_rate=0.5,
-        run_args=["--slam=rtab", "--rate=0.5"],
-        description="RTAB-Map default keyframe mapping at 0.5x playback"
-    ),
-    "orb_rgbd_rate0.5": SlamProfileSpec(
-        candidate_key="orb_rgbd_rate0.5",
+    "orb_rgbd": SlamProfileSpec(
+        candidate_key="orb_rgbd",
         backend="orb_rgbd",
         profile="normal",
-        replay_rate=0.5,
-        run_args=["--slam=orb_rgbd", "--rate=0.5"],
-        description="ORB-SLAM3 RGB-D at 0.5x playback"
+        replay_rate=1.0,
+        run_args=["--slam=orb_rgbd"],
+        description="ORB-SLAM3 RGB-D"
     ),
-    "orb_rgbdi_rate0.5": SlamProfileSpec(
-        candidate_key="orb_rgbdi_rate0.5",
+    "orb_rgbdi": SlamProfileSpec(
+        candidate_key="orb_rgbdi",
         backend="orb_rgbdi",
         profile="normal",
-        replay_rate=0.5,
-        run_args=["--slam=orb_rgbdi", "--rate=0.5"],
-        description="ORB-SLAM3 RGB-D-Inertial at 0.5x playback"
+        replay_rate=1.0,
+        run_args=["--slam=orb_rgbdi"],
+        description="ORB-SLAM3 RGB-D-Inertial"
     ),
-    "stella_rgbd_rate0.5": SlamProfileSpec(
-        candidate_key="stella_rgbd_rate0.5",
+    "stella_rgbd": SlamProfileSpec(
+        candidate_key="stella_rgbd",
         backend="stella_rgbd",
         profile="normal",
-        replay_rate=0.5,
-        run_args=["--slam=stella_rgbd", "--rate=0.5"],
-        description="stella_vslam RGB-D at 0.5x playback"
+        replay_rate=1.0,
+        run_args=["--slam=stella_rgbd"],
+        description="stella_vslam RGB-D"
     ),
 }
 
@@ -108,6 +108,13 @@ def get_slam_profile_spec(key: str) -> SlamProfileSpec:
     """Retrieve or construct a SlamProfileSpec from key."""
     if key in STANDARD_SLAM_PROFILES:
         return STANDARD_SLAM_PROFILES[key]
+
+    # Normalize key by stripping legacy _rateX.X tag
+    norm_key = key
+    if "_rate" in key:
+        norm_key = key.split("_rate")[0]
+    if norm_key in STANDARD_SLAM_PROFILES:
+        return STANDARD_SLAM_PROFILES[norm_key]
     
     # Parse candidate key components if custom
     backend = "rtab"
@@ -123,19 +130,12 @@ def get_slam_profile_spec(key: str) -> SlamProfileSpec:
     elif "stella" in key:
         backend = "stella_rgbd"
 
-    if "0.5" in key:
-        rate = 0.5
-    elif "0.25" in key:
-        rate = 0.25
-    elif "0.75" in key:
-        rate = 0.75
-
     return SlamProfileSpec(
-        candidate_key=key,
+        candidate_key=norm_key,
         backend=backend,
         profile=profile,
         replay_rate=rate,
-        run_args=[f"--slam={backend}", f"--rate={rate}"] + (["--dense"] if profile == "dense" else [])
+        run_args=[f"--slam={backend}"] + (["--dense"] if profile == "dense" else [])
     )
 
 
