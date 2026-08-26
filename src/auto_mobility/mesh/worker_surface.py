@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-from auto_mobility.benchmark.resources import DEFAULT_RESOURCE_POLICY
+from auto_mobility.resources import DEFAULT_RESOURCE_POLICY
 from auto_mobility.mesh.mesh_open3d import generate_mesh
 from auto_mobility.mesh.cgal_surface import is_cgal_available
 

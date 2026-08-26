@@ -14,8 +14,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 from auto_mobility.config import BAG_DIR, TRAJECTORY_DIR, DB_DIR, PROJECT_DIR, FRAME_DIR
 from auto_mobility.dataset.frame_dataset import FrameDataset
 from auto_mobility.trajectory.io import Trajectory
-from auto_mobility.benchmark.artifacts import save_trajectory_metadata
-from auto_mobility.benchmark.candidate import SlamProfileSpec
 
 
 def run_rtabmap_on_bag(
@@ -84,9 +82,20 @@ def run_rtabmap_on_bag(
         print(f"\n✅ RTAB-Map ({profile}) Trajectory generated successfully in {runtime:.2f}s!")
         print(f"📊 Frames: {metrics.get('num_frames', 0)}, Length: {metrics.get('total_path_length_m', 0):.4f}m, MaxStep: {metrics.get('max_step_m', 0):.4f}m")
         
-        # Save trajectory metadata
-        spec = SlamProfileSpec(candidate_key=key, backend="rtab", profile=profile, replay_rate=1.0)
-        save_trajectory_metadata(out_trajectory, spec)
+        # Save trajectory metadata (V2: minimal sidecar, legacy helper removed)
+        import hashlib
+        import json as _json
+
+        meta = {
+            "schema_version": "recon-v2/sidecar-1",
+            "backend": "rtab",
+            "profile": profile,
+            "candidate_key": key,
+            "replay_rate": 1.0,
+            "trajectory_sha256": hashlib.sha256(open(out_trajectory, "rb").read()).hexdigest(),
+        }
+        with open(str(out_trajectory) + ".meta.json", "w", encoding="utf-8") as _fh:
+            _json.dump(meta, _fh, indent=2, sort_keys=True)
 
         return out_trajectory
     else:

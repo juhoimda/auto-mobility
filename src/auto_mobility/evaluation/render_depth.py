@@ -41,8 +41,8 @@ def generate_camera_rays(
         rays_tensor: o3d.core.Tensor of shape (H, W, 6) [ox, oy, oz, dx, dy, dz]
         norm_d_cam: np.ndarray of shape (H, W) representing ||d_cam|| (z-depth 변환용 계수)
     """
-    w = width or intrinsics.width
-    h = height or intrinsics.height
+    w = int(width or intrinsics.width)
+    h = int(height or intrinsics.height)
     fx, fy = intrinsics.fx, intrinsics.fy
     cx, cy = intrinsics.cx, intrinsics.cy
 

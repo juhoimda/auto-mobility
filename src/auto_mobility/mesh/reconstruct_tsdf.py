@@ -16,7 +16,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-from auto_mobility.benchmark.resources import DEFAULT_RESOURCE_POLICY, ResourcePolicy
+from auto_mobility.resources import DEFAULT_RESOURCE_POLICY, ResourcePolicy
 
 # Limit multi-threading CPU peak overload to prevent hardware thermal/power throttling shutdowns
 if "OMP_NUM_THREADS" not in os.environ:

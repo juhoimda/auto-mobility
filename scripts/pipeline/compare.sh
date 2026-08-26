@@ -92,4 +92,4 @@ fi
 _extract_frames_with_ros "$1" || exit $?
 
 export PYTHONPATH="$PROJECT_DIR/src:$PROJECT_DIR"
-exec python3 "$PROJECT_DIR/src/auto_mobility/slam/compare_algorithms.py" "$@"
+exec python3 -m auto_mobility.reconstruction.cli "$@"

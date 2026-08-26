@@ -32,7 +32,7 @@ from auto_mobility.dataset.frame_dataset import FrameDataset, CameraIntrinsics
 from auto_mobility.trajectory.io import Trajectory
 from auto_mobility.trajectory.association import associate_trajectory_to_frames
 from auto_mobility.evaluation.split import load_split_json
-from auto_mobility.benchmark.resources import DEFAULT_RESOURCE_POLICY, ResourcePolicy
+from auto_mobility.resources import DEFAULT_RESOURCE_POLICY, ResourcePolicy
 from auto_mobility.mesh.reconstruct_tsdf import AsyncFramePrefetcher
 
 

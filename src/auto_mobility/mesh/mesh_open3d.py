@@ -17,7 +17,7 @@ except ImportError:
     sys.exit(1)
 
 from auto_mobility.config import MESH_DEFAULTS
-from auto_mobility.benchmark.resources import DEFAULT_RESOURCE_POLICY, ResourcePolicy
+from auto_mobility.resources import DEFAULT_RESOURCE_POLICY, ResourcePolicy
 
 # CUDA voxel downsample이 CPU 대비 실질 이득을 내는 최소 포인트 수.
 GPU_VOXEL_MIN_POINTS = 5_000_000

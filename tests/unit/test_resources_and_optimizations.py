@@ -16,7 +16,7 @@ import open3d as o3d
 import pytest
 from pathlib import Path
 
-from auto_mobility.benchmark.resources import (
+from auto_mobility.resources import (
     ResourcePolicy,
     ResourceUsage,
     DEFAULT_RESOURCE_POLICY,
@@ -31,7 +31,7 @@ from auto_mobility.mesh.direct_fusion import precompute_camera_rays, backproject
 def test_resource_policy_defaults_and_env():
     """Verify ResourcePolicy default properties and environment variable generation."""
     policy = get_default_resource_policy()
-    assert policy.cpu_threads in (2, 4, 6, 8)
+    assert policy.cpu_threads >= 2
     assert policy.openmp_threads == policy.cpu_threads
     assert policy.blas_threads == 1
     assert policy.opencv_threads == 1

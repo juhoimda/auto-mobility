@@ -21,7 +21,7 @@ import argparse
 import time
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-from auto_mobility.benchmark.resources import DEFAULT_RESOURCE_POLICY
+from auto_mobility.resources import DEFAULT_RESOURCE_POLICY
 from auto_mobility.dataset.frame_dataset import FrameDataset
 from auto_mobility.mesh.reconstruct_tsdf import reconstruct
 from auto_mobility.evaluation.split import load_split_json
