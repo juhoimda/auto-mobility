@@ -1,0 +1,213 @@
+{
+  "schema_version": "1.0.0",
+  "summary": {
+    "mode": "preview",
+    "bag": "hallway",
+    "preview_frames_target": 800,
+    "common_frames_selected": 800,
+    "voxel_mm": 15.6,
+    "recommended_backend": "cuvslam",
+    "recommendation_reason": "cuvslam achieved lower depth P95 (1667.0mm vs 2000.7mm) and coverage (53.2% vs 36.3%)",
+    "backends": {
+      "rtab": {
+        "trajectory_coverage": 0.9998222222222222,
+        "tracking_gaps": 0,
+        "preview_frames": 800,
+        "voxel_mm": 15.6,
+        "mesh_vertices": 896111,
+        "mesh_triangles": 1233980,
+        "heldout": {
+          "depth_mae_mm": 736.83,
+          "depth_p95_mm": 2000.7,
+          "depth_coverage_ratio": 0.3628,
+          "free_space_correctness_ratio": 0.7222
+        },
+        "appearance": {
+          "texture_coverage": 0.3594,
+          "untextured_face_ratio": 0.126
+        },
+        "runtime_s": {
+          "total": 297.1
+        }
+      },
+      "cuvslam": {
+        "trajectory_coverage": 0.9998222222222222,
+        "tracking_gaps": 0,
+        "preview_frames": 800,
+        "voxel_mm": 15.6,
+        "mesh_vertices": 1518842,
+        "mesh_triangles": 2387279,
+        "heldout": {
+          "depth_mae_mm": 473.53,
+          "depth_p95_mm": 1666.97,
+          "depth_coverage_ratio": 0.5319,
+          "free_space_correctness_ratio": 0.8492
+        },
+        "appearance": {
+          "texture_coverage": 0.4531,
+          "untextured_face_ratio": 0.1938
+        },
+        "runtime_s": {
+          "total": 297.1
+        }
+      }
+    },
+    "wall_s": 297.1
+  },
+  "backends_detailed": {
+    "cuvslam": {
+      "config": {
+        "artifact_mode": "preview",
+        "production_final": false,
+        "backend": "cuvslam",
+        "voxel_mm_effective": 15.6,
+        "truncation_multiplier": 4.0,
+        "n_frames_total": 5625,
+        "n_preview_frames": 800,
+        "n_holdout_frames": 120,
+        "artifact_identity": {
+          "dataset_hash": "7af3a467b56220f8",
+          "trajectory_hash": "fd7568e50b256f4c",
+          "fusion_hash": "9fbd1cbc4d76c578",
+          "surface_hash": "186aa9117752e933"
+        },
+        "artifact_store": {
+          "mesh": {
+            "path": "output_preview/cache/artifacts/7af3a467b56220f8/fd7568e50b256f4c/9fbd1cbc4d76c578/186aa9117752e933/mesh/model.obj",
+            "sidecar_path": "output_preview/cache/artifacts/7af3a467b56220f8/fd7568e50b256f4c/9fbd1cbc4d76c578/186aa9117752e933/mesh/model.obj.meta.json",
+            "content_sha256": "01deed16123fbd263bc436334b0e59d304a353b4f236d29fea080d833b7a5dc7"
+          },
+          "mesh_raw": {
+            "path": "output_preview/cache/artifacts/7af3a467b56220f8/fd7568e50b256f4c/9fbd1cbc4d76c578/186aa9117752e933/mesh_raw/model_raw.obj",
+            "sidecar_path": "output_preview/cache/artifacts/7af3a467b56220f8/fd7568e50b256f4c/9fbd1cbc4d76c578/186aa9117752e933/mesh_raw/model_raw.obj.meta.json",
+            "content_sha256": "723a74be1dce16399adf641ecae451a6a6871d358d5ad6a496bc5f3f4bf1f615"
+          },
+          "mtl": {
+            "path": "output_preview/cache/artifacts/7af3a467b56220f8/fd7568e50b256f4c/9fbd1cbc4d76c578/186aa9117752e933/mtl/model.mtl",
+            "sidecar_path": "output_preview/cache/artifacts/7af3a467b56220f8/fd7568e50b256f4c/9fbd1cbc4d76c578/186aa9117752e933/mtl/model.mtl.meta.json",
+            "content_sha256": "5d8abeae78e616d9e97f9c35b28a659e71a34c65fc26da3beb4a52086000a6f2"
+          },
+          "atlas:model_atlas_0.png": {
+            "path": "output_preview/cache/artifacts/7af3a467b56220f8/fd7568e50b256f4c/9fbd1cbc4d76c578/186aa9117752e933/atlas/model_atlas_0.png",
+            "sidecar_path": "output_preview/cache/artifacts/7af3a467b56220f8/fd7568e50b256f4c/9fbd1cbc4d76c578/186aa9117752e933/atlas/model_atlas_0.png.meta.json",
+            "content_sha256": "a9147736ce4ea75dbf1ce5ba2fec08f7b00e4c87b6a6de930213a3e0e5c421cd"
+          }
+        }
+      },
+      "geometry_quality": {
+        "depth_mae_mm": 473.53,
+        "depth_rmse_mm": 752.94,
+        "depth_median_error_mm": 283.93,
+        "depth_p90_mm": 1269.58,
+        "depth_p95_mm": 1666.97,
+        "depth_coverage_ratio": 0.5319,
+        "observed_surface_completeness": 0.0968,
+        "free_space_violation_ratio": 0.1508,
+        "free_space_correctness_ratio": 0.8492,
+        "within_10mm_ratio": 0.0388,
+        "within_20mm_ratio": 0.0776,
+        "within_50mm_ratio": 0.182,
+        "n_eval_views": 12,
+        "status": "ok"
+      },
+      "appearance_quality": {
+        "texture_coverage": 0.4531,
+        "untextured_face_ratio": 0.1938,
+        "color_variance": 30.6,
+        "mean_brightness": 0.1703,
+        "n_atlas_cells": 1856
+      },
+      "delivery_mesh_stats": {
+        "mesh_vertices": 1518842,
+        "mesh_triangles": 2387279,
+        "pcd_points": 0,
+        "device": "cuda:0",
+        "cuda_fell_back": false
+      },
+      "coarse_mesh_stats": {
+        "mesh_vertices": 42181,
+        "mesh_triangles": 44725,
+        "pcd_points": 0,
+        "device": "cuda:0",
+        "cuda_fell_back": false
+      }
+    },
+    "rtab": {
+      "config": {
+        "artifact_mode": "preview",
+        "production_final": false,
+        "backend": "rtab",
+        "voxel_mm_effective": 15.6,
+        "truncation_multiplier": 4.0,
+        "n_frames_total": 5625,
+        "n_preview_frames": 800,
+        "n_holdout_frames": 120,
+        "artifact_identity": {
+          "dataset_hash": "7af3a467b56220f8",
+          "trajectory_hash": "aac30234b648f945",
+          "fusion_hash": "9fbd1cbc4d76c578",
+          "surface_hash": "186aa9117752e933"
+        },
+        "artifact_store": {
+          "mesh": {
+            "path": "output_preview/cache/artifacts/7af3a467b56220f8/aac30234b648f945/9fbd1cbc4d76c578/186aa9117752e933/mesh/model.obj",
+            "sidecar_path": "output_preview/cache/artifacts/7af3a467b56220f8/aac30234b648f945/9fbd1cbc4d76c578/186aa9117752e933/mesh/model.obj.meta.json",
+            "content_sha256": "f632591732331b5f71a5c86e4de4694dfb53c1af6676885b234f11b28ea752b5"
+          },
+          "mesh_raw": {
+            "path": "output_preview/cache/artifacts/7af3a467b56220f8/aac30234b648f945/9fbd1cbc4d76c578/186aa9117752e933/mesh_raw/model_raw.obj",
+            "sidecar_path": "output_preview/cache/artifacts/7af3a467b56220f8/aac30234b648f945/9fbd1cbc4d76c578/186aa9117752e933/mesh_raw/model_raw.obj.meta.json",
+            "content_sha256": "7c41b6c33ffe796e497dd9fa19b354deee8322befd12980a8d4ba9d00501aef6"
+          },
+          "mtl": {
+            "path": "output_preview/cache/artifacts/7af3a467b56220f8/aac30234b648f945/9fbd1cbc4d76c578/186aa9117752e933/mtl/model.mtl",
+            "sidecar_path": "output_preview/cache/artifacts/7af3a467b56220f8/aac30234b648f945/9fbd1cbc4d76c578/186aa9117752e933/mtl/model.mtl.meta.json",
+            "content_sha256": "5d8abeae78e616d9e97f9c35b28a659e71a34c65fc26da3beb4a52086000a6f2"
+          },
+          "atlas:model_atlas_0.png": {
+            "path": "output_preview/cache/artifacts/7af3a467b56220f8/aac30234b648f945/9fbd1cbc4d76c578/186aa9117752e933/atlas/model_atlas_0.png",
+            "sidecar_path": "output_preview/cache/artifacts/7af3a467b56220f8/aac30234b648f945/9fbd1cbc4d76c578/186aa9117752e933/atlas/model_atlas_0.png.meta.json",
+            "content_sha256": "4bd5f31b806f5a645558dc9e20eb66689ff889e640926959c8d6d2d7dab8f2fd"
+          }
+        }
+      },
+      "geometry_quality": {
+        "depth_mae_mm": 736.83,
+        "depth_rmse_mm": 1005.78,
+        "depth_median_error_mm": 564.26,
+        "depth_p90_mm": 1731.8,
+        "depth_p95_mm": 2000.7,
+        "depth_coverage_ratio": 0.3628,
+        "observed_surface_completeness": 0.037,
+        "free_space_violation_ratio": 0.2778,
+        "free_space_correctness_ratio": 0.7222,
+        "within_10mm_ratio": 0.024,
+        "within_20mm_ratio": 0.0466,
+        "within_50mm_ratio": 0.102,
+        "n_eval_views": 12,
+        "status": "ok"
+      },
+      "appearance_quality": {
+        "texture_coverage": 0.3594,
+        "untextured_face_ratio": 0.126,
+        "color_variance": 22.89,
+        "mean_brightness": 0.191,
+        "n_atlas_cells": 1472
+      },
+      "delivery_mesh_stats": {
+        "mesh_vertices": 896111,
+        "mesh_triangles": 1233980,
+        "pcd_points": 0,
+        "device": "cuda:0",
+        "cuda_fell_back": false
+      },
+      "coarse_mesh_stats": {
+        "mesh_vertices": 25877,
+        "mesh_triangles": 23143,
+        "pcd_points": 0,
+        "device": "cuda:0",
+        "cuda_fell_back": false
+      }
+    }
+  }
+}
