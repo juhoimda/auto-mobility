@@ -85,6 +85,10 @@ def run_with_spec(spec_path: Path) -> int:
         vram_budget_mb=spec.get("vram_budget_mb"),
         frames_per_chunk=int(spec.get("frames_per_chunk", 400)),
         chunk_pause_s=float(spec.get("chunk_pause_s", 8.0)),
+        store_color=bool(spec.get("store_color", False)),
+        weight_dtype=str(spec.get("weight_dtype", "float32")),
+        extraction_mode=str(spec.get("extraction_mode", "mesh_only")),
+        allow_cpu_migration=bool(spec.get("allow_cpu_migration", False)),
     )
 
     if out.mesh_obj is not None and len(out.mesh_obj.triangles) > 0:

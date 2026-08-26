@@ -2,10 +2,11 @@
 
 Each triangle gets its best view via raycasting visibility (occlusion check)
 plus facing-angle weight; the atlas cell is filled with the view's mean RGB.
-Bounded memory: one atlas buffer + per-chunk triangle processing (#75/#76).
+Bounded memory (#41): triangles are processed in chunks; per triangle only a
+running top-K (K = max_views_per_tri) score/color buffer is kept.
 
-Time  O(T * V_raycasts) with T triangles chunked, V candidate views <= 5.
-Memory O(atlas_pixels + chunk).
+Time  O(T * V) scoring with T chunked, V candidate views.
+Memory O(atlas_pixels + tri_chunk * K + per-chunk transients).
 """
 
 from __future__ import annotations
@@ -72,6 +73,7 @@ def bake_atlas(
     atlas_size: int = 1024,
     grid: int = 8,
     max_views_per_tri: int = 5,
+    tri_chunk: int = 65536,
     out_dir: Path = None,
     name: str = "model",
 ) -> BakeResult:
@@ -99,45 +101,63 @@ def bake_atlas(
     view_ids = [fid for fid, _ in views if fid in poses_wc]
     img_by_fid = dict(views)
     T_count = len(triangles)
-    # float32 keeps the score/color matrices bounded for large meshes
-    S = np.full((T_count, len(view_ids)), -1.0, dtype=np.float32)
-    C = np.zeros((T_count, len(view_ids), 3), dtype=np.float32)
+    # #41/#42: bounded top-K buffers instead of full dense S[T,V]/C[T,V,3].
+    K_top = max(1, int(max_views_per_tri))
+    tri_chunk = max(1, int(tri_chunk))
+    top_scores = np.full((T_count, K_top), -1.0, dtype=np.float32)
+    top_colors = np.zeros((T_count, K_top, 3), dtype=np.float32)
 
-    for j, fid in enumerate(view_ids):
-        T_wc = poses_wc[fid]
-        cam_pos = T_wc[:3, 3]
-        d = cam_pos[None, :] - centers
-        dist = np.linalg.norm(d, axis=1)
-        facing = (normals * d).sum(axis=1) / np.maximum(dist, 1e-6)
-        visible = np.ones(T_count, dtype=bool)
-        if scene is not None:
-            origins = centers + normals * 1e-3
-            dirs = d / np.maximum(dist, 1e-6)[:, None]
-            rays = np.concatenate([origins, dirs], axis=1).astype(np.float32)
-            ans = scene.cast_rays(_o3d.core.Tensor(rays))
-            t_hit = ans["t_hit"].numpy()
-            visible = ~np.isfinite(t_hit) | (t_hit > dist - 0.02)
-        S[:, j] = np.where(
-            visible & (facing > 0.1) & valid_face,
-            facing / np.log2(2.0 + dist),
-            -1.0,
-        )
-        img = img_by_fid[fid]
-        cols, _ = sample_view_color(
-            img, K, T_wc, tris.reshape(-1, 3), img.shape[1], img.shape[0])
-        C[:, j] = cols.reshape(T_count, 3, 3).mean(axis=1)
+    for s0 in range(0, T_count, tri_chunk):
+        s1 = min(T_count, s0 + tri_chunk)
+        c_tris = tris[s0:s1]
+        c_centers = centers[s0:s1]
+        c_normals = normals[s0:s1]
+        c_valid = valid_face[s0:s1]
+        n_c = s1 - s0
+        for j, fid in enumerate(view_ids):
+            T_wc = poses_wc[fid]
+            cam_pos = T_wc[:3, 3]
+            d = cam_pos[None, :] - c_centers
+            dist = np.linalg.norm(d, axis=1)
+            facing = (c_normals * d).sum(axis=1) / np.maximum(dist, 1e-6)
+            visible = np.ones(n_c, dtype=bool)
+            if scene is not None:
+                origins = c_centers + c_normals * 1e-3
+                dirs = d / np.maximum(dist, 1e-6)[:, None]
+                rays = np.concatenate([origins, dirs], axis=1).astype(np.float32)
+                ans = scene.cast_rays(_o3d.core.Tensor(rays))
+                t_hit = ans["t_hit"].numpy()
+                visible = ~np.isfinite(t_hit) | (t_hit > dist - 0.02)
+            scores = np.where(
+                visible & (facing > 0.1) & c_valid,
+                (facing / np.log2(2.0 + dist)).astype(np.float32),
+                np.float32(-1.0),
+            )
+            img = img_by_fid[fid]
+            cols, _ = sample_view_color(
+                img, K, T_wc, c_tris.reshape(-1, 3), img.shape[1], img.shape[0])
+            cols = cols.reshape(n_c, 3, 3).mean(axis=1).astype(np.float32)
+            # running top-K merge: candidate enters if it beats the current min
+            min_idx = np.argmin(top_scores[s0:s1], axis=1)
+            min_val = top_scores[np.arange(s0, s1), min_idx]
+            better = scores > min_val
+            rows_b = np.nonzero(better)[0]
+            if len(rows_b):
+                gi = rows_b + s0
+                top_colors[gi, min_idx[rows_b]] = cols[rows_b]
+                top_scores[gi, min_idx[rows_b]] = scores[rows_b]
 
     face_colors = {}
     for tid in range(T_count):
-        row = S[tid]
-        cand = np.argsort(row)[::-1][:max_views_per_tri]
-        best = [b for b in cand if row[b] > 0]
+        row = top_scores[tid]
+        best = [b for b in range(len(row)) if row[b] > 0]
         if not best:
             if valid_face[tid]:
                 untextured += 1
             continue
         w = row[best]
-        face_colors[tid] = ((C[tid, best] * w[:, None]).sum(axis=0) / w.sum()).astype(np.uint8)
+        face_colors[tid] = ((top_colors[tid, best] * w[:, None]).sum(axis=0)
+                            / w.sum()).astype(np.uint8)
 
     order = sorted(face_colors)
     cell_of_face = {}

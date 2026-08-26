@@ -41,20 +41,215 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _generate_trajectories(bag: str, project_dir: Path) -> list:
-    """Run rtabmap via run_slam.sh (ROS-isolated subprocess) for a missing bag."""
-    script = project_dir / "scripts" / "pipeline" / "run_slam.sh"
-    if not script.is_file():
-        print(f"[v2] run_slam.sh not found: {script}")
-        return []
-    print(f"[v2] generating trajectory via run_slam.sh {bag} --slam=rtab ...")
+def _check_trajectory_cache(tp: Path) -> bool:
+    """Format-level check: valid TUM (>=10 lines, 8 cols)."""
+    if not tp.is_file() or tp.stat().st_size < 64:
+        return False
     try:
-        subprocess.run(["bash", str(script), bag, "--slam=rtab"], check=False)
-    except OSError as exc:
-        print(f"[v2] run_slam.sh failed to launch: {exc}")
-        return []
+        # at least 10 lines with 8 cols
+        with open(tp) as fh:
+            lines = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
+        if len(lines) < 10:
+            return False
+        for l in lines[:5]:
+            if len(l.split()) != 8:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _dataset_fingerprint(dataset_dir: Path | None) -> str | None:
+    """sha256 over frames.csv + camera_info.json (cache invalidation key)."""
+    import hashlib
+
+    if dataset_dir is None:
+        return None
+    frames_csv = Path(dataset_dir) / "frames.csv"
+    if not frames_csv.is_file():
+        return None
+    h = hashlib.sha256()
+    h.update(frames_csv.read_bytes())
+    cam = Path(dataset_dir) / "camera_info.json"
+    if cam.is_file():
+        h.update(cam.read_bytes())
+    return h.hexdigest()[:16]
+
+
+def _verify_trajectory_cache(tp: Path, dataset_dir: Path | None = None) -> bool:
+    """Content-verified reuse (#50): TUM format + sidecar integrity.
+
+    A cached trajectory is reusable only when ALL hold:
+      - valid TUM format;
+      - sidecar <tp>.meta.json exists and its trajectory_sha256 matches the
+        file bytes (catches truncation/corruption/overwrites);
+      - sidecar dataset_fingerprint matches the current frames.csv+intrinsics
+        hash when a dataset is known (catches re-extracted frames, changed
+        sync/intrinsics -> stale pose timestamps).
+    Missing sidecar or fingerprint mismatch => regenerate (fail-closed).
+    """
+    if not _check_trajectory_cache(tp):
+        return False
+    meta_path = Path(str(tp) + ".meta.json")
+    if not meta_path.is_file():
+        print(f"[v2] trajectory cache rejected (no sidecar): {tp}")
+        return False
+    try:
+        import hashlib
+
+        meta = json.loads(meta_path.read_text())
+        sha = hashlib.sha256(Path(tp).read_bytes()).hexdigest()
+        if str(meta.get("trajectory_sha256", "")) != sha:
+            print(f"[v2] trajectory cache rejected (sha mismatch): {tp}")
+            return False
+        fp = _dataset_fingerprint(dataset_dir)
+        want_fp = meta.get("dataset_fingerprint")
+        if fp is not None and want_fp is not None and want_fp != fp:
+            print(f"[v2] trajectory cache rejected (dataset changed): {tp}")
+            return False
+        if fp is not None and want_fp is None:
+            # legacy sidecar without provenance: fail-closed
+            print(f"[v2] trajectory cache rejected (sidecar lacks dataset "
+                  f"fingerprint): {tp}")
+            return False
+        return True
+    except Exception as exc:
+        print(f"[v2] trajectory cache rejected ({exc}): {tp}")
+        return False
+
+
+def _wait_gpu_recovery(pre_used_mb: float | None, timeout_s: float = 5.0,
+                       tolerance_mb: float = 256.0) -> float | None:
+    """§4/§6: wait until VRAM returns near the pre-SLAM baseline.
+
+    Returns recovered delta (post - pre) once recovered, or None when
+    nvidia-smi is unavailable.  Never blocks the pipeline beyond timeout_s.
+    """
+    try:
+        from auto_mobility.reconstruction.runtime.machine_profile import _probe_gpu
+
+        deadline = time.time() + timeout_s
+        post = None
+        while time.time() < deadline:
+            g = _probe_gpu()
+            post = int(g.vram_total_mb) - int(g.vram_free_mb) \
+                if g.present else None
+            if post is None:
+                break
+            if pre_used_mb is None or post <= pre_used_mb + tolerance_mb:
+                delta = (post - pre_used_mb) if pre_used_mb is not None else 0.0
+                print(f"[v2] VRAM recovery ok: baseline {pre_used_mb}MB -> "
+                      f"{post}MB (delta {delta:.0f}MB)")
+                return delta
+            time.sleep(1.0)
+        if post is not None:
+            print(f"[v2] WARNING: VRAM not fully recovered after SLAM exit: "
+                  f"baseline {pre_used_mb}MB -> {post}MB")
+        return None
+    except Exception:
+        return None
+
+
+def _gpu_used_mb() -> float | None:
+    try:
+        from auto_mobility.reconstruction.runtime.machine_profile import _probe_gpu
+
+        g = _probe_gpu()
+        return float(int(g.vram_total_mb) - int(g.vram_free_mb)) if g.present else None
+    except Exception:
+        return None
+
+
+def _run_slam_subprocess(bag: str, project_dir: Path, backend: str,
+                         dataset_dir: Path | None = None) -> Path | None:
+    """Run one SLAM backend in isolated subprocess (§4 sequential).
+
+    - RTAB: via run_slam.sh (ROS-isolated)
+    - cuVSLAM: via python -m auto_mobility.reconstruction.pose.backends.cuvslam_worker
+      (CUDA context stays in child; parent VRAM recovers after exit).
+    Returns trajectory path if cache-valid.
+    """
     traj_dir = project_dir / "ros2_data" / "trajectories"
-    return sorted(traj_dir.glob(f"*{bag}*trajectory*.txt"))
+    traj_dir.mkdir(parents=True, exist_ok=True)
+    if backend == "rtab":
+        script = project_dir / "scripts" / "pipeline" / "run_slam.sh"
+        # content-verified reuse (#50)
+        cand = sorted(traj_dir.glob(f"*{bag}*rtab*trajectory*.txt"))
+        for c in cand:
+            if _verify_trajectory_cache(c, dataset_dir):
+                print(f"[v2] reusing cached RTAB trajectory: {c}")
+                return c
+        if not script.is_file():
+            print(f"[v2] run_slam.sh not found: {script}")
+            return None
+        # §7 phase-specific: RTAB is CPU-bound, allow 6-8 threads; parent is idle
+        env = dict(__import__("os").environ)
+        env["OMP_NUM_THREADS"] = env.get("RTAB_OMP_THREADS", "6")
+        print(f"[v2] generating RTAB trajectory via run_slam.sh {bag} (isolated)...")
+        try:
+            subprocess.run(["bash", str(script), bag, "--slam=rtab"],
+                           check=False, env=env)
+        except OSError as exc:
+            print(f"[v2] run_slam.sh failed: {exc}")
+            return None
+        # verify content after child exit (#50)
+        cand = sorted(traj_dir.glob(f"*{bag}*rtab*trajectory*.txt"))
+        for c in cand:
+            if _verify_trajectory_cache(c, dataset_dir):
+                return c
+        return None
+    elif backend == "cuvslam":
+        # §3/§4 cuVSLAM RGB-D via isolated worker subprocess
+        # dataset_dir is canonical RGB-D frames
+        ds = dataset_dir or (project_dir / "ros2_data" / "frames" / bag)
+        if not ds.is_dir():
+            print(f"[v2] cuvslam: dataset not found {ds}")
+            return None
+        out_traj = traj_dir / f"cuvslam_{bag}_trajectory.txt"
+        if _verify_trajectory_cache(out_traj, dataset_dir):
+            print(f"[v2] reusing cached cuVSLAM trajectory: {out_traj}")
+            return out_traj
+        # run worker subprocess with GPU-bound thread cap 2-4 (§7)
+        cmd = [sys.executable, "-m",
+               "auto_mobility.reconstruction.pose.backends.cuvslam_worker",
+               "--dataset", str(ds), "--out", str(out_traj)]
+        env = {k: v for k, v in __import__("os").environ.items()
+               if not k.startswith(("ROS_", "RMW_"))}
+        env["OMP_NUM_THREADS"] = env.get("CUVSLAM_OMP_THREADS", "3")
+        env["OPENBLAS_NUM_THREADS"] = "1"
+        # §6 pre-run baseline for VRAM recovery measurement
+        pre_used = _gpu_used_mb()
+        print(f"[v2] generating cuVSLAM trajectory via isolated worker ({ds}) ...")
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, env=env)
+            print(res.stdout[-2000:] if res.stdout else "")
+            if res.stderr:
+                print(res.stderr[-2000:])
+            if res.returncode == 0 and _verify_trajectory_cache(out_traj, dataset_dir):
+                # §4/§6 verify VRAM returns to near-baseline after child exit
+                _wait_gpu_recovery(pre_used, timeout_s=5.0)
+                return out_traj
+            else:
+                print(f"[v2] cuvslam worker failed rc={res.returncode}")
+        except Exception as exc:
+            print(f"[v2] cuvslam worker launch failed: {exc}")
+        return None
+    return None
+
+
+def _generate_trajectories(bag: str, project_dir: Path,
+                           dataset_dir: Path | None = None) -> list:
+    """Generate both RTAB and cuVSLAM trajectories sequentially (§5)."""
+    out = []
+    # §5 sequential default: cuVSLAM (GPU) then RTAB (CPU) to avoid combined overload
+    for backend in ("cuvslam", "rtab"):
+        tp = _run_slam_subprocess(bag, project_dir, backend, dataset_dir)
+        if tp is not None:
+            out.append(tp)
+        # small cooldown between GPU-heavy and CPU-heavy stages
+        if backend == "cuvslam" and tp is not None:
+            time.sleep(2.0)
+    return out
 
 
 def _register_final_artifacts(out_dir: Path, rank_dir: Path, dataset_spec: dict,
@@ -103,14 +298,34 @@ def run(args: argparse.Namespace) -> int:
         BudgetManager, Scheduler, compute_resource_budgets, load_or_probe_profile,
     )
     from auto_mobility.reconstruction.config import default_config
+    from auto_mobility.reconstruction.runtime.run_state import (
+        detect_previous_host_reset, mark_completed, write_run_state)
 
     t_start = time.monotonic()
     cfg = default_config()
     out_dir = args.output
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    profile = load_or_probe_profile(out_dir / "cache")
+    # §25 unclean-run detection before any heavy work
+    # single lightweight profile probe; reused for detection AND budgets (#13)
+    profile = load_or_probe_profile(out_dir / "cache", measure_overhead=False)
+    reset_info = detect_previous_host_reset(out_dir)
+    safe_mode = bool(reset_info.get("previous_host_reset"))
+    if safe_mode:
+        print(f"[v2] SAFE MODE activated: {reset_info} — sequential, coarser, more reserve")
+    # §9 optional overhead measurement in separate call (subprocess-only)
+    # we measure overhead lazily once per machine and cache it; here we keep 0 until calibration
+    if safe_mode:
+        # §26 SAFE MODE profile adjustments (§26): more reserve, smaller block target, no fine
+        from dataclasses import replace as _rep
+        cfg = _rep(cfg, resources=_rep(cfg.resources, vram_reserve_gb=2.0,
+                                        vram_free_fraction=0.45))
     budgets = compute_resource_budgets(profile, cfg.resources)
+    # write RUNNING state atomically
+    try:
+        write_run_state(out_dir, profile, status="RUNNING")
+    except Exception:
+        pass
     budget_min = args.budget_min if args.budget_min is not None else (12.0 if args.quick else 30.0)
     budget = BudgetManager(budget_min * 60.0, cfg.budget)
     scheduler = Scheduler(
@@ -160,10 +375,18 @@ def run(args: argparse.Namespace) -> int:
             traj_root = Path("ros2_data/trajectories")
             if traj_root.is_dir():
                 traj_files = sorted(traj_root.glob(f"*{args.bag}*trajectory*.txt"))
-        if not traj_files and args.run_slam:
-            generated = _generate_trajectories(args.bag,
-                                               Path(__file__).resolve().parents[2])
-            traj_files.extend(generated)
+        if args.run_slam:
+            # §5/#50: per-backend cache verification decides reuse vs
+            # regeneration — an unrelated stale file must NOT block
+            # generation of a missing backend.
+            generated = _generate_trajectories(
+                args.bag, Path(__file__).resolve().parents[2], dataset_dir)
+            existing = {str(Path(t).resolve()) for t in traj_files}
+            for g in generated:
+                if str(Path(g).resolve()) not in existing:
+                    traj_files.append(g)
+            print(f"[v2] available/generated {len(traj_files)} "
+                  f"trajectory file(s) after sequential isolation")
         for tp in traj_files:
             tp = Path(tp)
             if tp.is_file():
@@ -222,12 +445,22 @@ def run(args: argparse.Namespace) -> int:
         pass
     manifest["wall_s"] = round(elapsed, 1)
     manifest["budget_actual"] = budget.to_dict()
+    manifest["safe_mode"] = safe_mode
+    manifest["host_reset_info"] = reset_info
 
     (out_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
     decisions = manifest.get("standard_result", {}).get("decisions", [])
     (out_dir / "decision_trace.json").write_text(json.dumps(
         {"winner": manifest.get("standard_result", {}).get("winner"),
          "decisions": decisions}, indent=2))
+    try:
+        # §25 mark completed atomically — only when ok to avoid false reset masking
+        ok = manifest.get("standard_result", {}).get("ok", audit_ok)
+        if ok:
+            mark_completed(out_dir)
+        # else keep RUNNING so next boot can decide SAFE MODE conservatively
+    except Exception:
+        pass
     print(f"[v2] manifest written: {out_dir}/run_manifest.json ({elapsed:.1f}s)")
     return 0 if audit_ok else 1
 

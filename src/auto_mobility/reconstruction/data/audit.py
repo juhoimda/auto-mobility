@@ -36,6 +36,11 @@ class DatasetAuditResult:
     sync_dt_ms_max: float = 0.0
     sync_failures: int = 0
     depth_valid_ratio_median: float = 1.0
+    # §17 depth distribution for adaptive depth_max
+    depth_p95_m: float = 6.0
+    depth_p98_m: float = 6.0
+    depth_p99_m: float = 6.0
+    suggested_depth_max_m: float = 4.0
     corrupt_frames: list = field(default_factory=list)
     issues: list = field(default_factory=list)
 
@@ -53,6 +58,10 @@ class DatasetAuditResult:
             "sync_dt_ms_max": round(self.sync_dt_ms_max, 2),
             "sync_failures": self.sync_failures,
             "depth_valid_ratio_median": round(self.depth_valid_ratio_median, 4),
+            "depth_p95_m": round(self.depth_p95_m, 3),
+            "depth_p98_m": round(self.depth_p98_m, 3),
+            "depth_p99_m": round(self.depth_p99_m, 3),
+            "suggested_depth_max_m": round(self.suggested_depth_max_m, 2),
             "corrupt_frames": self.corrupt_frames,
             "issues": [
                 {"code": i.code, "severity": i.severity, "detail": i.detail}
@@ -115,6 +124,17 @@ def audit_dataset(
                     continue
                 q = sel.quality_from_arrays(frame, rgb, depth)
                 valid_ratios.append(q.depth_valid_ratio)
+                # §17 collect depth values for p95/p99 (in meters, valid>0)
+                if depth is not None and depth.size > 0:
+                    d = depth.astype(np.float32).flatten()
+                    # assume uint16 mm; filter 0 and >10m outliers
+                    d = d[(d > 0) & (d < 10000)] / 1000.0
+                    if d.size > 100:
+                        # sample to keep memory bounded
+                        _ = np.percentile(d, [95, 98, 99])  # warm cache
+                        if not hasattr(result, "_depth_samples"):
+                            result._depth_samples = []  # type: ignore
+                        result._depth_samples.extend(d[::max(1, len(d)//500)].tolist())  # type: ignore
             except (OSError, ValueError, cv2.error) as exc:
                 result.corrupt_frames.append(frame.frame_id)
                 result.issues.append(
@@ -127,6 +147,24 @@ def audit_dataset(
     result.depth_valid_ratio_median = (
         float(np.median(valid_ratios)) if valid_ratios else 1.0
     )
+    # §17 compute depth distribution from sampled probes
+    try:
+        samples = getattr(result, "_depth_samples", None)
+        if samples and len(samples) > 100:
+            arr = np.asarray(samples, dtype=np.float32)
+            result.depth_p95_m = float(np.percentile(arr, 95))
+            result.depth_p98_m = float(np.percentile(arr, 98))
+            result.depth_p99_m = float(np.percentile(arr, 99))
+            # suggested depth_max: clamp between 3m and 6m, prefer p98 with 0.5m headroom
+            sugg = float(np.clip(result.depth_p98_m + 0.3, 3.0, 4.5))
+            # if p99 far beyond p95, scene has long corridor -> cap at 4
+            if result.depth_p99_m > result.depth_p95_m + 1.0:
+                sugg = min(sugg, 4.0)
+            result.suggested_depth_max_m = round(sugg, 2)
+        if hasattr(result, "_depth_samples"):
+            delattr(result, "_depth_samples")
+    except Exception:
+        pass
 
     if not result.monotonic_rgb:
         result.issues.append(AuditIssue("RGB_TS_NON_MONOTONIC", "WARN", "rgb timestamps regress"))

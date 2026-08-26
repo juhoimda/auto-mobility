@@ -101,6 +101,32 @@ def _gpu_sample() -> tuple[float, float, float] | None:
         return None
 
 
+def vram_barrier_breach(used_mb: float, baseline_mb: Optional[float],
+                        limit_mb: Optional[float],
+                        hard_ceiling_mb: Optional[float]):
+    """§10/§11 VRAM barrier semantics (pure; unit-testable).
+
+    Returns (kill_reason_or_None, effective_baseline).
+    - hard_ceiling_mb compares ABSOLUTE memory.used against the global
+      ceiling (baseline + delta <= total - reserve invariant);
+    - limit_mb is an INCREMENTAL job budget and must compare
+      (used - baseline), never absolute usage.
+    When baseline is None it is lazily established from the first sample so
+    the incremental budget is never misused as an absolute barrier.
+    """
+    if hard_ceiling_mb is not None and used_mb > hard_ceiling_mb:
+        return (f"hard_ceiling {used_mb:.0f}MB > {hard_ceiling_mb}MB",
+                baseline_mb)
+    if limit_mb is not None:
+        if baseline_mb is None:
+            baseline_mb = used_mb
+        delta = used_mb - baseline_mb
+        if delta > limit_mb:
+            return (f"job_delta {delta:.0f}MB > budget {limit_mb}MB "
+                    f"(used {used_mb:.0f} base {baseline_mb:.0f})", baseline_mb)
+    return (None, baseline_mb)
+
+
 def run_monitored_process(
     cmd: list,
     log_path: Path,
@@ -114,10 +140,12 @@ def run_monitored_process(
 ) -> ProcessOutcome:
     """Run cmd as a detached session; logs go straight to log_path.
 
-    gpu_limits (HW barrier, L2): {"vram_mb", "temp_c", "power_w"} optional
-    thresholds sampled every ~2s while the child runs. Any breach kills the
-    child session immediately so a runaway GPU job can never destabilize the
-    host between two parent-side checkpoints.
+    gpu_limits (HW barrier, L2): {"vram_mb", "temp_c", "power_w",
+       "hard_ceiling_mb", "baseline_used_mb"}  §10 dual budget:
+       - incremental job budget: vram_mb (job delta must stay < limit)
+       - global hard ceiling: hard_ceiling_mb = total_vram - hard_reserve
+       Both are checked; either breach kills the session.
+       Baseline is sampled at job start so delta = current_used - baseline.
     """
     import psutil
 
@@ -135,6 +163,14 @@ def run_monitored_process(
     gpu_temp_strikes = 0
     gpu_power_strikes = 0
 
+    # §10 sample baseline at job start for incremental budget
+    baseline_vram = None
+    if gpu_limits and (gpu_limits.get("vram_mb") or gpu_limits.get("hard_ceiling_mb")):
+        samp = _gpu_sample()
+        if samp is not None:
+            baseline_vram = samp[0]
+        else:
+            baseline_vram = gpu_limits.get("baseline_used_mb")
     with open(log_path, "w", encoding="utf-8") as log_fh:
         popen_obj = subprocess.Popen(
             cmd,
@@ -168,7 +204,9 @@ def run_monitored_process(
                     else:
                         violations = 0
 
-                # ---- HW barrier (L2): bounded-frequency GPU sampling ----
+                # ---- HW barrier (L2): bounded-frequency GPU sampling (§10/§12) ----
+                # This is LAST defense; primary is predict/preflight + scheduler admission.
+                # GPU memory can spike GBs between polls, so never rely solely on watchdog.
                 if gpu_limits:
                     gpu_poll_tick += 1
                     if gpu_poll_tick % 4 == 0:  # ~2s at default interval
@@ -176,26 +214,35 @@ def run_monitored_process(
                         if s is not None:
                             vram_mb, temp_c, power_w = s
                             limit_vram = gpu_limits.get("vram_mb")
+                            hard_ceiling = gpu_limits.get("hard_ceiling_mb")
                             limit_temp = gpu_limits.get("temp_c")
                             limit_power = gpu_limits.get("power_w")
-                            if limit_vram and vram_mb > limit_vram:
-                                gpu_killed_reason = (
-                                    f"vram {vram_mb:.0f}MB > barrier {limit_vram}MB")
-                            elif limit_temp and temp_c >= limit_temp:
+                            # §10/§11 dual check via shared pure helper:
+                            # hard ceiling = absolute, vram budget = job delta.
+                            # No baseline -> lazily established from first
+                            # sample (never absolute-vs-incremental mismatch).
+                            breached = False
+                            reason, baseline_vram = vram_barrier_breach(
+                                vram_mb, baseline_vram, limit_vram,
+                                hard_ceiling)
+                            if reason:
+                                gpu_killed_reason = reason
+                                breached = True
+                            if not breached and limit_temp and temp_c >= limit_temp:
                                 gpu_temp_strikes += 1
                                 if gpu_temp_strikes >= 3:
                                     gpu_killed_reason = (
                                         f"temp {temp_c:.0f}C >= barrier {limit_temp}C x3")
-                            else:
+                            elif not breached:
                                 gpu_temp_strikes = 0
-                            if not gpu_killed_reason and limit_power and power_w > 0 \
+                            if not gpu_killed_reason and not breached and limit_power and power_w > 0 \
                                     and power_w >= limit_power:
                                 gpu_power_strikes += 1
                                 if gpu_power_strikes >= 5:
                                     gpu_killed_reason = (
                                         f"power {power_w:.0f}W >= barrier "
                                         f"{limit_power}W x5")
-                            elif not gpu_killed_reason:
+                            elif not gpu_killed_reason and not breached:
                                 gpu_power_strikes = 0
                             if gpu_killed_reason:
                                 print(f"[hw_barrier] killing session: "

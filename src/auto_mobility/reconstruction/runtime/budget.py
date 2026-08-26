@@ -52,10 +52,20 @@ def compute_resource_budgets(
     if profile.gpu.present and profile.gpu.vram_free_mb > 0:
         free_vram = profile.gpu.vram_free_mb
         vram_reserve = int(cfg.vram_reserve_gb * 1000)
+        # §9/§10: subtract measured CUDA/Open3D context overhead before applying
+        # sweet-spot fractions. When overhead is 0 (unmeasured or no GPU), budget
+        # stays backwards-compatible (existing unit tests unchanged).
+        overhead = int(getattr(profile, "cuda_context_overhead_mb", 0) or 0) + \
+                   int(getattr(profile, "open3d_context_overhead_mb", 0) or 0)
+        # also consider baseline driver usage already captured in free, but ensure
+        # we keep at least 512MB headroom even if overhead is large.
+        effective_free = max(0, free_vram - overhead)
         vram_budget = min(
-            int(free_vram * cfg.vram_free_fraction),
-            max(0, free_vram - vram_reserve),
+            int(effective_free * cfg.vram_free_fraction),
+            max(0, effective_free - vram_reserve),
         )
+        # also enforce hard ceiling: current used + budget must not exceed total - reserve
+        # we expose vram_reserve for caller-side ceiling checks (§10 dual budget)
     else:
         vram_reserve = 0
         vram_budget = 0

@@ -93,6 +93,10 @@ def integrate_frames_isolated(
         "vram_budget_mb": vram_budget_mb,
         "frames_per_chunk": int(frames_per_chunk),
         "chunk_pause_s": float(chunk_pause_s),
+        "store_color": False,
+        "weight_dtype": "float32",
+        "extraction_mode": "mesh_only",
+        "allow_cpu_migration": False,
         "mesh_out": str(mesh_out),
         "pcd_out": str(pcd_out),
         "stats_out": str(stats_out),
@@ -109,12 +113,17 @@ def integrate_frames_isolated(
         if not k.startswith(("ROS_", "RMW_"))
     }
     env["PYTHONPATH"] = f"{_PROJECT_SRC}:{env.get('PYTHONPATH', '')}"
-    # Hard thread caps: the parent stays mostly idle while the worker runs,
-    # but a bounded OMP footprint keeps combined CPU load laptop-safe.
-    env["OMP_NUM_THREADS"] = "6"
+    # §7 phase-specific CPU caps: GPU TSDF stage is CPU-capped (3-4 threads) so
+    # that combined CPU+GPU power stays laptop-safe. Previously global OMP=6
+    # caused sustained 572% load with GPU 100% (§7).
+    # Caller may override via env; default 4 for GPU-bound fusion.
+    omp_threads = str(__import__("os").environ.get("FUSION_OMP_THREADS", "4"))
+    env["OMP_NUM_THREADS"] = omp_threads
     env["OPENBLAS_NUM_THREADS"] = "1"
     env["MKL_NUM_THREADS"] = "1"
-    env["NUMEXPR_NUM_THREADS"] = "4"
+    env["NUMEXPR_NUM_THREADS"] = omp_threads
+    env["OPENCV_NUM_THREADS"] = "1"
+    env["VECLIB_MAXIMUM_THREADS"] = "1"
 
     outcome = run_monitored_process(
         cmd,

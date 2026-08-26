@@ -26,6 +26,24 @@ import numpy as np
 
 TRUNCATION_MULTIPLIER = 4.0
 
+_MC_OVERHEAD_FACTOR = 2.0
+_MIN_FUSION_RAM_MB = 2048
+
+
+def estimate_fusion_ram_mb(blocks: int) -> int:
+    """Truthful host-RAM estimate for one isolated fusion worker (§11).
+
+    8 bytes/voxel (tsdf f32 + weight f32, no color) × MC overhead 2.0.
+    Never clamped with min(): if this exceeds the RAM budget the caller must
+    REJECT/degrade, not report a smaller number to the scheduler.
+    """
+    from auto_mobility.reconstruction.fusion.open3d_vbg import (
+        _BYTES_PER_BLOCK_NO_COLOR)
+
+    return max(_MIN_FUSION_RAM_MB,
+               int(blocks * _BYTES_PER_BLOCK_NO_COLOR
+                   * _MC_OVERHEAD_FACTOR / 1e6))
+
 
 def _quat_to_R(q):
     x, y, z, w = q
@@ -37,14 +55,27 @@ def _quat_to_R(q):
         [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
 
 
-def _nearest_pose_map(traj, frames):
+def _nearest_pose_map(traj, frames, max_pose_gap_ms: float = 200.0,
+                      dropped=None):
+    """Nearest trajectory pose per frame with a gap guard.
+
+    Frames whose nearest pose is farther than max_pose_gap_ms are DROPPED
+    instead of being bridged by a stale pose (sparse cuVSLAM trajectories
+    during tracking loss previously leaked stale poses into fusion).
+    dropped: optional list collecting dropped frame_ids.
+    """
     ts_list = list(traj.timestamps)
     poses = {}
+    max_gap_s = max_pose_gap_ms / 1000.0
     for f in frames:
         i = int(np.searchsorted(traj.timestamps, f.rgb_timestamp))
         i = min(max(i, 1), len(ts_list) - 1)
         if abs(ts_list[i - 1] - f.rgb_timestamp) < abs(ts_list[i] - f.rgb_timestamp):
             i -= 1
+        if abs(ts_list[i] - f.rgb_timestamp) > max_gap_s:
+            if dropped is not None:
+                dropped.append(f.frame_id)
+            continue
         T = np.eye(4)
         T[:3, :3] = _quat_to_R(traj.orientations[i])
         T[:3, 3] = traj.positions[i]
@@ -263,22 +294,77 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                    vram_budget_mb=vram_budget_mb)
         return vox
 
-    def submit_fusion(ids, pose_by_frame, vox_m, mask_dict, tag):
-        """Run one isolated fusion through the scheduler's single GPU slot."""
+    class ResourcePlanError(RuntimeError):
+        pass
+
+    def _fusion_ram_estimate_mb(vox_m: float) -> int:
+        """Truthful host-RAM estimate for one isolated fusion worker (§11).
+
+        8 bytes/voxel (tsdf f32 + weight f32, no color) × MC overhead 2.0.
+        Never clamped with min(): if this exceeds the RAM budget the caller
+        must REJECT/degrade, not report a smaller number to the scheduler.
+        """
         from auto_mobility.reconstruction.fusion.open3d_vbg import (
-            estimate_block_count, required_vram_mb)
+            estimate_block_count, _BYTES_PER_BLOCK_NO_COLOR)
+
+        blocks = estimate_block_count(bbox_holder["diag_m"], vox_m,
+                                      vram_budget_mb)
+        return max(2048, int(blocks * _BYTES_PER_BLOCK_NO_COLOR
+                             * 2.0 / 1e6))
+
+    def submit_fusion(ids, pose_by_frame, vox_m, mask_dict, tag,
+                      planned_peak_vram_mb=None):
+        """Run one isolated fusion through the scheduler's single GPU slot.
+
+        §11: never lie to the scheduler with min(vram_want, budget).  If the
+        required VRAM exceeds the declared budget, REJECT -> DEGRADE -> REPLAN.
+        §7: phase-specific CPU threads (fusion uses 3-4 threads, not global 6).
+        planned_peak_vram_mb: optional active-block preflight prediction; the
+        truthful admission requirement is the conservative max of both models.
+        """
+        from auto_mobility.reconstruction.fusion.open3d_vbg import (
+            required_vram_mb)
         from auto_mobility.reconstruction.runtime.scheduler import JobSpec
 
         vram_want = int(required_vram_mb(bbox_holder["diag_m"], vox_m)) or 512
-        ram_want = min(max(int(estimate_block_count(
-            bbox_holder["diag_m"], vox_m, vram_budget_mb)
-            * (16 ** 3) * 20 / 1e6), 2048), int(ram_budget_mb or 4096))
+        if planned_peak_vram_mb:
+            vram_want = max(vram_want, int(planned_peak_vram_mb))
+        ram_want = _fusion_ram_estimate_mb(vox_m)
+        # §11 fix: hard admission check before submit — scheduler must see truth.
+        avail_vram = int(vram_budget_mb) if vram_budget_mb else vram_want
+        avail_ram = int(ram_budget_mb) if ram_budget_mb else ram_want
+        if vram_want > avail_vram or ram_want > avail_ram:
+            decide("vram_preflight", "REJECTED",
+                   "required VRAM/RAM exceeds incremental budget; degrading "
+                   "instead of lying to scheduler",
+                   vram_want=vram_want, vram_budget_mb=avail_vram,
+                   ram_want=ram_want, ram_budget_mb=avail_ram, tag=tag)
+            # degrade voxel one step via max_fitting and retry caller-side
+            degraded = fit_voxel_to_vram(bbox_holder["diag_m"], vox_m * 1000.0 * 1.25)
+            if degraded / 1000.0 > vox_m:
+                vox_m = degraded / 1000.0
+                vram_want = int(required_vram_mb(bbox_holder["diag_m"], vox_m)) or 512
+                if planned_peak_vram_mb:
+                    vram_want = max(vram_want, int(planned_peak_vram_mb))
+                ram_want = _fusion_ram_estimate_mb(vox_m)
+                if vram_want > avail_vram or ram_want > avail_ram:
+                    decide("vram_preflight", "REJECTED_FINAL",
+                           "even degraded voxel does not fit; skipping job",
+                           vram_want=vram_want, ram_want=ram_want, tag=tag)
+                    return None
+            else:
+                return None
+        # §7 phase-specific: GPU TSDF stage capped at 4 threads
+        fusion_threads = 4.0
+        vram_request = int(vram_want)
+        # also enforce hard ceiling via nvidia-smi baseline §10 — job delta vs global
+        # ceiling is checked inside worker barrier; here we just request truthfully.
         spec = JobSpec(
             name=f"fusion:{tag}",
-            cpu_threads=6.0,
+            cpu_threads=fusion_threads,
             ram_mb=ram_want,
             gpu_slots=1,
-            vram_mb=min(vram_want, int(vram_budget_mb or vram_want)),
+            vram_mb=vram_request,
         )
 
         def job():
@@ -353,14 +439,51 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             masks[fid] = compute_consistency_mask(d.astype(np.float32), rd)
         return masks
 
+    def _plan_active_blocks_safe(ids, poses, vox_mm):
+        """Active-block preflight (#16): frustum-true block prediction.
+
+        Bounded-cost: samples at most ~80 frames.  Returns predicted
+        extraction peak MB or None on any failure (fallback stays the
+        bbox model).  Conservative max() admission is applied by submit_fusion.
+        """
+        try:
+            from auto_mobility.reconstruction.fusion.open3d_vbg import (
+                plan_active_blocks)
+
+            stride = max(1, len(ids) // 80)
+            plan = plan_active_blocks(
+                ids[::stride], poses, K, W, H, vox_mm / 1000.0,
+                TRUNCATION_MULTIPLIER,
+                depth_min_m=0.2, depth_max_m=4.0,
+                load_depth_mm=depth, load_mask=None,
+                store_color=False, sample_stride=1)
+            decide("active_block_plan", "PLANNED",
+                   "frustum-based active-block preflight",
+                   unique_block_count=plan.get("unique_block_count"),
+                   planned_tsdf_mb=round(plan.get("estimated_tsdf_bytes", 0) / 1e6, 1),
+                   planned_extraction_peak_mb=round(
+                       plan.get("estimated_extraction_peak", 0) / 1e6, 1),
+                   safe_block_count=plan.get("safe_block_count"))
+            return plan.get("estimated_extraction_peak")
+        except Exception as exc:
+            decide("active_block_plan", "FALLBACK_BBOX_MODEL",
+                   f"planner unavailable: {exc}")
+            return None
+
     def search_phase(cand, idx: int) -> dict | None:
         """Train-only search: refine -> coarse -> masks -> fuse -> holdout eval."""
         from auto_mobility.reconstruction.pose.refine_pipeline import refine_trajectory
 
         t_cand = time.time()
         traj = trajectories[cand.backend]
-        poses0 = _nearest_pose_map(traj, frames)
-        ids_all = [f.frame_id for f in frames]
+        dropped = []
+        poses0 = _nearest_pose_map(traj, frames, dropped=dropped)
+        if dropped:
+            decide("pose_association", "GAP_DROPPED",
+                   "frames beyond max_pose_gap_ms dropped instead of bridged "
+                   "by stale poses",
+                   candidate=cand.backend, n_dropped=len(dropped))
+        ids_all = [f.frame_id for f in frames if f.frame_id in poses0]
         split = split_from_poses(ids_all, [poses0[i] for i in ids_all])
         train_set, val_set = set(split.train_ids), set(split.val_ids)
         id_set = set(id_to_frame)
@@ -390,11 +513,14 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 bbox_holder["diag_m"],
                 float(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0))) + 2.0)
         eff_voxel = fit_voxel_to_vram(bbox_holder["diag_m"], voxel_mm)
+        planned_peak_mb = _plan_active_blocks_safe(search_ids, poses,
+                                                   eff_voxel)
 
         t_g = time.time()
         coarse_ids = search_ids[:: max(1, len(search_ids) // 80)] or search_ids
         coarse = submit_fusion(coarse_ids, poses, eff_voxel / 1000.0, None,
-                               f"c{idx}_coarse")
+                               f"c{idx}_coarse",
+                               planned_peak_vram_mb=planned_peak_mb)
         masks = {}
         if coarse is not None and coarse.mesh_obj is not None \
                 and len(coarse.mesh_obj.triangles) > 0:
@@ -409,7 +535,8 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                    candidate=cand.backend)
 
         fused_search = submit_fusion(search_ids, poses, eff_voxel / 1000.0,
-                                     masks or None, f"c{idx}_search")
+                                     masks or None, f"c{idx}_search",
+                                     planned_peak_vram_mb=planned_peak_mb)
         geo_eval = {"status": "NOT_APPLICABLE", "reason": "no mesh"}
         if fused_search is not None and val_frames:
             geo_eval = evaluate_geometry(fused_search.mesh_obj, val_frames, poses,
@@ -431,7 +558,8 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                        voxel_mm=fine)
             else:
                 refined_try = submit_fusion(search_ids, poses, fine / 1000.0,
-                                            masks or None, f"c{idx}_fine")
+                                            masks or None, f"c{idx}_fine",
+                                            planned_peak_vram_mb=planned_peak_mb)
                 if refined_try is not None and refined_try.ok \
                         and refined_try.mesh_triangles >= fused_search.mesh_triangles:
                     fused_search, eff_voxel_final = refined_try, fine
@@ -452,6 +580,7 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             "fused_search": fused_search, "geo_eval": geo_eval,
             "refinement": refinement, "wall_s": time.time() - t_cand,
             "trajectory_failed": (not sc.ok) if sc is not None else False,
+            "planned_peak_mb": planned_peak_mb,
         }
 
     def deliver_candidate(info: dict, tag: str) -> dict:
@@ -461,7 +590,8 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
         delivery_ids = info["delivery_ids"]
 
         final = submit_fusion(delivery_ids, poses, info["eff_voxel"] / 1000.0,
-                              info["masks"] or None, f"{tag}_final")
+                              info["masks"] or None, f"{tag}_final",
+                              planned_peak_vram_mb=info.get("planned_peak_mb"))
         if final is None:
             return {"ok": False, "tag": tag, "name": info["name"],
                     "reason": "final fusion failed",

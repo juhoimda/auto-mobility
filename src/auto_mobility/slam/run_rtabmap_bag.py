@@ -86,6 +86,14 @@ def run_rtabmap_on_bag(
         import hashlib
         import json as _json
 
+        def _dataset_fingerprint(dataset_path):
+            h = hashlib.sha256()
+            for name in ("frames.csv", "camera_info.json"):
+                fp = os.path.join(dataset_path, name)
+                if os.path.isfile(fp):
+                    h.update(open(fp, "rb").read())
+            return h.hexdigest()[:16]
+
         meta = {
             "schema_version": "recon-v2/sidecar-1",
             "backend": "rtab",
@@ -93,6 +101,7 @@ def run_rtabmap_on_bag(
             "candidate_key": key,
             "replay_rate": 1.0,
             "trajectory_sha256": hashlib.sha256(open(out_trajectory, "rb").read()).hexdigest(),
+            "dataset_fingerprint": _dataset_fingerprint(dataset_path),
         }
         with open(str(out_trajectory) + ".meta.json", "w", encoding="utf-8") as _fh:
             _json.dump(meta, _fh, indent=2, sort_keys=True)
