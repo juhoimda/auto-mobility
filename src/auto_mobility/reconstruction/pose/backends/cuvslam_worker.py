@@ -48,6 +48,20 @@ def main() -> int:
 
     dataset = Path(args.dataset)
     out_traj = Path(args.out)
+    # preload nvidia libraries if available in site-packages
+    try:
+        import ctypes
+        import glob
+        for p in sys.path:
+            for lib_dir in glob.glob(str(Path(p) / "nvidia" / "*" / "lib")):
+                for so in sorted(glob.glob(str(Path(lib_dir) / "*.so*"))):
+                    try:
+                        ctypes.CDLL(so, mode=ctypes.RTLD_GLOBAL)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
     # lazy import cuvslam only in child
     try:
         import cuvslam
@@ -124,7 +138,10 @@ def main() -> int:
             "profile": "standard", "n_frames": len(rows), "n_poses": len(traj),
             "trajectory_sha256": hashlib.sha256(out_traj.read_bytes()).hexdigest(),
             "dataset_fingerprint": _dataset_fingerprint(dataset)}
-    out_traj.with_suffix(".meta.json").write_text(json.dumps(meta, indent=2))
+    meta_json = json.dumps(meta, indent=2)
+    Path(str(out_traj) + ".meta.json").write_text(meta_json)
+    if out_traj.suffix:
+        out_traj.with_suffix(".meta.json").write_text(meta_json)
     print(f"[cuvslam_worker] wrote {len(traj)}/{len(rows)} -> {out_traj} {time.time()-t0:.1f}s")
     return 0 if len(traj) >= 10 else 3
 

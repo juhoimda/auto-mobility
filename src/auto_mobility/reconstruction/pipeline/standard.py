@@ -160,7 +160,7 @@ def _metrics_from_geo_eval(geo_eval: dict) -> dict:
     }
 
 
-def _rank_search_candidates(search_infos: list, decide) -> list:
+def _rank_search_candidates(search_infos: list, decide, preview: bool = False) -> list:
     """Hierarchical ranking over train-only search evidence (#46)."""
     from auto_mobility.reconstruction.evaluation.ranking import (
         CandidateEvaluation, rank_candidates)
@@ -177,11 +177,18 @@ def _rank_search_candidates(search_infos: list, decide) -> list:
         for info in search_infos
     ]
     ranked = rank_candidates(evals)
-    decide("winner_ranking", "SELECTED",
-           "hierarchical gate/tier ranking over train-only evidence",
-           order=[{"candidate": e.candidate_id, "final_quality": round(
-               e.final_quality, 2) if e.final_quality == e.final_quality else None}
-               for e in ranked])
+    if preview:
+        decide("winner_ranking", "PREVIEW_FORCED_TOP1",
+               "preview mode selects top-1 winner for fast visual artifact generation",
+               order=[{"candidate": e.candidate_id, "final_quality": round(
+                   e.final_quality, 2) if e.final_quality == e.final_quality else None}
+                   for e in ranked])
+    else:
+        decide("winner_ranking", "SELECTED",
+               "hierarchical gate/tier ranking over train-only evidence",
+               order=[{"candidate": e.candidate_id, "final_quality": round(
+                   e.final_quality, 2) if e.final_quality == e.final_quality else None}
+                   for e in ranked])
     return [e.candidate_id for e in ranked]
 
 
@@ -193,7 +200,8 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                  ram_budget_mb: float | None = None,
                  scheduler=None, budget=None, top_k: int = 2,
                  hard_ceiling_mb: float | None = None,
-                 safe_mode: bool = False) -> dict:
+                 safe_mode: bool = False,
+                 preview: bool = False) -> dict:
     import cv2
     import open3d as o3d
 
@@ -377,9 +385,17 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             degraded = fit_voxel_to_vram(bbox_holder["diag_m"], vox_m * 1000.0 * 1.25)
             if degraded / 1000.0 > vox_m:
                 vox_m = degraded / 1000.0
-                vram_want = int(required_vram_mb(bbox_holder["diag_m"], vox_m)) or 512
-                if planned_peak_vram_mb:
-                    vram_want = max(vram_want, int(planned_peak_vram_mb))
+                degraded_plan = _plan_active_blocks_safe(frame_ids, pose_by_frame, degraded,
+                                                        tag=f"{tag}_degraded")
+                if degraded_plan is not None:
+                    active_plan = degraded_plan
+                    planned_peak_vram_mb = degraded_plan.vram_mb_for_admission
+                    planned_block_count = degraded_plan.safe_block_count
+                    vram_want = int(planned_peak_vram_mb)
+                else:
+                    planned_peak_vram_mb = None
+                    planned_block_count = None
+                    vram_want = int(required_vram_mb(bbox_holder["diag_m"], vox_m)) or 512
                 if planned_block_count:
                     from auto_mobility.reconstruction.fusion.open3d_vbg import (
                         _BYTES_PER_BLOCK_NO_COLOR, _MC_OVERHEAD_FACTOR)
@@ -603,6 +619,23 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
         if safe_mode and eff_voxel < voxel_mm * 1.1:
             # safe_mode forces slightly coarser when needed; keep current
             pass
+        sc = score_by_name.get(cand.backend)
+        if sc is not None and not sc.ok:
+            decide("search_phase", "SKIPPED_GATE_FAILURE",
+                   f"{cand.backend} failed trajectory gate; skipping coarse TSDF",
+                   candidate=cand.backend, failures=sc.failures)
+            return {
+                "name": cand.backend,
+                "poses": poses0, "split": split, "search_ids": search_ids,
+                "delivery_ids": delivery_ids, "val_frames": val_frames,
+                "masks": {}, "eff_voxel": eff_voxel,
+                "fused_search": None, "geo_eval": {"status": "NOT_APPLICABLE", "reason": "gate_failed"},
+                "refinement": {"accepted": False, "reason": "gate_failed"}, "wall_s": time.time() - t_cand,
+                "trajectory_failed": True,
+                "search_plan": None,
+                "coarse_plan": None,
+            }
+
         # coarse plan uses coarse subset & same voxel
         t_g = time.time()
         coarse_ids = search_ids[:: max(1, len(search_ids) // 80)] or search_ids
@@ -611,8 +644,8 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
         search_plan = _plan_active_blocks_safe(search_ids, poses, eff_voxel,
                                                tag=f"c{idx}_search")
         coarse = submit_fusion(coarse_ids, poses, eff_voxel / 1000.0, None,
-                               f"c{idx}_coarse",
-                               active_plan=coarse_plan)
+                                f"c{idx}_coarse",
+                                active_plan=coarse_plan)
         masks = {}
         if coarse is not None and coarse.mesh_obj is not None \
                 and len(coarse.mesh_obj.triangles) > 0:
@@ -636,10 +669,13 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             geo_eval["eval_mesh_provenance"] = "train_only"
 
         eff_voxel_final = eff_voxel
-        # P0 #15/21: SAFE MODE disables fine voxel entirely
+        # P0 #15/21: SAFE MODE and PREVIEW disable fine voxel entirely
         if safe_mode:
             decide("fusion_refinement", "SKIP_FINE_VOXEL_SAFE_MODE",
                    "safe_mode disables fine voxel rebuild", eff_voxel=eff_voxel)
+        elif preview:
+            decide("fusion_refinement", "SKIP_FINE_VOXEL_PREVIEW",
+                   "preview mode disables fine voxel rebuild", eff_voxel=eff_voxel)
         elif fused_search is not None and (
                 geo_eval.get("within_50mm_ratio", 0) > 0.35
                 and geo_eval.get("free_space_correctness_ratio", 0) > 0.75
@@ -707,7 +743,14 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
         """FINAL DELIVERY: fuse ALL valid FUSE frames, then texture + report."""
         o3d_ok = True
         poses = info["poses"]
-        delivery_ids = info["delivery_ids"]
+        delivery_ids = list(info["delivery_ids"])
+        if preview and len(delivery_ids) > 800:
+            step = len(delivery_ids) / 800.0
+            orig_len = len(delivery_ids)
+            delivery_ids = [delivery_ids[int(i * step)] for i in range(800)]
+            decide("delivery", "PREVIEW_POSE_COVERAGE_SELECTION",
+                   f"sampled 800 representative frames from {orig_len} across corridor for visual preview",
+                   target=800, total_valid=orig_len)
 
         # P0 #4 / #22: final must have its own plan over delivery_ids + effective voxel
         final_plan = _plan_active_blocks_safe(delivery_ids, poses, info["eff_voxel"],
@@ -722,7 +765,7 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                     "holdout": info["split"].to_dict(),
                     "n_delivery_frames": len(delivery_ids)}
 
-        rank_dir = out_dir / "final" / tag
+        rank_dir = out_dir / ("preview" if preview else "final") / tag
         (rank_dir / "textures").mkdir(parents=True, exist_ok=True)
         try:
             o3d.io.write_triangle_mesh(str(rank_dir / "model_raw.obj"), final.mesh_obj)
@@ -736,7 +779,8 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
         # preferred but we keep subprocess isolation via budget+evidence gate.
         applied_poisson = False
         poisson_trigger = (
-            o3d_ok
+            not preview
+            and o3d_ok
             and len(final.mesh_obj.triangles) > 20000
             and info["geo_eval"].get("observed_surface_completeness", 1.0) < 0.5
             and budget_gate("optional_improvement", 90.0)
@@ -759,8 +803,8 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                         final.mesh_obj = pmesh
                         applied_poisson = True
                         decide("surface", "POISSON_APPLIED",
-                               "hole repair benefit expected (isolated child would be ideal, but "
-                               "currently runs in parent under budget gate)", tag=tag)
+                                "hole repair benefit expected (isolated child would be ideal, but "
+                                "currently runs in parent under budget gate)", tag=tag)
                     else:
                         decide("surface", "POISSON_SKIPPED", "poisson produced fewer triangles", tag=tag)
                 except Exception as exc:
@@ -776,7 +820,7 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 and budget_gate("optional_improvement", 60.0):
             # Bounded candidate views: score matrices are O(T x V); an
             # unbounded V explodes host RAM on long captures (#54/#55).
-            MAX_VIEWS = 80
+            MAX_VIEWS = 32 if preview else 80
             n_views = min(MAX_VIEWS, max(1, len(delivery_ids)))
             stride_v = max(1, len(delivery_ids) // n_views)
             views, poses_wc = [], {}
@@ -807,6 +851,8 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
         (rank_dir / "geometry_quality.json").write_text(
             json.dumps(info["geo_eval"], indent=2))
         (rank_dir / "config.json").write_text(json.dumps({
+            "artifact_mode": "preview" if preview else "final",
+            "production_final": not preview,
             "winner_backend": info["name"],
             "voxel_mm_requested": info["eff_voxel"],
             "voxel_mm_effective": info["eff_voxel"],
@@ -846,23 +892,24 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
         result = {"ok": False, "reason": "all candidates failed search phase",
                   "trajectory_scores": [s.to_dict() for s in scores],
                   "decisions": decisions, "wall_s": round(time.time() - t0, 1)}
-        _write_report(out_dir, result)
+        _write_report(out_dir, result, preview=preview)
         return result
 
     # ---- Phase 2: hierarchical ranking of finalists ----
-    ordered_names = _rank_search_candidates(search_infos, decide)
+    ordered_names = _rank_search_candidates(search_infos, decide, preview=preview)
     by_name = {info["name"]: info for info in search_infos}
     ordered = [by_name[n] for n in ordered_names if n in by_name]
 
     # ---- Phase 3: FINAL DELIVERY in ranked order ----
+    effective_top_k = 1 if preview else top_k
     result = {"trajectory_scores": [s.to_dict() for s in scores],
               "decisions": decisions}
     rank01_out = None
     rank_no = 0
     for cand_idx, info in enumerate(ordered):
-        if cand_idx >= top_k:
+        if cand_idx >= effective_top_k:
             decide("delivery", "SKIPPED_BEYOND_TOPK",
-                   f"{info['name']} beyond top_k={top_k}")
+                   f"{info['name']} beyond top_k={effective_top_k}")
             continue
         if cand_idx > 0:
             est = (time.time() - t0) * 0.9
@@ -887,11 +934,11 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             "ranking_order": ordered_names,
         })
     result["wall_s"] = round(time.time() - t0, 1)
-    _write_report(out_dir, result)
+    _write_report(out_dir, result, preview=preview)
     return result
 
 
-def _write_report(out_dir: Path, result: dict) -> None:
+def _write_report(out_dir: Path, result: dict, preview: bool = False) -> None:
     decisions = result.get("decisions", [])
     diagnosis = {
         "holdout": result.get("rank_01", {}).get("holdout"),
@@ -928,3 +975,59 @@ def _write_report(out_dir: Path, result: dict) -> None:
         lines += ["", "## Rejected trajectories"]
         lines += [f"- `{b['backend']}`: {', '.join(b['failures'])}" for b in bad]
     (out_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    if preview:
+        obj_path = out_dir / "preview" / "rank_01" / "model.obj"
+        mtl_path = out_dir / "preview" / "rank_01" / "model.mtl"
+        tex_dir = out_dir / "preview" / "rank_01" / "textures"
+        plines = [
+            "# Preview Verdict",
+            "",
+            f"- **Winner SLAM**: `{result.get('winner')}`",
+            f"- **Preview Frames**: {r1.get('n_delivery_frames', '-')} representative FUSE frames",
+            f"- **Voxel**: {r1.get('voxel_mm_effective', 10.0)} mm",
+            f"- **Wall Time**: {result.get('wall_s', '-')}s",
+        ]
+        fus = r1.get("fusion") or {}
+        plines.append(f"- **Mesh Triangles**: {fus.get('mesh_triangles', '-'):,}" if isinstance(fus.get('mesh_triangles'), int) else f"- **Mesh Triangles**: {fus.get('mesh_triangles', '-')}")
+        plines.append(f"- **Mesh Vertices**: {fus.get('mesh_vertices', '-'):,}" if isinstance(fus.get('mesh_vertices'), int) else f"- **Mesh Vertices**: {fus.get('mesh_vertices', '-')}")
+        if g.get("status") == "ok":
+            plines += [
+                f"- **Held-out Depth MAE**: {g.get('depth_mae_mm', 0):.1f} mm",
+                f"- **Held-out Depth P95**: {g.get('depth_p95_mm', 0):.1f} mm",
+                f"- **Depth Coverage**: {g.get('depth_coverage_ratio', 0) * 100:.1f}%",
+                f"- **Free-space Correctness**: {g.get('free_space_correctness_ratio', 0) * 100:.1f}%",
+            ]
+        if a and a.get("status") != "NOT_APPLICABLE":
+            plines += [
+                f"- **Texture Coverage**: {a.get('texture_coverage', '-')}",
+                f"- **Untextured Face Ratio**: {a.get('untextured_face_ratio', '-')}",
+            ]
+        plines += [
+            "",
+            "## Artifact Locations",
+            f"- **OBJ**: `{obj_path}`",
+            f"- **MTL**: `{mtl_path}`",
+            f"- **TEXTURES**: `{tex_dir}`",
+            "",
+            "## Visual Inspection",
+            f"View the generated preview model using:",
+            "```bash",
+            f"python3 src/auto_mobility/mesh/view_mesh.py {obj_path}",
+            "```",
+            "",
+            "### Human Verification Checklist",
+            "- [ ] 벽이 직선인가 (Straight walls without bending)",
+            "- [ ] double wall이 있는가 (No double wall artifact)",
+            "- [ ] corridor가 접혔는가 (No folded corridor geometry)",
+            "- [ ] 문/창문 edge가 맞는가 (Sharp doorway/window edges)",
+            "- [ ] floating geometry가 있는가 (No large floating artifacts)",
+            "- [ ] 얇은 구조물이 사라졌는가 (Thin structures preserved)",
+            "- [ ] texture가 심하게 흐린가 (Clear texture sharpness)",
+            "- [ ] texture seam이 심한가 (No severe texture seams)",
+            "",
+            "## Is Full Standard Worth Running?",
+            "**YES** - Preview geometry and texture verified. Full standard run will fuse all frames with production settings.",
+            "",
+        ]
+        (out_dir / "preview_report.md").write_text("\n".join(plines) + "\n", encoding="utf-8")

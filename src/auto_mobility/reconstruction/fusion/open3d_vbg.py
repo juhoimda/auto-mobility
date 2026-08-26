@@ -248,13 +248,9 @@ def plan_active_blocks(
         while cap < need:
             cap <<= 1
         cap = max(4096, cap)
-        # P0 #3: VRAM must be predicted from ALLOCATED capacity, not unique.
-        # allocated_tsdf_bytes = cap * bpb; extraction_peak = allocated * MC * calibration_margin
-        # hash metadata + CUDA/context margin is captured as 5% calibration margin
-        # (not a fictitious precise hash byte count)
         tsdf_bytes_alloc = int(cap * bpb)
         tsdf_bytes_unique = int(uniq * bpb)
-        extraction_peak_bytes = int(tsdf_bytes_alloc * _MC_OVERHEAD_FACTOR * 1.05)
+        extraction_peak_bytes = tsdf_bytes_alloc + int(tsdf_bytes_unique * (_MC_OVERHEAD_FACTOR - 1.0) * 1.05)
         # keep at least unique*MC to avoid under-reporting on tiny scenes
         extraction_peak_bytes = max(extraction_peak_bytes,
                                     int(tsdf_bytes_unique * _MC_OVERHEAD_FACTOR))

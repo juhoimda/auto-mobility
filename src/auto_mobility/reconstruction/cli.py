@@ -23,7 +23,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="auto-mobility-reconstruction")
     p.add_argument("bag", nargs="?", default="", help="bag name or frames dir")
     p.add_argument("--standard", action="store_true", help="standard pipeline mode")
-    p.add_argument("--quick", action="store_true", help="compat: reduced time budget")
+    p.add_argument("--preview", action="store_true", help="fast visual inspection preview mode")
+    p.add_argument("--safe-mode", "--preview-safe", action="store_true", dest="safe_mode_cli",
+                   help="force SAFE MODE (conservative concurrency, reserve, bounds)")
+    p.add_argument("--quick", action="store_true", help="compat: developer time-budget shortcut")
     p.add_argument("--full", action="store_true", help="compat: accepted, full search")
     p.add_argument("--phase", default="all", help="compat: accepted (single-phase search removed in V2)")
     p.add_argument("--top-k", type=int, default=2, help="finalists to deliver (cap 2)")
@@ -33,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="TUM trajectory file to judge (repeatable)")
     p.add_argument("--output", type=Path, default=Path("output"))
     p.add_argument("--budget-min", type=float, default=None,
-                   help="wall-time budget in minutes (default 30; quick 12)")
+                   help="wall-time budget in minutes (default 30; quick 12; preview 15)")
     p.add_argument("--run-slam", action="store_true",
                    help="generate missing trajectories via run_slam.sh")
     p.add_argument("--no-cache", action="store_true", help="compat: accepted (cache is content-verified)")
@@ -91,6 +94,8 @@ def _verify_trajectory_cache(tp: Path, dataset_dir: Path | None = None) -> bool:
     if not _check_trajectory_cache(tp):
         return False
     meta_path = Path(str(tp) + ".meta.json")
+    if not meta_path.is_file() and tp.suffix and tp.with_suffix(".meta.json").is_file():
+        meta_path = tp.with_suffix(".meta.json")
     if not meta_path.is_file():
         print(f"[v2] trajectory cache rejected (no sidecar): {tp}")
         return False
@@ -322,16 +327,25 @@ def run(args: argparse.Namespace) -> int:
 
     t_start = time.monotonic()
     cfg = default_config()
-    out_dir = args.output
+    is_preview = bool(getattr(args, "preview", False))
+    safe_mode_cli = bool(getattr(args, "safe_mode_cli", False))
+    if is_preview and args.output == Path("output"):
+        out_dir = Path("output_preview")
+    else:
+        out_dir = args.output
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if is_preview:
+        args.standard = True
 
     # §25 unclean-run detection before any heavy work
     # single lightweight profile probe; reused for detection AND budgets (#13)
     profile = load_or_probe_profile(out_dir / "cache", measure_overhead=False)
     reset_info = detect_previous_host_reset(out_dir)
-    safe_mode = bool(reset_info.get("previous_host_reset"))
+    safe_mode = bool(reset_info.get("previous_host_reset")) or safe_mode_cli or is_preview
     if safe_mode:
-        print(f"[v2] SAFE MODE activated: {reset_info} — sequential, coarser, more reserve")
+        print(f"[v2] SAFE MODE activated (reset={bool(reset_info.get('previous_host_reset'))}, "
+              f"cli={safe_mode_cli}, preview={is_preview}) — sequential, coarser, more reserve")
     # §9 optional overhead measurement in separate call (subprocess-only)
     # we measure overhead lazily once per machine and cache it; here we keep 0 until calibration
     if safe_mode:
@@ -345,7 +359,7 @@ def run(args: argparse.Namespace) -> int:
         write_run_state(out_dir, profile, status="RUNNING")
     except Exception:
         pass
-    budget_min = args.budget_min if args.budget_min is not None else (12.0 if args.quick else 30.0)
+    budget_min = args.budget_min if args.budget_min is not None else (15.0 if is_preview else (12.0 if args.quick else 30.0))
     budget = BudgetManager(budget_min * 60.0, cfg.budget)
     scheduler = Scheduler(
         cpu_threads=budgets.cpu_threads,
@@ -360,7 +374,7 @@ def run(args: argparse.Namespace) -> int:
     manifest = {
         "schema_version": "recon-v2",
         "dataset_dir": str(dataset_dir),
-        "mode": "standard" if args.standard else "default",
+        "mode": "preview" if is_preview else ("standard" if args.standard else "default"),
         "machine_profile": profile.to_dict(),
         "resource_budgets": budgets.to_dict(),
         "budget_plan": budget.to_dict(),
@@ -430,6 +444,8 @@ def run(args: argparse.Namespace) -> int:
             by_backend_path = {}
             for tp in sorted(verified_traj_files, key=lambda p: p.stat().st_mtime):
                 meta_path = Path(str(tp) + ".meta.json")
+                if not meta_path.is_file() and tp.suffix and tp.with_suffix(".meta.json").is_file():
+                    meta_path = tp.with_suffix(".meta.json")
                 be = None
                 if meta_path.is_file():
                     try:
@@ -461,7 +477,7 @@ def run(args: argparse.Namespace) -> int:
             # safe_mode adjustments (§15): top_k=1, no fine, sequential etc handled inside pipeline
             effective_top_k = 1 if safe_mode else min(2, max(1, args.top_k))
             if safe_mode and effective_top_k != args.top_k:
-                print(f"[v2] SAFE MODE: top_k clamped {args.top_k} -> {effective_top_k}")
+                print(f"[v2] SAFE MODE / PREVIEW: top_k clamped {args.top_k} -> {effective_top_k}")
             std_result = run_standard(
                 dataset_dir, trajs, out_dir,
                 vram_budget_mb=float(budgets.vram_budget_mb),
@@ -471,6 +487,7 @@ def run(args: argparse.Namespace) -> int:
                 top_k=effective_top_k,
                 hard_ceiling_mb=float(hard_ceiling) if hard_ceiling else None,
                 safe_mode=safe_mode,
+                preview=is_preview,
             )
             manifest["standard_result"] = {
                 k: v for k, v in std_result.items()
@@ -478,13 +495,14 @@ def run(args: argparse.Namespace) -> int:
             }
             manifest["trajectory_scores"] = std_result.get("trajectory_scores", [])
             manifest["holdout_split"] = std_result.get("holdout", manifest.get("holdout_split"))
+            winner_subdir = "preview" if is_preview else "final"
             print(f"[v2] standard ok={std_result.get('ok')} winner={std_result.get('winner')} "
-                  f"wall={std_result.get('wall_s')}s -> {out_dir}/final/rank_01")
+                  f"wall={std_result.get('wall_s')}s -> {out_dir}/{winner_subdir}/rank_01")
 
             winner_tag = "rank_01" if std_result.get("ok") else None
             if winner_tag:
                 _register_final_artifacts(
-                    out_dir, out_dir / "final" / winner_tag,
+                    out_dir, out_dir / winner_subdir / winner_tag,
                     dataset_spec={"dir": dataset_dir.name,
                                   "n_frames": len(ds),
                                   "audit_ok": audit_ok},
@@ -498,6 +516,19 @@ def run(args: argparse.Namespace) -> int:
                 )
                 manifest["standard_result"]["decisions"] += manifest[
                     "standard_result"].get("extra_decisions", [])
+
+                if is_preview:
+                    obj_path = out_dir / "preview" / winner_tag / "model.obj"
+                    mtl_path = out_dir / "preview" / winner_tag / "model.mtl"
+                    tex_dir = out_dir / "preview" / winner_tag / "textures"
+                    print("\n" + "=" * 60)
+                    print("  PREVIEW OBJ READY\n")
+                    print(f"  OBJ:\n    {obj_path}\n")
+                    print(f"  MTL:\n    {mtl_path}\n")
+                    print(f"  TEXTURE:\n    {tex_dir}\n")
+                    print("  VIEW COMMAND:")
+                    print(f"    python3 src/auto_mobility/mesh/view_mesh.py {obj_path}")
+                    print("=" * 60 + "\n")
         else:
             print("[v2] no trajectory candidates found. Run scripts/pipeline/run_slam.sh "
                   f"{args.bag} --slam=rtab (or pass --run-slam).")
