@@ -172,10 +172,7 @@ def bake_atlas(
 
     import cv2
 
-    atlas_path = out_dir / "textures" / f"{name}_atlas_0.png"
-    cv2.imwrite(str(atlas_path), atlas[..., ::-1])
-
-    # Vertex colors blending
+    # Vertex colors blending (all views)
     pts = np.asarray(vertices, dtype=np.float64)
     vw_sum = np.zeros((len(vertices), 3), dtype=np.float64)
     vw_cnt = np.zeros(len(vertices), dtype=np.float64)
@@ -188,6 +185,26 @@ def bake_atlas(
     has_vcol = vw_cnt > 0
     vcol = np.full((len(vertices), 3), 0.7)
     vcol[has_vcol] = vw_sum[has_vcol] / vw_cnt[has_vcol][:, None] / 255.0
+
+    # Initialize atlas with mean surface color so fallback UVs render naturally, not pitch black
+    mean_rgb = (vcol[has_vcol].mean(axis=0) * 255.0) if has_vcol.any() else np.array([180.0, 180.0, 180.0])
+    atlas = np.full((atlas_size, atlas_size, 3), mean_rgb.astype(np.uint8), dtype=np.uint8)
+
+    order = sorted(face_colors)
+    cell_of_face = {}
+    for tid in order:
+        if occupied >= n_cells:
+            continue
+        cx, cy = occupied % grid, occupied // grid
+        x0, y0 = cx * cell, cy * cell
+        atlas[y0:y0 + cell, x0:x0 + cell] = face_colors[tid]
+        cell_of_face[tid] = occupied
+        occupied += 1
+
+    import cv2
+
+    atlas_path = out_dir / "textures" / f"{name}_atlas_0.png"
+    cv2.imwrite(str(atlas_path), atlas[..., ::-1])
 
     # Vertex normals for smooth MeshLab / Blender shading
     v_normals = np.zeros_like(pts)
@@ -234,14 +251,16 @@ def bake_atlas(
     obj_path = out_dir / f"{name}.obj"
     obj_path.write_text("\n".join(obj_lines) + "\n", encoding="utf-8")
     (out_dir / f"{name}.mtl").write_text(
-        f"newmtl baked\n"
-        f"Ka 0.8 0.8 0.8\n"
-        f"Kd 0.9 0.9 0.9\n"
-        f"Ks 0.1 0.1 0.1\n"
-        f"d 1.0\n"
-        f"illum 2\n"
+        "newmtl baked\n"
+        "Ka 1.000 1.000 1.000\n"
+        "Kd 1.000 1.000 1.000\n"
+        "Ks 0.000 0.000 0.000\n"
+        "d 1.0\n"
+        "illum 1\n"
         f"map_Kd textures/{name}_atlas_0.png\n",
         encoding="utf-8",
     )
     return BakeResult(obj_path, out_dir / f"{name}.mtl", (atlas_path,), untextured)
+
+
 

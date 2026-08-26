@@ -1057,11 +1057,8 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             final = submit_fusion(cand_frame_ids, poses, eff_voxel / 1000.0, masks or None, f"{cand_name}_preview_delivery", active_plan=preview_plan)
 
             if final and final.mesh_obj:
-                try:
-                    o3d.io.write_triangle_mesh(str(cand_dir / "model_raw.obj"), final.mesh_obj)
-                except Exception:
-                    pass
                 print(f"        ✓ Mesh extracted: {final.mesh_triangles:,} triangles, {final.mesh_vertices:,} vertices", flush=True)
+
 
             # Step 3: Texture baking
             print(f"  [3/4] Texture Baking ({policy.texture_view_target} representative RGB views)...", flush=True)
