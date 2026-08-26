@@ -327,6 +327,9 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             decide("budget_gate", "OVERSPEND_RECORDED", f"phase {phase}: {exc}")
 
     ds = FrameDataset(str(dataset_dir))
+    if ds.dataset_info.get("depth_color_alignment") == "not_aligned":
+        return {"ok": False, "reason": "depth is not aligned to RGB; provide aligned depth or calibrated extrinsics",
+                "decisions": decisions}
     frames = list(ds)
     cam = json.load(open(Path(dataset_dir) / "camera_info.json"))
     K = np.array(cam["K"], dtype=np.float64)
@@ -363,12 +366,29 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
 
     print(f"  🎯 [2/3] Evaluating trajectory health with TrajectoryJudge...", flush=True)
     scores, top = _judge(trajectories, frame_ts)
+    # Judge statistics reject ordinary discontinuities; the independent health
+    # gate also catches physically impossible velocity/pathology.  A failed
+    # trajectory must never proceed to TSDF merely because its p99 is small.
+    from auto_mobility.diagnostics.trajectory_health import check_trajectory_health
+    health_by_name = {}
+    for score in scores:
+        health = check_trajectory_health(trajectories[score.backend])
+        health_by_name[score.backend] = health.to_dict()
+        if health.status == "FAIL_TRAJECTORY":
+            score.failures.append(f"trajectory_health:{health.cause}")
+            decide("trajectory_health", "REJECT", health.cause,
+                   backend=score.backend,
+                   max_step_m=health.translation_step_max_m,
+                   max_velocity_mps=health.linear_velocity_max_mps)
+    from auto_mobility.reconstruction.pose.judge import select_top_trajectories
+    top = select_top_trajectories(scores, top_k=2)
     for s in scores:
         print(f"      • {s.backend}: {'PASS' if s.ok else 'FAIL'} (coverage: {s.coverage_ratio * 100:.1f}%, score: {s.composite:.1f})", flush=True)
     if not top:
         print("      ❌ No viable trajectory candidates passed gate!", flush=True)
         return {"ok": False, "reason": "no viable trajectory",
                 "trajectory_scores": [s.to_dict() for s in scores],
+                "trajectory_health": health_by_name,
                 "decisions": decisions}
     top = top[:max(1, min(top_k, 2))]
     score_by_name = {s.backend: s for s in scores}
@@ -946,7 +966,9 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 atlas_img = cv2.imread(str(bake.atlas_paths[0]))
                 appear = atlas_metrics(atlas_bgr=atlas_img,
                                        untextured_faces=bake.untextured_faces,
-                                       total_faces=len(final.mesh_obj.triangles))
+                                       total_faces=len(final.mesh_obj.triangles),
+                                       textured_faces=bake.textured_faces,
+                                       appearance_mode=bake.appearance_mode)
         (rank_dir / "appearance_quality.json").write_text(json.dumps(appear, indent=2))
         (rank_dir / "geometry_quality.json").write_text(
             json.dumps(info["geo_eval"], indent=2))
@@ -1078,7 +1100,11 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                     bake = bake_atlas(np.asarray(final.mesh_obj.vertices), np.asarray(final.mesh_obj.triangles), views, K, poses_wc, scene=bake_scene, out_dir=cand_dir, name="model")
                     bake_info = bake.to_dict()
                     atlas_img = cv2.imread(str(bake.atlas_paths[0]))
-                    appear = atlas_metrics(atlas_bgr=atlas_img, untextured_faces=bake.untextured_faces, total_faces=len(final.mesh_obj.triangles))
+                    appear = atlas_metrics(atlas_bgr=atlas_img,
+                                           untextured_faces=bake.untextured_faces,
+                                           total_faces=len(final.mesh_obj.triangles),
+                                           textured_faces=bake.textured_faces,
+                                           appearance_mode=bake.appearance_mode)
                     print(f"        ✓ Texture atlas baked: {cand_dir / 'model.obj'} (coverage: {appear.get('texture_coverage', '-')})", flush=True)
 
             # Step 4: Held-out geometry evaluation
@@ -1116,10 +1142,13 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
 
         # Determine optional recommended backend based on geometry metrics
         recommended_backend = None
-        recommendation_reason = "Both backends generated valid previews."
+        recommendation_reason = "No backend has passed held-out geometry acceptance yet."
         cand_keys = list(preview_cand_results.keys())
-        if len(cand_keys) >= 2:
-            c1_name, c2_name = cand_keys[0], cand_keys[1]
+        accepted_keys = [name for name in cand_keys
+                         if preview_cand_results[name].get("geometry_eval", {})
+                         .get("quality", {}).get("status") == "PASS"]
+        if len(accepted_keys) >= 2:
+            c1_name, c2_name = accepted_keys[0], accepted_keys[1]
             g1 = preview_cand_results[c1_name].get("geometry_eval", {})
             g2 = preview_cand_results[c2_name].get("geometry_eval", {})
             p95_1 = float(g1.get("depth_p95_mm", 1e9)) if g1.get("status") == "ok" else 1e9
@@ -1132,8 +1161,8 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             else:
                 recommended_backend = c2_name
                 recommendation_reason = f"{c2_name} achieved lower depth P95 ({p95_2:.1f}mm vs {p95_1:.1f}mm) and coverage ({cov_2*100:.1f}% vs {cov_1*100:.1f}%)"
-        elif len(cand_keys) == 1:
-            recommended_backend = cand_keys[0]
+        elif len(accepted_keys) == 1:
+            recommended_backend = accepted_keys[0]
             recommendation_reason = f"Single viable backend: {recommended_backend}"
 
         # Write comparison.json (§18)
@@ -1335,6 +1364,12 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             decide("delivery", "SKIPPED_BEYOND_TOPK",
                    f"{info['name']} beyond top_k={effective_top_k}")
             continue
+        quality = info.get("geo_eval", {}).get("quality", {})
+        if quality.get("status") != "PASS":
+            decide("delivery", "REJECT_HELDOUT_GEOMETRY",
+                   "search mesh failed explicit held-out acceptance; no unsafe final OBJ",
+                   backend=info["name"], reasons=quality.get("reasons", []))
+            continue
         if cand_idx > 0:
             est = (time.time() - t0) * 0.9
             if not budget_gate("optional_improvement", est):
@@ -1399,4 +1434,3 @@ def _write_report(out_dir: Path, result: dict, preview: bool = False) -> None:
         lines += ["", "## Rejected trajectories"]
         lines += [f"- `{b['backend']}`: {', '.join(b['failures'])}" for b in bad]
     (out_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-

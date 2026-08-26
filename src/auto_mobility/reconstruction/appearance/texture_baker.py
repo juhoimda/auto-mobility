@@ -23,12 +23,16 @@ class BakeResult:
     mtl_path: Path
     atlas_paths: tuple
     untextured_faces: int
+    textured_faces: int = 0
+    appearance_mode: str = "vertex_color"
 
     def to_dict(self) -> dict:
         return {
             "obj": str(self.obj_path),
             "atlas_count": len(self.atlas_paths),
             "untextured_faces": self.untextured_faces,
+            "textured_faces": self.textured_faces,
+            "appearance_mode": self.appearance_mode,
         }
 
 
@@ -159,29 +163,16 @@ def bake_atlas(
         face_colors[tid] = ((top_colors[tid, best] * w[:, None]).sum(axis=0)
                             / w.sum()).astype(np.uint8)
 
-    order = sorted(face_colors)
-    cell_of_face = {}
-    for tid in order:
-        if occupied >= n_cells:
-            continue
-        cx, cy = occupied % grid, occupied // grid
-        x0, y0 = cx * cell, cy * cell
-        atlas[y0:y0 + cell, x0:x0 + cell] = face_colors[tid]
-        cell_of_face[tid] = occupied
-        occupied += 1
-
-    import cv2
-
-    # Vertex colors blending (all views)
+    # Vertex colours are the guaranteed appearance representation.  A tiny
+    # fixed grid cannot represent a multi-million-face mesh; binding that
+    # partial atlas as map_Kd made nearly every face render as one grey patch.
+    # Accumulate the occlusion/facing-filtered face colours onto vertices.
     pts = np.asarray(vertices, dtype=np.float64)
     vw_sum = np.zeros((len(vertices), 3), dtype=np.float64)
     vw_cnt = np.zeros(len(vertices), dtype=np.float64)
-    for fid in view_ids:
-        img = img_by_fid[fid]
-        cols, ok = sample_view_color(
-            img, K, poses_wc[fid], pts, img.shape[1], img.shape[0])
-        vw_sum[ok] += cols[ok]
-        vw_cnt[ok] += 1.0
+    for tid, color in face_colors.items():
+        vw_sum[triangles[tid]] += color
+        vw_cnt[triangles[tid]] += 1.0
     has_vcol = vw_cnt > 0
     vcol = np.full((len(vertices), 3), 0.7)
     vcol[has_vcol] = vw_sum[has_vcol] / vw_cnt[has_vcol][:, None] / 255.0
@@ -190,6 +181,10 @@ def bake_atlas(
     mean_rgb = (vcol[has_vcol].mean(axis=0) * 255.0) if has_vcol.any() else np.array([180.0, 180.0, 180.0])
     atlas = np.full((atlas_size, atlas_size, 3), mean_rgb.astype(np.uint8), dtype=np.uint8)
 
+    # Keep a bounded diagnostic atlas for tooling, but never bind it to the
+    # material unless it covers every colourable face.  This preserves truthful
+    # output on huge meshes while MeshLab renders the real vertex colours.
+    occupied = 0
     order = sorted(face_colors)
     cell_of_face = {}
     for tid in order:
@@ -238,29 +233,33 @@ def bake_atlas(
         cell_vt[cid] = (base + 1, base + 2, base + 3)
 
     obj_lines.extend(vt_lines)
-    obj_lines.append("usemtl baked")
+    fully_atlased = len(cell_of_face) == len(face_colors) and not untextured
+    if fully_atlased:
+        obj_lines.append("usemtl baked")
     for tid in range(T_count):
         a, b, c = (triangles[tid] + 1).tolist()
         ids = cell_vt.get(cell_of_face.get(tid))
-        if ids is None:
-            obj_lines.append(f"f {a}/1/{a} {b}/2/{b} {c}/3/{c}")
+        if not fully_atlased or ids is None:
+            obj_lines.append(f"f {a}//{a} {b}//{b} {c}//{c}")
         else:
             i0, i1, i2 = ids
             obj_lines.append(f"f {a}/{i0}/{a} {b}/{i1}/{b} {c}/{i2}/{c}")
 
     obj_path = out_dir / f"{name}.obj"
     obj_path.write_text("\n".join(obj_lines) + "\n", encoding="utf-8")
-    (out_dir / f"{name}.mtl").write_text(
+    mtl = (
         "newmtl baked\n"
         "Ka 1.000 1.000 1.000\n"
         "Kd 1.000 1.000 1.000\n"
         "Ks 0.000 0.000 0.000\n"
         "d 1.0\n"
         "illum 1\n"
-        f"map_Kd textures/{name}_atlas_0.png\n",
-        encoding="utf-8",
     )
-    return BakeResult(obj_path, out_dir / f"{name}.mtl", (atlas_path,), untextured)
-
+    if fully_atlased:
+        mtl += f"map_Kd textures/{name}_atlas_0.png\n"
+    (out_dir / f"{name}.mtl").write_text(mtl, encoding="utf-8")
+    return BakeResult(obj_path, out_dir / f"{name}.mtl", (atlas_path,), untextured,
+                      textured_faces=len(cell_of_face),
+                      appearance_mode="texture_atlas" if fully_atlased else "vertex_color")
 
 

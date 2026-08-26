@@ -18,13 +18,21 @@ def normalize_exposure(bgr: np.ndarray, target_brightness: float = 0.45) -> np.n
 
 
 def atlas_metrics(atlas_bgr: np.ndarray, untextured_faces: int,
-                  total_faces: int) -> dict:
+                  total_faces: int, textured_faces: int | None = None,
+                  appearance_mode: str = "texture_atlas") -> dict:
     """Tier-4 appearance metrics (#63).
 
     Atlas cells hold one solid color per face, so per-cell Laplacian blur is
     meaningless; coverage = occupied cells, uniformity = cross-face color
     variance (low variance reads as washed-out texture).
     """
+    if textured_faces is not None:
+        return {
+            "texture_coverage": round(textured_faces / max(1, total_faces), 4),
+            "untextured_face_ratio": round(untextured_faces / max(1, total_faces), 4),
+            "appearance_mode": appearance_mode,
+            "n_atlas_cells": int(textured_faces),
+        }
     h, w = atlas_bgr.shape[:2]
     cell = max(1, min(h, w) // 64)
     cell_means = []

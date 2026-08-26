@@ -25,6 +25,7 @@ class FrameMetadata:
     rgb_depth_dt_ms: float
     bag_timestamp: float = 0.0
     camera_frame_id: str = "camera_color_optical_frame"
+    depth_camera_frame_id: str = ""
     width: int = 640
     height: int = 480
 
@@ -130,6 +131,7 @@ class FrameDataset:
                     rgb_depth_dt_ms=float(row.get("rgb_depth_dt_ms", 0.0)),
                     bag_timestamp=float(row.get("bag_timestamp", row["rgb_timestamp"])),
                     camera_frame_id=row.get("camera_frame_id", "camera_color_optical_frame"),
+                    depth_camera_frame_id=row.get("depth_camera_frame_id", ""),
                     width=int(row.get("width", 640)),
                     height=int(row.get("height", 480))
                 ))

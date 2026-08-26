@@ -15,6 +15,26 @@ import numpy as np
 from auto_mobility.reconstruction.model import CameraIntrinsics
 
 
+def assess_geometry_quality(metrics: dict, *, max_mae_mm: float = 50.0,
+                            max_p95_mm: float = 120.0,
+                            min_coverage: float = 0.50,
+                            min_within_20mm: float = 0.40) -> dict:
+    """Return an explicit acceptance decision, separate from evaluator health."""
+    if metrics.get("status") != "ok":
+        return {"status": "FAIL", "reasons": ["evaluation_unavailable"]}
+    checks = {
+        "depth_mae_mm": float(metrics.get("depth_mae_mm", float("inf"))) <= max_mae_mm,
+        "depth_p95_mm": float(metrics.get("depth_p95_mm", float("inf"))) <= max_p95_mm,
+        "depth_coverage_ratio": float(metrics.get("depth_coverage_ratio", 0.0)) >= min_coverage,
+        "within_20mm_ratio": float(metrics.get("within_20mm_ratio", 0.0)) >= min_within_20mm,
+    }
+    return {"status": "PASS" if all(checks.values()) else "FAIL",
+            "reasons": [name for name, passed in checks.items() if not passed],
+            "thresholds": {"max_mae_mm": max_mae_mm, "max_p95_mm": max_p95_mm,
+                           "min_coverage": min_coverage,
+                           "min_within_20mm": min_within_20mm}}
+
+
 def evaluate_geometry(mesh, frames, pose_by_frame, cam: CameraIntrinsics,
                       depth_loader, max_views: int = 12,
                       depth_min_mm: float = 300.0,
@@ -56,4 +76,5 @@ def evaluate_geometry(mesh, frames, pose_by_frame, cam: CameraIntrinsics,
     agg = aggregate_depth_metrics(per_frame)
     agg["n_eval_views"] = len(per_frame)
     agg["status"] = "ok"
+    agg["quality"] = assess_geometry_quality(agg)
     return agg

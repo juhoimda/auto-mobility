@@ -1,6 +1,7 @@
 """Evaluation layer: gated hierarchical quality assessment."""
 
-from auto_mobility.reconstruction.evaluation.geometry_eval import evaluate_geometry
+from auto_mobility.reconstruction.evaluation.geometry_eval import (
+    assess_geometry_quality, evaluate_geometry)
 from auto_mobility.reconstruction.evaluation.ranking import (
     CandidateEvaluation,
     GateResult,

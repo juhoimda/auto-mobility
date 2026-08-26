@@ -134,6 +134,12 @@ def _verify_trajectory_cache(tp: Path, dataset_dir: Path | None = None) -> bool:
         import hashlib
 
         meta = json.loads(meta_path.read_text())
+        # Pose export semantics changed: CUVSLAM now uses retrospective SLAM
+        # poses and RTAB uses graph-corrected dense poses. Never reuse a
+        # sidecar produced by the old raw-odometry exporters.
+        if meta.get("schema_version") != "recon-v2/sidecar-2":
+            print(f"[v2] trajectory cache rejected (old export schema): {tp}")
+            return False
         sha = hashlib.sha256(Path(tp).read_bytes()).hexdigest()
         if str(meta.get("trajectory_sha256", "")) != sha:
             print(f"[v2] trajectory cache rejected (sha mismatch): {tp}")

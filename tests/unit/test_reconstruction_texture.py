@@ -52,8 +52,11 @@ def test_bake_produces_obj_mtl_atlas(tmp_path):
     obj_text = result.obj_path.read_text()
     assert obj_text.count("v ") >= 8
     assert "mtllib model.mtl" in obj_text
-    assert "usemtl baked" in obj_text
-    assert "map_Kd textures/model_atlas_0.png" in result.mtl_path.read_text()
+    # Partial fixed-grid atlases must not be bound as map_Kd: that used to
+    # paint every unmapped face the same fallback colour.  Vertex colours are
+    # the authoritative appearance mode until a complete unwrap is available.
+    assert result.appearance_mode == "vertex_color"
+    assert "map_Kd" not in result.mtl_path.read_text()
 
 
 def test_bake_writes_per_face_uvs_and_vertex_colors(tmp_path):
@@ -73,20 +76,8 @@ def test_bake_writes_per_face_uvs_and_vertex_colors(tmp_path):
                         scene=None, out_dir=tmp_path, name="model")
 
     lines = result.obj_path.read_text().splitlines()
-    vt_ids_per_face = [
-        tuple(int(tok.split("/")[1]) for tok in l.split()[1:])
-        for l in lines if l.startswith("f ")
-    ]
-    fallback = (1, 2, 3)
-    textured = [ids for ids in vt_ids_per_face if ids != fallback]
-    # 회귀 핵심: 텍스처 받는 면들은 각자 고유한 UV 셀을 가져야 하며
-    # (구버전 버그는 전 면이 fallback 3개를 공유했음), 정면 면은 반드시 셀을 받는다.
-    assert len(set(textured)) == len(textured), \
-        "텍스처 면끼리 같은 UV 셀을 공유해서는 안 됨"
-    assert textured, "카메라를 향한 면은 텍스처 셀을 배정받아야 함"
-    used_vts = {i for ids in vt_ids_per_face for i in ids}
-    n_vt = sum(1 for l in lines if l.startswith("vt "))
-    assert max(used_vts) <= n_vt
+    assert all("//" in l for l in lines if l.startswith("f "))
+    assert result.textured_faces > 0
 
     import open3d as o3d
 

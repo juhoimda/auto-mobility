@@ -83,7 +83,7 @@ def score_trajectory(
     frame_timestamps: np.ndarray,
     trajectory_timestamps: np.ndarray,
     positions_m: np.ndarray,
-    rotations_rad: np.ndarray,
+    rotation_steps_rad: np.ndarray,
     expected_fps: float = 30.0,
     max_gap_s: float = 0.5,
     jump_step_m: float = 0.5,
@@ -94,7 +94,10 @@ def score_trajectory(
     ts_f = np.asarray(frame_timestamps, dtype=np.float64)
     tj_t = np.asarray(trajectory_timestamps, dtype=np.float64)
     pos = np.asarray(positions_m, dtype=np.float64)
-    rot = np.asarray(rotations_rad, dtype=np.float64)
+    # Callers supply one angular displacement per pose (the first is zero).
+    # The old implementation differentiated this already-differenced signal,
+    # hiding a single 30-degree loop/pose-graph discontinuity.
+    rot = np.asarray(rotation_steps_rad, dtype=np.float64)
     n = len(tj_t)
     if n < 2 or len(pos) != n or len(rot) != n:
         return TrajectoryScore(backend, profile, failures=["insufficient_poses"])
@@ -111,7 +114,7 @@ def score_trajectory(
     max_gap = float(dt.max()) if n > 1 else 0.0
 
     step = np.linalg.norm(np.diff(pos, axis=0), axis=1)
-    rot_step = np.abs(np.diff(rot))
+    rot_step = np.abs(rot[1:])
     p99 = lambda a: float(np.percentile(a, 99)) if len(a) else 0.0
 
     failures = []

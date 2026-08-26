@@ -11,6 +11,7 @@
 #include <chrono>
 #include <iomanip>
 #include <algorithm>
+#include <map>
 #include <opencv2/opencv.hpp>
 
 #include <rtabmap/core/Rtabmap.h>
@@ -342,9 +343,36 @@ int main(int argc, char** argv) {
 
     std::cout << "💾 Finalizing RTAB-Map memory and saving database..." << std::endl;
     rtabmap.close(true);
+
+    // rtabmap.process() optimizes only graph/keyframe poses.  Exporting
+    // FrameRecord::odom_pose directly (as the previous code did) discards
+    // loop closure and creates folded/doubled rooms in dense TSDF fusion.
+    // Convert optimized keyframe poses into an odom->map correction and
+    // interpolate that correction for every non-keyframe record.
+    const std::map<int, rtabmap::Transform> & optimized = rtabmap.getLocalOptimizedPoses();
+    struct KeyframeCorrection {
+        double timestamp;
+        rtabmap::Transform correction;
+    };
+    std::vector<KeyframeCorrection> corrections;
+    corrections.reserve(frame_records.size());
+    for (const auto & rec : frame_records) {
+        if (!rec.is_keyframe) continue;
+        auto it = optimized.find(rec.id);
+        if (it == optimized.end() || it->second.isNull()) continue;
+        corrections.push_back({rec.timestamp, it->second * rec.odom_pose.inverse()});
+    }
+    if (corrections.empty()) {
+        std::cerr << "❌ No optimized keyframes available; refusing unsafe raw-odometry export." << std::endl;
+        delete odom;
+        return 3;
+    } else {
+        std::cout << "🧭 Applying optimized graph correction from " << corrections.size()
+                  << " keyframes to " << frame_records.size() << " poses." << std::endl;
+    }
     delete odom;
 
-    // Export full-density trajectory (map-corrected) to TUM format
+    // Export full-density, graph-corrected trajectory to TUM format.
     std::ofstream traj_file(out_trajectory);
     if (!traj_file.is_open()) {
         std::cerr << "❌ Failed to open trajectory output file: " << out_trajectory << std::endl;
@@ -354,7 +382,24 @@ int main(int argc, char** argv) {
     traj_file << "# TUM format: timestamp tx ty tz qx qy qz qw\n";
     for (const auto& rec : frame_records) {
         double ts = rec.timestamp;
-        const auto& T = rec.odom_pose;
+        rtabmap::Transform T = rec.odom_pose;
+        if (!corrections.empty()) {
+            auto hi = std::lower_bound(
+                corrections.begin(), corrections.end(), ts,
+                [](const KeyframeCorrection & k, double t) { return k.timestamp < t; });
+            rtabmap::Transform C;
+            if (hi == corrections.begin()) {
+                C = hi->correction;
+            } else if (hi == corrections.end()) {
+                C = corrections.back().correction;
+            } else {
+                const auto & lo = *(hi - 1);
+                const double span = std::max(1e-9, hi->timestamp - lo.timestamp);
+                const float a = static_cast<float>((ts - lo.timestamp) / span);
+                C = lo.correction.interpolate(std::clamp(a, 0.0f, 1.0f), hi->correction);
+            }
+            T = C * rec.odom_pose;
+        }
         Eigen::Quaternionf q = T.getQuaternionf();
         traj_file << std::fixed << std::setprecision(6) << ts << " "
                   << std::setprecision(6)

@@ -93,10 +93,15 @@ def main() -> int:
     odom_cfg.rgbd_settings = cuvslam.Tracker.OdometryRGBDSettings(
         depth_scale_factor=1000.0, depth_camera_id=0,
     )
-    tracker = cuvslam.Tracker(rig, odom_cfg)
-    print(f"[cuvslam_worker] RGBD tracker {W}x{H} fx={fx:.1f}")
+    # SLAM must be explicitly enabled.  Without this config the second return
+    # value of track() is always None, so a corridor is exported as raw VO.
+    slam_cfg = cuvslam.Slam.Config(use_gpu=True, sync_mode=True,
+                                   retention_time_ms=0)
+    tracker = cuvslam.Tracker(rig, odom_cfg, slam_cfg)
+    print(f"[cuvslam_worker] RGBD SLAM tracker {W}x{H} fx={fx:.1f}")
 
-    traj = []
+    # Tracking samples are used only for progress logging.  The delivered
+    # trajectory must be the retrospectively optimized SLAM export.
     t0 = time.time()
     for i, r in enumerate(rows):
         ts = float(r["rgb_timestamp"])
@@ -111,21 +116,23 @@ def main() -> int:
         depth = cv2.imread(str(depth_path), cv2.IMREAD_UNCHANGED)
         if bgr is None or depth is None:
             continue
-        odom_est, slam_est = tracker.track(ts_ns, [bgr], depths=[depth])
-        # P0 #11: prioritize SLAM-corrected pose when available (loop/global correction lives in slam_est);
-        # odometry-only pose lacks global correction and would degrade reconstruction quality if preferred.
-        pose = None
-        if slam_est is not None and getattr(slam_est, "world_from_rig", None) is not None:
-            pose = slam_est.world_from_rig
-        if pose is None and odom_est is not None and getattr(odom_est, "world_from_rig", None) is not None:
-            pose = odom_est.world_from_rig
+        odom_est, _slam_est = tracker.track(ts_ns, [bgr], depths=[depth])
+        pose_estimate = getattr(odom_est, "world_from_rig", None)
+        pose = getattr(pose_estimate, "pose", pose_estimate)
         if pose is None:
             if i % 200 == 0:
                 print(f"  [{i}/{len(rows)}] lost")
             continue
-        traj.append((ts, list(pose.pose.translation), list(pose.pose.rotation)))
         if i % 200 == 0:
-            print(f"  [{i}/{len(rows)}] ok t={traj[-1][1]}")
+            print(f"  [{i}/{len(rows)}] ok t={list(pose.translation)}")
+
+    optimized = tracker.get_all_slam_poses()
+    traj = [(p.timestamp_ns / 1e9, list(p.pose.translation), list(p.pose.rotation))
+            for p in optimized if getattr(p, "pose", None) is not None]
+    if len(traj) < 10:
+        print("[cuvslam_worker] optimized SLAM export unavailable; refusing unsafe VO fallback",
+              file=sys.stderr)
+        return 3
 
     out_traj.parent.mkdir(parents=True, exist_ok=True)
     with open(out_traj, "w") as fh:
@@ -134,7 +141,8 @@ def main() -> int:
     # sidecar (#50): content hash + dataset fingerprint for verified reuse
     import hashlib
 
-    meta = {"schema_version": "recon-v2/sidecar-1", "backend": "cuvslam",
+    meta = {"schema_version": "recon-v2/sidecar-2", "backend": "cuvslam",
+            "pose_export": "retrospective_slam",
             "profile": "standard", "n_frames": len(rows), "n_poses": len(traj),
             "trajectory_sha256": hashlib.sha256(out_traj.read_bytes()).hexdigest(),
             "dataset_fingerprint": _dataset_fingerprint(dataset)}

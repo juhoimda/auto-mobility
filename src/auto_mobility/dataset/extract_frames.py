@@ -283,7 +283,8 @@ def extract_dataset_from_bag(bag_path_or_name: str, out_dir: Optional[str] = Non
                 "depth_data": d_data,
                 "depth_type": d_type,
                 "dt_ms": dt_ms,
-                "fid": r_fid,
+                "rgb_frame_id": r_fid,
+                "depth_frame_id": d_fid,
             })
 
     print(f"🔗 동기화 프레임 매칭: 총 {len(matched_pairs)} 프레임 페어 생성 (dt <= {max_sync_dt_ms}ms)")
@@ -325,7 +326,8 @@ def extract_dataset_from_bag(bag_path_or_name: str, out_dir: Optional[str] = Non
                 "depth_path": depth_rel,
                 "rgb_depth_dt_ms": f"{pair['dt_ms']:.3f}",
                 "bag_timestamp": f"{pair['rgb_bag_stamp']:.6f}",
-                "camera_frame_id": pair["fid"],
+                "camera_frame_id": pair["rgb_frame_id"],
+                "depth_camera_frame_id": pair["depth_frame_id"],
                 "width": w,
                 "height": h
             }
@@ -360,7 +362,7 @@ def extract_dataset_from_bag(bag_path_or_name: str, out_dir: Optional[str] = Non
     with open(frames_csv_path, "w", newline="", encoding="utf-8") as f_csv:
         fieldnames = [
             "frame_id", "rgb_timestamp", "depth_timestamp", "rgb_path", "depth_path",
-            "rgb_depth_dt_ms", "bag_timestamp", "camera_frame_id", "width", "height"
+            "rgb_depth_dt_ms", "bag_timestamp", "camera_frame_id", "depth_camera_frame_id", "width", "height"
         ]
         writer = csv.DictWriter(f_csv, fieldnames=fieldnames)
         writer.writeheader()
@@ -424,6 +426,18 @@ def extract_dataset_from_bag(bag_path_or_name: str, out_dir: Optional[str] = Non
         "timestamp_reversal_count": int(np.sum(r_diffs < 0)),
         "is_camera_info_fallback": camera_info_record.get("is_fallback", False)
     }
+    same_optical_frame = all(
+        p["rgb_frame_id"] == p["depth_frame_id"] for p in matched_pairs)
+    dataset_info.update({
+        "rgb_topic": selected_rgb,
+        "depth_topic": selected_depth,
+        "rgb_frame_id": rgb_frames[0][4],
+        "depth_frame_id": depth_frames[0][4],
+        # A matching optical frame is the only safe no-extrinsic path for the
+        # one-intrinsic RGB-D consumers.  Raw-depth topics with different
+        # frames are explicitly rejected downstream rather than silently fused.
+        "depth_color_alignment": "aligned" if same_optical_frame else "not_aligned",
+    })
 
     dataset_info_path = out_path / "dataset_info.json"
     with open(dataset_info_path, "w", encoding="utf-8") as f_meta:
