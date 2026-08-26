@@ -9,10 +9,12 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DATA_DIR="$PROJECT_DIR/ros2_data"
 
 BAG_DIR="$DATA_DIR/bags"
+FRAME_DIR="$DATA_DIR/frames"
 DB_DIR="$DATA_DIR/databases"
 POINTCLOUD_DIR="$DATA_DIR/pointclouds"
 MESH_DIR="$DATA_DIR/meshes"
 TRAJECTORY_DIR="$DATA_DIR/trajectories"
+EVALUATION_DIR="$DATA_DIR/evaluations"
 BENCHMARK_DIR="$DATA_DIR/benchmarks"
 ISAAC_DIR="$DATA_DIR/isaac_sim"
 LOG_DIR="$DATA_DIR/logs"
@@ -23,7 +25,7 @@ STORAGE_FORMAT="mcap"
 
 
 # config/topics.yaml 를 단일 소스로 토픽명 로드 (기존 환경변수 오버라이드 유지)
-if [ -f "$PROJECT_DIR/config/topics.yaml" ]; then
+if [ -f "$PROJECT_DIR/config/topics.yaml" ] && [ -z "$RGB_COMPRESSED_TOPIC" ]; then
     eval "$(python3 - "$PROJECT_DIR/config/topics.yaml" <<'PYEOF'
 import sys, os, yaml
 with open(sys.argv[1], encoding="utf-8") as f:
@@ -125,6 +127,10 @@ if [ -z "${RMW_IMPLEMENTATION:-}" ]; then
     RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 fi
 export RMW_IMPLEMENTATION
+
+# CycloneDDS IP 동적 동기화 (WSL ↔ Windows 간 IP 자동 매핑)
+python3 "$PROJECT_DIR/scripts/utils/sync_dds_config.py" 2>/dev/null || true
+
 # CycloneDDS 설정 파일 (Windows와의 정적 피어 포함). 없으면 기본(멀티캐스트)으로 동작.
 if [ -z "${CYCLONEDDS_URI:-}" ] && [ -f "$PROJECT_DIR/config/dds/cyclonedds_camera.xml" ]; then
     export CYCLONEDDS_URI="file://$PROJECT_DIR/config/dds/cyclonedds_camera.xml"
@@ -136,7 +142,16 @@ mkdir -p "$BAG_DIR" "$DB_DIR" "$POINTCLOUD_DIR" "$MESH_DIR" "$TRAJECTORY_DIR" "$
 # 토픽 존재/수신 확인 (ros2 CLI 데몬 hang 문제 회피 — topic_probe.py 사용)
 # 사용법: topic_exists <topic> [timeout_sec]  → 0=수신 확인 / 1=없음
 topic_exists() {
-    python3 "$PROJECT_DIR/scripts/utils/topic_probe.py" "$1" "${2:-3}" >/dev/null 2>&1
+    python3 "$PROJECT_DIR/scripts/utils/topic_probe.py" "$1" "${2:-1.5}" >/dev/null 2>&1
+}
+
+# 여러 토픽 동시 확인 (배치 프로브)
+# 사용법: topic_probe_batch [timeout_sec] <topic1> <topic2> ...
+# 출력: 각 줄에 "TOPIC:0"(성공) 또는 "TOPIC:1"(실패)
+topic_probe_batch() {
+    local timeout="${1:-2.0}"
+    shift
+    python3 "$PROJECT_DIR/scripts/utils/topic_probe.py" --batch "$@" --timeout "$timeout"
 }
 
 if [ -f "$PROJECT_DIR/install/setup.bash" ]; then
@@ -158,6 +173,9 @@ fi
 
 # PYTHONPATH 추가 (src 내부 auto_mobility 패키지 모듈 탐색 보장)
 export PYTHONPATH="$PROJECT_DIR/src:$PROJECT_DIR:$PYTHONPATH"
+
+# third_party 설치 라이브러리 경로 (libstella_vslam, libfbow, pangolin 등)
+export LD_LIBRARY_PATH="$PROJECT_DIR/third_party/installed/lib:$LD_LIBRARY_PATH"
 
 # 스크립트 실행 권한 자동 보장 (.py 는 python3 로 호출되므로 exec bit 불필요)
 chmod +x "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR"/*/*.sh 2>/dev/null || true

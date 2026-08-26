@@ -41,15 +41,6 @@ class TestRepublishNodeUnit(unittest.TestCase):
         self.node._pub_info = type('MockPub', (), {'publish': lambda self, m: None})()
 
         self.node._on_rgb(msg)
-        # Depth dummy also required for sync publish
-        dummy_depth = np.full((10, 10), 1000, dtype=np.uint16)
-        _, encoded_png = cv2.imencode('.png', dummy_depth)
-        depth_msg = CompressedImage()
-        depth_msg.format = "png"
-        depth_msg.data = b'\x00' * 12 + encoded_png.tobytes()
-        self.node._on_depth(depth_msg)
-
-        self.node._publish_sync()
         self.assertEqual(len(published_msgs), 1)
         self.assertEqual(published_msgs[0].height, 10)
         self.assertEqual(published_msgs[0].width, 10)
@@ -71,16 +62,7 @@ class TestRepublishNodeUnit(unittest.TestCase):
         self.node._pub_depth = type('MockPub', (), {'publish': lambda self, m: published_msgs.append(m)})()
         self.node._pub_info = type('MockPub', (), {'publish': lambda self, m: None})()
 
-        # RGB dummy also required for sync publish
-        dummy_img = np.zeros((10, 10, 3), dtype=np.uint8)
-        _, encoded_img = cv2.imencode('.jpg', dummy_img)
-        rgb_msg = CompressedImage()
-        rgb_msg.format = "jpeg"
-        rgb_msg.data = encoded_img.tobytes()
-        self.node._on_rgb(rgb_msg)
-
         self.node._on_depth(msg)
-        self.node._publish_sync()
         self.assertEqual(len(published_msgs), 1)
         self.assertEqual(published_msgs[0].height, 10)
         self.assertEqual(published_msgs[0].width, 10)

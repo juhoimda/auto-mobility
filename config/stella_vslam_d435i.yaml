@@ -1,0 +1,30 @@
+Camera:
+  name: RealSense D435i RGB-D
+  setup: RGBD
+  model: perspective
+  color_order: BGR
+  cols: 640
+  rows: 480
+  fps: 30.0
+  focal_x_baseline: 30.326935
+  fx: 606.5387
+  fy: 606.4935
+  cx: 324.4991
+  cy: 241.7047
+  k1: 0.0
+  k2: 0.0
+  p1: 0.0
+  p2: 0.0
+  k3: 0.0
+  depth_threshold: 40.0
+  depth_factor: 1000.0
+Feature:
+  max_num_keypoints: 1200
+  scale_factor: 1.2
+  num_levels: 8
+  ini_fast_threshold: 20
+  min_fast_threshold: 7
+Mapping:
+  baseline_dist_thr_ratio: 0.02
+Tracking:
+  min_num_tracked_keypoints: 15

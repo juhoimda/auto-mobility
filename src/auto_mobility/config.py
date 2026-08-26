@@ -60,6 +60,26 @@ def load_topics_config() -> dict:
 TOPICS_CONFIG = load_topics_config()
 
 
+def load_evaluation_config() -> dict:
+    """Load config/evaluation.yaml"""
+    config_path = _find_config_file("evaluation.yaml")
+    if config_path is not None:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return yaml.safe_load(f) or {}
+    return {}
+
+
+EVALUATION_CONFIG = load_evaluation_config()
+
+
+def get_evaluation_config() -> dict:
+    """Return latest or cached evaluation configuration."""
+    global EVALUATION_CONFIG
+    if not EVALUATION_CONFIG:
+        EVALUATION_CONFIG = load_evaluation_config()
+    return EVALUATION_CONFIG
+
+
 def get_topic(name: str, default=None) -> str:
     """config/topics.yaml 에서 토픽명을 조회한다.
 
@@ -110,11 +130,13 @@ PROJECT_DIR    = get_project_root()
 CONFIG_DIR     = PROJECT_DIR / "config"
 DATA_DIR       = PROJECT_DIR / "ros2_data"
 BAG_DIR        = DATA_DIR / "bags"           # raw rosbag2 / MCAP (불변 원본 데이터셋)
+FRAME_DIR      = DATA_DIR / "frames"         # Canonical Frame Dataset (알고리즘 독립 표준)
 DB_DIR         = DATA_DIR / "databases"      # RTAB-Map .db (derived artifact)
 POINTCLOUD_DIR = DATA_DIR / "pointclouds"    # 중간 PLY (derived artifact)
 MESH_DIR       = DATA_DIR / "meshes"         # 최종 OBJ/PLY mesh (derived artifact)
 TRAJECTORY_DIR = DATA_DIR / "trajectories"   # 표준 TUM trajectory (derived artifact)
-BENCHMARK_DIR  = DATA_DIR / "benchmarks"     # 알고리즘 비교 벤치마크 결과
+EVALUATION_DIR = DATA_DIR / "evaluations"    # 정량 Geometry / Topology 평가 결과
+BENCHMARK_DIR  = DATA_DIR / "benchmarks"     # 다중 후보 비교 벤치마크 결과
 ISAAC_DIR      = DATA_DIR / "isaac_sim"      # Isaac Sim 입력용 복사본
 LOG_DIR        = DATA_DIR / "logs"           # 파이프라인 / capture_guard 로그
 # FASTDDS_XML: FastDDS 프로파일. CycloneDDS(rmw_cyclonedds_cpp)로 전환 후 사용되지 않으나

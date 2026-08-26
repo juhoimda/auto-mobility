@@ -46,10 +46,14 @@ install(
     src/auto_mobility/nodes/camera_tf_pub.py
     src/auto_mobility/mesh/mesh_open3d.py
     src/auto_mobility/mesh/reconstruct_tsdf.py
+    src/auto_mobility/mesh/worker.py
+    src/auto_mobility/mesh/worker_surface.py
     src/auto_mobility/mesh/view_mesh.py
     src/auto_mobility/mesh/view_pointcloud.py
     src/auto_mobility/isaac/load_isaac_mesh.py
     src/auto_mobility/slam/benchmark_slam.py
+    src/auto_mobility/slam/compare_algorithms.py
+    src/auto_mobility/benchmark/cli.py
     src/auto_mobility/utils/benchmark_hw.py
     src/auto_mobility/utils/inspect_system.py
     src/auto_mobility/utils/validate.py
@@ -108,7 +112,118 @@ if(EXISTS "${ORB_SLAM3_DIR}/lib/libORB_SLAM3.so")
     cv_bridge
     message_filters
   )
+  set_target_properties(orbslam3_rgbd_node PROPERTIES
+    BUILD_RPATH "${ORB_SLAM3_DIR}/lib;${ORB_SLAM3_DIR}/Thirdparty/DBoW2/lib;${ORB_SLAM3_DIR}/Thirdparty/g2o/lib;${PANGOLIN_DIR}/lib"
+    INSTALL_RPATH "${ORB_SLAM3_DIR}/lib;${ORB_SLAM3_DIR}/Thirdparty/DBoW2/lib;${ORB_SLAM3_DIR}/Thirdparty/g2o/lib;${PANGOLIN_DIR}/lib"
+  )
   install(TARGETS orbslam3_rgbd_node DESTINATION lib/${PROJECT_NAME})
+
+  add_executable(orbslam3_offline src/auto_mobility/slam/orbslam3_offline.cpp)
+  target_compile_features(orbslam3_offline PRIVATE cxx_std_14)
+  target_include_directories(orbslam3_offline PRIVATE
+    ${ORB_SLAM3_DIR}
+    ${ORB_SLAM3_DIR}/include
+    ${ORB_SLAM3_DIR}/include/CameraModels
+    ${ORB_SLAM3_DIR}/Thirdparty/Sophus
+    ${PANGOLIN_DIR}/include
+    ${OpenCV_INCLUDE_DIRS}
+    ${EIGEN3_INCLUDE_DIR}
+    ${GLEW_INCLUDE_DIRS}
+  )
+  target_link_directories(orbslam3_offline PRIVATE
+    ${ORB_SLAM3_DIR}/lib
+    ${ORB_SLAM3_DIR}/Thirdparty/DBoW2/lib
+    ${ORB_SLAM3_DIR}/Thirdparty/g2o/lib
+    ${PANGOLIN_DIR}/lib
+  )
+  target_link_libraries(orbslam3_offline
+    ORB_SLAM3
+    DBoW2
+    g2o
+    pangolin
+    OpenGL::GL
+    ${GLEW_LIBRARIES}
+    pthread
+    ${OpenCV_LIBS}
+  )
+  set_target_properties(orbslam3_offline PROPERTIES
+    BUILD_RPATH "${ORB_SLAM3_DIR}/lib;${ORB_SLAM3_DIR}/Thirdparty/DBoW2/lib;${ORB_SLAM3_DIR}/Thirdparty/g2o/lib;${PANGOLIN_DIR}/lib"
+    INSTALL_RPATH "${ORB_SLAM3_DIR}/lib;${ORB_SLAM3_DIR}/Thirdparty/DBoW2/lib;${ORB_SLAM3_DIR}/Thirdparty/g2o/lib;${PANGOLIN_DIR}/lib"
+  )
+  install(TARGETS orbslam3_offline DESTINATION lib/${PROJECT_NAME})
+endif()
+
+set(STELLA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/installed)
+if(EXISTS "${STELLA_DIR}/lib/libstella_vslam.so")
+  add_executable(stella_rgbd_node src/auto_mobility/slam/stella_rgbd_node.cpp)
+  target_compile_features(stella_rgbd_node PRIVATE cxx_std_17)
+  target_include_directories(stella_rgbd_node PRIVATE
+    ${STELLA_DIR}/include
+    ${OpenCV_INCLUDE_DIRS}
+    ${EIGEN3_INCLUDE_DIR}
+  )
+  target_link_directories(stella_rgbd_node PRIVATE
+    ${STELLA_DIR}/lib
+  )
+  target_link_libraries(stella_rgbd_node
+    stella_vslam
+    fbow
+    pthread
+    ${OpenCV_LIBS}
+  )
+  ament_target_dependencies(stella_rgbd_node
+    rclcpp
+    sensor_msgs
+    geometry_msgs
+    nav_msgs
+    cv_bridge
+    message_filters
+  )
+  set_target_properties(stella_rgbd_node PROPERTIES
+    BUILD_RPATH "${STELLA_DIR}/lib"
+    INSTALL_RPATH "${STELLA_DIR}/lib"
+  )
+  install(TARGETS stella_rgbd_node DESTINATION lib/${PROJECT_NAME})
+
+  add_executable(stella_offline src/auto_mobility/slam/stella_offline.cpp)
+  target_compile_features(stella_offline PRIVATE cxx_std_17)
+  target_include_directories(stella_offline PRIVATE
+    ${STELLA_DIR}/include
+    ${OpenCV_INCLUDE_DIRS}
+    ${EIGEN3_INCLUDE_DIR}
+  )
+  target_link_directories(stella_offline PRIVATE
+    ${STELLA_DIR}/lib
+  )
+  target_link_libraries(stella_offline
+    stella_vslam
+    fbow
+    pthread
+    ${OpenCV_LIBS}
+  )
+  set_target_properties(stella_offline PROPERTIES
+    BUILD_RPATH "${STELLA_DIR}/lib"
+    INSTALL_RPATH "${STELLA_DIR}/lib"
+  )
+  install(TARGETS stella_offline DESTINATION lib/${PROJECT_NAME})
+endif()
+
+find_package(RTABMap QUIET)
+if(RTABMap_FOUND)
+  add_executable(rtabmap_offline src/auto_mobility/slam/rtabmap_offline.cpp)
+  target_compile_features(rtabmap_offline PRIVATE cxx_std_17)
+  target_include_directories(rtabmap_offline PRIVATE
+    ${RTABMap_INCLUDE_DIRS}
+    ${OpenCV_INCLUDE_DIRS}
+    ${EIGEN3_INCLUDE_DIR}
+  )
+  target_link_libraries(rtabmap_offline
+    rtabmap::core
+    rtabmap::utilite
+    ${OpenCV_LIBS}
+    pthread
+  )
+  install(TARGETS rtabmap_offline DESTINATION lib/${PROJECT_NAME})
 endif()
 
 ament_package()

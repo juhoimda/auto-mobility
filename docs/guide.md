@@ -1,136 +1,131 @@
-# 🛠️ Auto-Mobility 핵심 워크플로우 가이드
+# 🚀 Auto-Mobility 실전 파이프라인 가이드
 
-Auto-Mobility (Real-to-Sim) 파이프라인의 **단계별 실행 및 3D 복원 가이드**입니다.  
-안전한 Raw 데이터 수집부터 Multi-SLAM 맵핑, 3D Point Cloud 및 Mesh 복원, 시뮬레이터 검증까지 순서대로 구성되어 있습니다.
+RealSense D435i 데이터 수집부터 3D SLAM, 정밀 3D 표면 메쉬(Mesh) 복원, 그리고 센서 기반 정량 품질 평가(QA) 및 다축 벤치마크까지 **실제 작업에 필요한 핵심 명령어 중심의 실전 워크플로우**입니다.
 
 ---
 
-## 🧭 파이프라인 전체 흐름도
+## ⚡ 1. 실전 3단계 핵심 워크플로우 (Quick Start)
+
+가장 빠르고 표준적인 3D 공간 복원 절차입니다.
 
 ```text
-[1. 데이터셋 캡처] ──▶ [2. Multi-SLAM 궤적] ──▶ [3. 3D 메쉬/점군 복원] ──▶ [4. Isaac Sim 검증]
-  capture_safe.sh        run_slam.sh              mesh.sh (TSDF)           isaac.sh
-  (Raw rosbag2 확보)     (DB 및 궤적.txt 생성)     (.obj / .ply 동시 생성)  (디지털 트윈 로드)
+[1. 원본 촬영] ──────▶ [2. SLAM 궤적] ──────▶ [3. 3D 메쉬 생성 & 뷰어]
+ capture_safe.sh        run_slam.sh             mesh.sh --view
+ (무손실 Rosbag 확보)   (카메라 이동 궤적 계산)  (3D 메쉬 자동 생성 및 확인)
+```
+
+```bash
+# [Step 1] 데이터셋 촬영 및 녹화 (RGB-D + Stereo IR + IMU)
+./scripts/pipeline/capture_safe.sh room01 --view
+
+# [Step 2] 원하는 SLAM 백엔드 실행 및 표준 TUM 궤적(.txt) 생성
+./scripts/pipeline/run_slam.sh room01 --slam=rtab        # RTAB-Map Visual SLAM
+./scripts/pipeline/run_slam.sh room01 --slam=orb_rgbdi   # ORB-SLAM3 RGB-D-Inertial (IMU 융합)
+./scripts/pipeline/run_slam.sh room01 --slam=orb_rgbd    # ORB-SLAM3 RGB-D
+./scripts/pipeline/run_slam.sh room01 --slam=stella_rgbd # stella_vslam RGB-D
+
+# [Step 3] 3D 표면 메쉬 생성 및 뷰어 자동 실행
+./scripts/pipeline/mesh.sh room01 --surface=tsdf_direct --view # 20mm TSDF 메쉬 (기본)
+```
+
+> 💡 **Tip (자동 프레임 추출)**:  
+> `prepare_dataset.sh`를 별도로 실행하지 않아도 `mesh.sh`나 `evaluate.sh`, `compare.sh`가 원본 Rosbag에서 필요한 Canonical Frames를 자동으로 추출합니다.
+
+---
+
+## 📊 2. 정량 품질 평가 및 다축 벤치마크 워크플로우
+
+생성된 3D 메쉬가 실제 센서 관측과 얼마나 일치하는지 정량 오차를 측정하고 알고리즘 축별로 독립 비교합니다.
+
+### 4단계: 센서 데이터 기반 정량 형상 품질 평가 (Geometry QA)
+실제 D435i Depth 관측값과 메쉬의 오차(Depth MAE, P95, Coverage, Point-to-Mesh)를 측정하여 PASS/WARN/FAIL을 판정합니다.
+```bash
+./scripts/pipeline/evaluate.sh room01 ros2_data/meshes/room01_rtab_tsdf.obj
+```
+* **결과 보고서**: `ros2_data/evaluations/room01/rtab_tsdf_20mm/evaluation_report.md`
+
+### 5단계: Multi-Axis 모듈식 벤치마크 및 축별 랭킹 (`compare.sh`)
+SLAM, TSDF 해상도, Surface 표현 방식을 직교 분리하여 독립 비교합니다.
+```bash
+# 전체 단계 일괄 실행 (Phase A + B + C + D)
+./scripts/pipeline/compare.sh room01 --quick
+
+# 단계별 독립 벤치마크
+./scripts/pipeline/compare.sh room01 --phase=a   # PHASE A: SLAM 궤적 및 센서 일치도 비교
+./scripts/pipeline/compare.sh room01 --phase=b   # PHASE B: TSDF 복원 해상도(5/10/20mm) 비교
+./scripts/pipeline/compare.sh room01 --phase=c   # PHASE C: Surface 방식(TSDF/Poisson/BPA/Alpha/CGAL) 비교
+```
+* **결과 산출물**: `ros2_data/benchmarks/bench_room01_<timestamp>/`
+  * `experiment_manifest.json`: 하드웨어(GPU/RAM), 소프트웨어(Open3D/ROS), Git Commit SHA 기록
+  * `benchmark_report.md`: `[SLAM Ranking]`, `[TSDF Ranking]`, `[Surface Ranking]` 분리 리포트
+
+---
+
+## 🛠️ 3. 상황별 실전 명령어 치트시트 (Cheat Sheet)
+
+### A. 3D 복원 알고리즘 및 해상도 선택 (`mesh.sh`)
+```bash
+# 1. TSDF Direct Mesh (기본 20mm - 고속 & 연산/메모리 최적화 표준)
+./scripts/pipeline/mesh.sh room01 --surface=tsdf_direct --voxel=0.02 --view
+
+# 2. 10mm 고정밀 TSDF 복원
+./scripts/pipeline/mesh.sh room01 --surface=tsdf_direct --voxel=0.01 --view
+
+# 3. Open3D Alpha Shape (점간 간격 기반 동적 스케일 표면 복원)
+./scripts/pipeline/mesh.sh room01 --surface=alpha --voxel=0.02 --view
+
+# 4. Poisson Surface Reconstruction (완벽 폐곡면/Watertight)
+./scripts/pipeline/mesh.sh room01 --surface=poisson --view
+
+# 5. Ball Pivoting Algorithm (BPA) (비다양체 결함 없는 초경량 메쉬)
+./scripts/pipeline/mesh.sh room01 --surface=bpa --view
+
+# 6. CGAL Polygonal Surface Reconstruction (실내 벽/바닥/천장 Sharp 메쉬)
+./scripts/pipeline/mesh.sh room01 --surface=cgal_polygonal --view
+
+# 7. ORB-SLAM3 RGB-D-Inertial 궤적 기반 메쉬 생성
+./scripts/pipeline/mesh.sh room01 --slam=orb_rgbdi --surface=tsdf_direct --view
+```
+
+### B. 결과물 시각화 뷰어
+```bash
+# 3D 메쉬(.obj) 확인
+./scripts/utils/view_mesh.sh room01_rtab_tsdf.obj
+
+# 3D 점군(.ply) 확인
+./scripts/utils/view_pointcloud.sh room01_rtab_tsdf_cloud.ply
+
+# RTAB-Map SLAM 세션 DB 3D GUI 뷰어
+rtabmap-databaseViewer ~/auto-mobility/ros2_data/databases/room01.db
 ```
 
 ---
 
-## ⚙️ 0. 필수 환경 초기화
+## 📁 4. 표준 데이터 디렉터리 구조 (`ros2_data/`)
 
-실행 전 워크스페이스와 환경변수를 설정합니다.
+모든 결과물은 파일 형식별로 독립 관리됩니다.
 
-```bash
-# 1. ROS 2 환경 및 워크스페이스 로드
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-
-# 2. Python 모듈 및 CycloneDDS 도메인 설정 (기본값: 42)
-export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
-export ROS_DOMAIN_ID=42
+```text
+ros2_data/
+├── bags/          # [원본] 무손실 Rosbag (.mcap) — 단 하나의 불변 원본
+├── frames/        # [추출] 표준 RGB-D 이미지 + 실제 카메라 파라미터 (자동 추출됨)
+├── databases/     # [SLAM] RTAB-Map 세션 DB (.db)
+├── trajectories/  # [SLAM] 카메라 6자유도 이동 궤적 (.txt, TUM 포맷)
+├── pointclouds/   # [3D]   추출된 3D 점군 데이터 (.ply)
+├── meshes/        # [3D]   최종 3D 표면 메쉬 (.obj)
+├── evaluations/   # [평가] 정량 품질 리포트 (JSON, MD, 오차 Heatmap 이미지)
+└── benchmarks/    # [비교] Multi-Axis 벤치마크 결과 및 Manifest 리포트
 ```
 
 ---
 
-## 📹 1단계: 안전한 Raw 데이터셋 수집 (Capture-Safe)
+## 📐 5. 핵심 품질 평가 지표 (Geometry QA)
 
-SLAM/RViz 부하와 완전히 분리하여 **무손실 Raw 센서 데이터(RGB-D + Stereo IR + IMU + TF)**를 안전하게 기록합니다.
-
-```bash
-# [권장] 저지연 RGB 실시간 프리뷰 창과 함께 캡처
-./scripts/pipeline/capture_safe.sh [DATASET_NAME] --view
-
-# [헤드리스 모드] 프리뷰 창 없이 백그라운드 무부하 수집
-./scripts/pipeline/capture_safe.sh [DATASET_NAME]
-```
-
-* **종료 방법**: 터미널에서 `Ctrl+C`를 누르면 자동 데이터 검증 및 저장이 완료됩니다.
-* **출력 결과물**:
-  * **Rosbag2**: `ros2_data/bags/[DATASET_NAME]/` (`.mcap`)
-  * **데이터셋 매니페스트**: `ros2_data/bags/[DATASET_NAME]/dataset_manifest.json`
-  * **수신 품질 보고서**: `ros2_data/logs/capture_safe_[DATASET_NAME].md`
-
----
-
-## 🗺️ 2단계: 오프라인 Multi-SLAM & 궤적(Trajectory) 추출
-
-수집된 Bag 데이터를 재생하여 카메라 궤적 및 SLAM 데이터베이스를 생성합니다.
-
-```bash
-# RTAB-Map SLAM 실행 및 DB/궤적 생성
-./scripts/pipeline/run_slam.sh [DATASET_NAME] --slam=rtab
-
-# ORB-SLAM3 실행 및 궤적 생성
-./scripts/pipeline/run_slam.sh [DATASET_NAME] --slam=orb
-```
-* **출력 결과물**: 
-  * RTAB-Map: `ros2_data/databases/[DATASET_NAME].db`, `ros2_data/trajectories/rtab_[DATASET_NAME]_trajectory.txt`
-  * ORB-SLAM3: `ros2_data/trajectories/orbslam3_[DATASET_NAME]_trajectory.txt`
-
----
-
-## ☁️ 3단계: 3D Point Cloud & Mesh 재구성 및 시각화
-
-TSDF 알고리즘으로 3D Mesh(.obj) 및 Point Cloud(.ply)를 동시 생성하고 뷰어로 확인합니다.
-
-```bash
-# 1. 3D Mesh 및 Point Cloud 생성 (기본: RTAB-Map 10mm TSDF)
-./scripts/pipeline/mesh.sh [DATASET_NAME] --voxel=0.01
-
-# (선택) ORB-SLAM3 궤적 기반으로 복원할 때
-./scripts/pipeline/mesh.sh [DATASET_NAME] --slam=orb
-
-# 2. 결과물 확인 (메쉬 / 포인트 클라우드 뷰어)
-./scripts/utils/view_mesh.sh [DATASET_NAME]_rtab_tsdf.obj
-./scripts/utils/view_pointcloud.sh [DATASET_NAME]_rtab_tsdf_cloud.ply
-```
-
-* **출력 결과물**:
-  * **RTAB-Map 기반**: `ros2_data/meshes/[DATASET_NAME]_rtab_tsdf.obj`, `ros2_data/pointclouds/[DATASET_NAME]_rtab_tsdf_cloud.ply`
-  * **ORB-SLAM3 기반**: `ros2_data/meshes/[DATASET_NAME]_orbslam_tsdf.obj`, `ros2_data/pointclouds/[DATASET_NAME]_orbslam_tsdf_cloud.ply`
-
----
-
-## 🤖 4단계: Isaac Sim 디지털 트윈 검증
-
-생성된 3D Mesh를 NVIDIA Isaac Sim 환경으로 불러와 물리 충돌체 및 시각적 적합성을 검증합니다.
-
-```bash
-# 생성된 TSDF Mesh를 Isaac Sim에 로드
-./scripts/pipeline/isaac.sh ros2_data/meshes/[DATASET_NAME]_rtab_tsdf.obj
-
-# 물리 시뮬레이션 없이 시각적 검증만 수행할 때
-./scripts/pipeline/isaac.sh ros2_data/meshes/[DATASET_NAME]_rtab_tsdf.obj --no-physics
-```
-
----
-
-## 📊 5단계: 다중 알고리즘 일괄 벤치마크 (선택/심화)
-
-동일한 Rosbag에 대해 **RTAB-Map(Global Opt / Raw), ORB-SLAM3, Fine TSDF(5mm)**를 일괄 실행하여 궤적, 점군, 메쉬 품질을 자동 비교 분석합니다.
-
-```bash
-# 일괄 비교 벤치마크 실행
-python3 src/auto_mobility/slam/compare_algorithms.py [DATASET_NAME]
-```
-
-* **출력 결과물**:
-  * **비교 리포트**: `ros2_data/benchmarks/bench_[DATASET_NAME]_[DATE]/benchmark_report.md`
-  * **정량 수치 JSON**: `ros2_data/benchmarks/bench_[DATASET_NAME]_[DATE]/benchmark_summary.json`
-
----
-
-## ⚡ 부록: 유용한 진단 및 분석 도구
-
-### 1. RTAB-Map 전용 GUI 분석 뷰어
-```bash
-rtabmap-databaseViewer ~/auto-mobility/ros2_data/databases/[DATASET_NAME].db
-```
-
-### 2. 시스템 진단 및 데이터셋 무결성 검증
-```bash
-# 시스템 진단 (DDS 통신, USB, QoS 점검)
-./scripts/utils/check.sh
-
-# 개별 Bag 파일 수동 검증 & 매니페스트 생성
-python3 src/auto_mobility/utils/validate_bag.py ros2_data/bags/[DATASET_NAME]
-```
+| 지표명 | 단위 | 설명 | 목표 기준 |
+| :--- | :---: | :--- | :---: |
+| **Depth MAE** | mm | 실제 Depth와 메쉬 렌더 Depth 간 평균 오차 | **$\le 25\text{ mm}$ (PASS)** |
+| **Depth P95** | mm | 95% 신뢰구간 최대 오차 (벽면 휨/모서리 벌어짐) | **$\le 60\text{ mm}$ (PASS)** |
+| **센서 커버리지** | % | 실제 센서 유효 관측 영역 중 메쉬가 복원된 비율 | **$\ge 75\%$ (PASS)** |
+| **Within 20mm** | % | 실제 관측과 2cm 이내로 완벽 정합된 픽셀 비율 | **$\ge 65\%$ (PASS)** |
+| **Point-to-Mesh**| mm | 역투영된 센서 3D 점군과 메쉬 표면 간의 최단거리 | **$\le 50\text{ mm}$ (PASS)** |
+| **Non-Manifold** | 개 | 2개 이상의 면이 공유하는 비정상 엣지 수 | **$0$ (PASS)** |

@@ -1,8 +1,9 @@
-#!/usr/bin/env python3
+from __future__ import annotations
 import sys
 import os
 import argparse
 import time
+from typing import Optional, List, Dict, Tuple, Union
 
 # repo 소스 실행 / 설치 실행 양쪽에서 auto_mobility 패키지 임포트 보장
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
@@ -12,15 +13,13 @@ try:
     import numpy as np
     from scipy.spatial import cKDTree
 except ImportError:
-    print("Error: Open3D, NumPy, or SciPy is not installed. Install via `pip install open3d numpy scipy`")
+    print("Error: Open3D, NumPy, or SciPy is not installed. Install via pip install open3d numpy scipy")
     sys.exit(1)
 
 from auto_mobility.config import MESH_DEFAULTS
+from auto_mobility.resources import DEFAULT_RESOURCE_POLICY, ResourcePolicy
 
 # CUDA voxel downsample이 CPU 대비 실질 이득을 내는 최소 포인트 수.
-# 실측(2026-08-12, WSL2 paravirtualized GPU): GPU copy-in 오버헤드가 커서
-# 2M 포인트에서도 CPU(tensor)와 비슷(0.94s vs 0.92s), 작은 클라우드는 CPU가 더 빠름.
-# 실제 이산형 NVIDIA GPU를 사용한다면 이 임계값을 낮추거나 CPU 경로를 유지해도 무방.
 GPU_VOXEL_MIN_POINTS = 5_000_000
 
 
@@ -34,12 +33,7 @@ def _cuda_available() -> bool:
 
 
 def _voxel_down(pcd, voxel_size, use_cuda=True):
-    """Tensor API 기반 voxel downsampling.
-
-    실측(2026-08-12): legacy voxel_down_sample 대비 더 빠르고 (2.2M pts: legacy
-    1.67s vs tensor 0.92s), CUDA는 paravirtualized GPU에서 copy-in 오버헤드로
-    이득이 없어 기본 CPU 사용. 대규모 클라우드에 한해 자동 CUDA 선택.
-    """
+    """Tensor API 기반 voxel downsampling."""
     import open3d.core as o3c
     pts = np.asarray(pcd.points).astype(np.float32)
     use_gpu = bool(use_cuda and _cuda_available() and len(pts) >= GPU_VOXEL_MIN_POINTS)
@@ -54,7 +48,7 @@ def _voxel_down(pcd, voxel_size, use_cuda=True):
     tpc = tpc.voxel_down_sample(voxel_size)
     out = o3d.geometry.PointCloud()
     out.points = o3d.utility.Vector3dVector(tpc.point.positions.cpu().numpy().astype(np.float64))
-    if tpc.point.colors is not None:
+    if "colors" in tpc.point:
         out.colors = o3d.utility.Vector3dVector(tpc.point.colors.cpu().numpy().astype(np.float64))
     return out
 
@@ -62,8 +56,10 @@ def _voxel_down(pcd, voxel_size, use_cuda=True):
 def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_size=MESH_DEFAULTS["voxel_size"],
                   method=MESH_DEFAULTS["method"], view_result=False, clean_density=True,
                   simplify_target=MESH_DEFAULTS["simplify_target"], use_cuda=True,
-                  orient="centroid"):
+                  orient="centroid", alpha=None, alpha_factor=3.0, color_transfer=True,
+                  policy: Optional[ResourcePolicy] = None):
     t0 = time.time()
+    active_policy = policy or DEFAULT_RESOURCE_POLICY
     print(f"Loading point cloud: {input_ply}")
     pcd = o3d.io.read_point_cloud(input_ply)
 
@@ -77,43 +73,82 @@ def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_si
     print(f"Downsampling with fine resolution (voxel_size={voxel_size}m)...")
     pcd = _voxel_down(pcd, voxel_size, use_cuda=use_cuda)
 
-    # 실측(2026-08-12): Tensor voxel이 법선을 버리므로 다운샘플된 클라우드에
-    # estimate_normals 를 재수행. 원본 전체 클라우드 cKDTree로 법선을 복사하는
-    # 방식(2.7s/1.25M)보다 다운샘플 클라우드 재추정(0.36s/441k)이 훨씬 빠르다.
-    print("Estimating normals using fast multi-threaded computation...")
-    pcd.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=max(voxel_size * 5.0, 0.03), max_nn=30),
-        fast_normal_computation=True
-    )
+    # Tensor voxel이 법선을 버리므로 다운샘플된 클라우드에 estimate_normals 를 수행
+    if len(pcd.points) >= 4:
+        print("Estimating normals using fast multi-threaded computation...")
+        pcd.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=max(voxel_size * 5.0, 0.03), max_nn=30),
+            fast_normal_computation=True
+        )
 
-    cl, ind = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
-    pcd = pcd.select_by_index(ind)
+        cl, ind = pcd.remove_statistical_outlier(nb_neighbors=min(20, len(pcd.points)-1), std_ratio=2.0)
+        pcd = pcd.select_by_index(ind)
     print(f"Cleaned point count: {len(pcd.points):,}")
 
-    # 법선 방향 정렬: 기본은 전역 MST(tangent plane) 대신 장면 중심(centroid) 방향 정렬.
-    # 실측(2026-08-12): 실내 캡처에서 centroid 방향이 더 빠르고(~0s vs 16-49s)
-    # 최종 mesh의 포인트클라우드 충실도도 더 우수함 (p99 오차 6.7cm vs 14.1cm).
-    # --orient=tangent 로 기존 동작 복원 가능.
-    if orient.lower() == "tangent":
-        print("Orienting normals using tangent-plane consistent orientation (global MST)...")
-        pcd.orient_normals_consistent_tangent_plane(k=15)
-    else:
-        print("Orienting normals towards scene centroid...")
-        pcd.orient_normals_towards_camera_location(pcd.get_center())
+    # 법선 방향 정렬
+    if pcd.has_normals() and len(pcd.normals) > 0:
+        if orient.lower() == "tangent":
+            print("Orienting normals using tangent-plane consistent orientation (global MST)...")
+            pcd.orient_normals_consistent_tangent_plane(k=15)
+        else:
+            print("Orienting normals towards scene centroid...")
+            pcd.orient_normals_towards_camera_location(pcd.get_center())
 
-    if method.lower() == "bpa":
-        print("Reconstructing surface using Ball Pivoting Algorithm (BPA)...")
+    m_lower = method.lower()
+    if m_lower in ("alpha", "alpha_shape", "alphashape"):
+        print("Reconstructing surface using Open3D Alpha Shape...")
         distances = pcd.compute_nearest_neighbor_distance()
+        median_dist = float(np.median(distances)) if len(distances) > 0 else (voxel_size if voxel_size > 0 else 0.02)
+        if alpha is not None and float(alpha) > 0:
+            effective_alpha = float(alpha)
+        else:
+            effective_alpha = float(median_dist * alpha_factor)
+        print(f"  Point spacing median: {median_dist*1000:.2f}mm, alpha factor: {alpha_factor}, effective alpha: {effective_alpha*1000:.2f}mm")
+        try:
+            mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(pcd, effective_alpha)
+        except Exception as e:
+            print(f"  ⚠️ Alpha shape error: {e}")
+            mesh = o3d.geometry.TriangleMesh()
+
+        if len(mesh.triangles) == 0:
+            print("  ⚠️ Alpha shape produced 0 triangles. Retrying with 2x alpha...")
+            try:
+                mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(pcd, effective_alpha * 2.0)
+            except Exception:
+                mesh = o3d.geometry.TriangleMesh()
+
+    elif m_lower in ("cgal", "cgal_polygonal", "polygonal"):
+        print("Reconstructing surface using CGAL Polygonal Surface Reconstruction...")
+        from auto_mobility.mesh.cgal_surface import reconstruct_cgal_polygonal
+        mesh = reconstruct_cgal_polygonal(pcd, output_mesh)
+
+    elif m_lower == "bpa":
+        print("Reconstructing surface using Ball Pivoting Algorithm (BPA)...")
+        # BPA 실행시간은 입력 점 수에 비례하고 상수가 매우 크다 (실측: 885k pts -> 135s,
+        # 4M pts -> 600s+ timeout). dense cloud에서는 BPA 입력만 코스한 voxel로
+        # 제한한다. 품질 비교 공정성을 위해 축소 사실을 로그에 기록한다.
+        bpa_pcd = pcd
+        max_bpa_points = 400000
+        if len(pcd.points) > max_bpa_points:
+            bpa_voxel = max(voxel_size * 1.5, 0.015)
+            bpa_pcd = pcd.voxel_down_sample(bpa_voxel)
+            print(f"  ⚠️ BPA input decimated for tractability: {len(pcd.points):,} -> {len(bpa_pcd.points):,} pts (voxel {bpa_voxel*1000:.0f}mm)")
+            while len(bpa_pcd.points) > max_bpa_points and bpa_voxel < 0.05:
+                bpa_voxel *= 1.3
+                bpa_pcd = pcd.voxel_down_sample(bpa_voxel)
+                print(f"  ⚠️ BPA input still dense -> voxel {bpa_voxel*1000:.0f}mm ({len(bpa_pcd.points):,} pts)")
+        distances = bpa_pcd.compute_nearest_neighbor_distance()
         avg_dist = np.mean(distances) if len(distances) > 0 else voxel_size
         radii = [avg_dist * 0.5, avg_dist, avg_dist * 2.0, avg_dist * 4.0, avg_dist * 8.0]
         mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-            pcd, o3d.utility.DoubleVector(radii)
+            bpa_pcd, o3d.utility.DoubleVector(radii)
         )
     else:
-        # 기본: Poisson (watertight, 구멍 없는 폐곡면) - BPA 대비 품질 우수
-        print(f"Reconstructing surface using Poisson Surface Reconstruction (depth={depth}, linear_fit=True, n_threads=-1)...")
+        # 기본: Poisson (watertight, 구멍 없는 폐곡면)
+        poisson_thr = active_policy.poisson_threads
+        print(f"Reconstructing surface using Poisson Surface Reconstruction (depth={depth}, linear_fit=True, n_threads={poisson_thr})...")
         mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-            pcd, depth=depth, scale=1.1, linear_fit=True, n_threads=-1
+            pcd, depth=depth, scale=1.1, linear_fit=True, n_threads=poisson_thr
         )
 
         if clean_density:
@@ -127,15 +162,14 @@ def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_si
     bbox = pcd.get_axis_aligned_bounding_box()
     mesh = mesh.crop(bbox)
 
-    # Simplify: Isaac Sim / viewer 로딩 성능을 위해 target 비율로 경량화 (기본 50%)
-    if simplify_target and 0.0 < simplify_target < 1.0:
+    # Simplify: target ratio (default 50% if enabled)
+    if simplify_target and 0.0 < simplify_target < 1.0 and len(mesh.triangles) > 1000:
         n_before = len(mesh.triangles)
         target = max(int(n_before * simplify_target), 1000)
         print(f"Simplifying mesh: {n_before:,} → {target:,} triangles (target {simplify_target:.0%})...")
         try:
             mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=target)
         except TypeError:
-            # Open3D 구버전 호환 (positional)
             mesh = mesh.simplify_quadric_decimation(target)
         except Exception as e:
             print(f"  ⚠ simplify 실패 (무시): {e}")
@@ -148,14 +182,14 @@ def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_si
     mesh.remove_non_manifold_edges()
 
     # Transfer RGB colors from point cloud to mesh vertices using nearest-neighbor search
-    if pcd.has_colors() and len(pcd.points) > 0 and len(mesh.vertices) > 0:
+    if color_transfer and pcd.has_colors() and len(pcd.points) > 0 and len(mesh.vertices) > 0:
         print("Transferring RGB colors from point cloud using nearest-neighbor search...")
         pcd_points = np.asarray(pcd.points)
         pcd_colors = np.asarray(pcd.colors)
         mesh_vertices = np.asarray(mesh.vertices)
 
         tree = cKDTree(pcd_points)
-        _, indices = tree.query(mesh_vertices, k=1, workers=-1)
+        _, indices = tree.query(mesh_vertices, k=1, workers=active_policy.kdtree_workers)
         mesh.vertex_colors = o3d.utility.Vector3dVector(pcd_colors[indices])
 
     mesh.compute_vertex_normals()
@@ -179,21 +213,26 @@ def generate_mesh(input_ply, output_mesh, depth=MESH_DEFAULTS["depth"], voxel_si
             height=720,
             mesh_show_back_face=True
         )
+    return mesh
+
 
 def main():
     parser = argparse.ArgumentParser(description="Generate high-quality 3D Mesh using Open3D from Point Cloud")
     parser.add_argument("input", help="Input .ply or .pcd point cloud file")
     parser.add_argument("output", help="Output mesh file (.obj or .ply)")
-    parser.add_argument("--depth", type=int, default=MESH_DEFAULTS["depth"], help=f"Poisson reconstruction depth (default: {MESH_DEFAULTS['depth']}, 8=고품질, 7=약 2배 빠름)")
+    parser.add_argument("--depth", type=int, default=MESH_DEFAULTS["depth"], help=f"Poisson reconstruction depth (default: {MESH_DEFAULTS['depth']})")
     parser.add_argument("--voxel", type=float, default=MESH_DEFAULTS["voxel_size"], help=f"Voxel size for downsampling (default: {MESH_DEFAULTS['voxel_size']})")
-    parser.add_argument("--method", choices=["poisson", "bpa"], default=MESH_DEFAULTS["method"], help="Reconstruction method: poisson or bpa (default: poisson)")
+    parser.add_argument("--method", choices=["poisson", "bpa", "alpha", "alpha_shape", "cgal", "cgal_polygonal"], default=MESH_DEFAULTS["method"], help="Reconstruction method (default: poisson)")
+    parser.add_argument("--alpha", type=float, default=None, help="Explicit alpha parameter for Alpha Shape")
+    parser.add_argument("--alpha-factor", type=float, default=3.0, help="Alpha multiplier relative to median point spacing (default: 3.0)")
     parser.add_argument("--view", action="store_true", help="Visualize generated mesh in interactive 3D window")
     parser.add_argument("--no-clean", action="store_true", help="Disable density cleaning filter")
     parser.add_argument("--no-simplify", action="store_true", help="Disable mesh simplification")
+    parser.add_argument("--no-color-transfer", action="store_true", help="Disable vertex RGB color transfer")
     parser.add_argument("--simplify", type=float, default=MESH_DEFAULTS["simplify_target"], help="Triangle simplification target ratio (default: 0.5)")
     parser.add_argument("--no-gpu", action="store_true", help="Disable CUDA voxel downsampling (use CPU)")
     parser.add_argument("--orient", choices=["centroid", "tangent"], default="centroid",
-                        help="Normal orientation method: centroid(빠름, 기본) or tangent(전역 MST, 느림)")
+                        help="Normal orientation method: centroid or tangent")
 
     args = parser.parse_args()
 
@@ -207,12 +246,16 @@ def main():
         depth=args.depth,
         voxel_size=args.voxel,
         method=args.method,
+        alpha=args.alpha,
+        alpha_factor=args.alpha_factor,
         view_result=args.view,
         clean_density=not args.no_clean,
         simplify_target=0.0 if args.no_simplify else args.simplify,
         use_cuda=not args.no_gpu,
-        orient=args.orient
+        orient=args.orient,
+        color_transfer=not args.no_color_transfer
     )
+
 
 if __name__ == "__main__":
     main()

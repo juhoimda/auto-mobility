@@ -68,7 +68,10 @@ start_windows_camera() {
         echo "  ... 카메라 토픽 대기 중 (${i}/20)"
         sleep 1
     done
-    echo "❌ 카메라 토픽이 20초 내 감지되지 않았습니다. camera_guard.ps1(watcher) 확인."
+    echo "❌ 카메라 토픽이 20초 내 감지되지 않았습니다."
+    echo "💡 해결 방법 (아래 중 하나 실행):"
+    echo "   1) Windows 바탕화면의 [카메라_가드_시작.bat] 또는 C:\\ros2_humble\\start_camera_guard.vbs 실행"
+    echo "   2) 또는 Windows 바탕화면의 [카메라_직접_실행.bat] 실행"
     return 1
 }
 
@@ -82,8 +85,9 @@ stop_windows_camera() {
 PREVIEW_PID=""
 cleanup() {
     kill $GUARD_PID 2>/dev/null || true
-    kill $PREVIEW_PID 2>/dev/null || true
     wait $GUARD_PID 2>/dev/null || true
+    # Windows 프리뷰 신호 파일 제거 (realsense_pub.exe가 감지하여 창 자동 닫힘)
+    rm -f "$SHARED_DIR/camera_preview.txt" 2>/dev/null || true
     stop_windows_camera
 }
 trap cleanup EXIT INT TERM
@@ -94,7 +98,7 @@ echo " 🛡️  CAPTURE-SAFE 모드 (raw dataset 확보 전용)"
 echo " 📦 Bag 이름: $NAME"
 echo "=========================================================="
 
-if ! topic_exists "$RGB_COMPRESSED_TOPIC" 3 && ! topic_exists "$RGB_TOPIC" 3; then
+if ! topic_exists "$RGB_COMPRESSED_TOPIC" 1.0 && ! topic_exists "$RGB_TOPIC" 1.0; then
     if [ "$CAMERA_MODE" = "remote" ]; then
         start_windows_camera || exit 1
     else
@@ -105,19 +109,76 @@ if ! topic_exists "$RGB_COMPRESSED_TOPIC" 3 && ! topic_exists "$RGB_TOPIC" 3; th
     fi
 fi
 
+# ── 사전 상태 점검 (Preflight Sanity Check, feedback.md Section 25) ──
+echo "🔍 녹화 전 사전 센서 무결성(Preflight) 점검 중..."
+python3 - << 'PREFLIGHT_EOF'
+import sys, time
+from collections import defaultdict
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from sensor_msgs.msg import CompressedImage, CameraInfo, Imu
+
+QOS = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, durability=DurabilityPolicy.VOLATILE)
+IMU_QOS = QoSProfile(depth=50, reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, durability=DurabilityPolicy.VOLATILE)
+
+class PreflightProbe(Node):
+    def __init__(self):
+        super().__init__('preflight_probe')
+        self.stamps = defaultdict(list)
+        self.create_subscription(CompressedImage, '/camera/camera/color/image_raw/compressed', lambda m: self.cb('rgb', m), QOS)
+        self.create_subscription(CompressedImage, '/camera/camera/depth/image_rect_raw/compressedDepth', lambda m: self.cb('depth', m), QOS)
+        self.create_subscription(CameraInfo, '/camera/camera/color/camera_info_windows', lambda m: self.cb('info', m), QOS)
+        self.create_subscription(Imu, '/camera/camera/imu', lambda m: self.cb('imu', m), IMU_QOS)
+
+    def cb(self, name, msg):
+        ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self.stamps[name].append(ts)
+
+rclpy.init()
+probe = PreflightProbe()
+t0 = time.time()
+while time.time() - t0 < 3.0:
+    rclpy.spin_once(probe, timeout_sec=0.05)
+
+rgb_n = len(probe.stamps['rgb'])
+dep_n = len(probe.stamps['depth'])
+imu_n = len(probe.stamps['imu'])
+info_n = len(probe.stamps['info'])
+
+print(f"  [Preflight] RGB: {rgb_n} frames, Depth: {dep_n} frames, IMU: {imu_n} msgs, CameraInfo: {info_n} msgs (3s probe)")
+
+if rgb_n < 20 or dep_n < 20:
+    print("⚠️  [경고] 초기 카메라 프레임 수신율이 낮습니다 (RGB < 20fps 또는 Depth < 20fps)!")
+else:
+    print("✅ [정상] 센서 스트림 초기 수신율 양호 (≥ 20 FPS)")
+
+rclpy.shutdown()
+PREFLIGHT_EOF
+
 # ── 경량 진단 (capture_guard) 백그라운드 시작 ───────────────────
+# --alerts: 촬영 중 카메라 끊김/수신율 저하/급회전/bag 녹화 정지를 터미널에 즉시 출력
 GUARD_BASE="$LOG_DIR/capture_safe_${NAME}"
-GUARD_ARGS="--interval 5 --headless --report ${GUARD_BASE}.md --json ${GUARD_BASE}.json"
-[ "$CAMERA_MODE" = "remote" ] && GUARD_ARGS="$GUARD_ARGS --remote"
-echo "📊 capture_guard 모니터링 시작 → ${GUARD_BASE}.md"
-python3 "$PROJECT_DIR/src/auto_mobility/monitor/capture_guard.py" $GUARD_ARGS &
+GUARD_ARGS=(--interval 2.0 --alerts
+            --report "${GUARD_BASE}.md" --json "${GUARD_BASE}.json")
+[ "$CAMERA_MODE" = "remote" ] && GUARD_ARGS+=(--remote)
+GUARD_ARGS+=(--bag-name "$NAME" --bag-parents "${RAM_BAG_DIR},${BAG_DIR}")
+echo "📊 capture_guard 실시간 모니터링 활성화 (주기: 2.0초):"
+echo "   - 🔴 스트림 끊김 (0Hz) / 프레임 드롭 / 녹화 정지 감지 시 터미널 즉시 경고"
+echo "   - 🟢 카메라 정상 복구 시 '정상 복구' 알림"
+echo "   - 🟡 카메라 급회전 (>45°/s, Visual SLAM 유실 위험) 실시간 경고"
+echo "   - ⏱️  2초 주기 실시간 상태 요약(FPS / 회전속도 / 녹화용량) 출력"
+python3 "$PROJECT_DIR/src/auto_mobility/monitor/capture_guard.py" "${GUARD_ARGS[@]}" &
 GUARD_PID=$!
 
-# ── 실시간 카메라 시선 뷰어 (옵션: --view) ─────────────────────
+# ── 실시간 카메라 프리뷰 (옵션: --view) ────────────────────────
+# WSL 내부 Python 뷰어 대신 Windows 신호 파일 생성 →
+# realsense_pub.exe 자체적으로 OpenCV 창 표시 (녹화 성능 영향 없음)
 if [ "$SHOW_PREVIEW" = true ]; then
-    echo "👁️  실시간 카메라 프리뷰 창 실행 중..."
-    python3 "$PROJECT_DIR/scripts/utils/view_camera.py" "${VIEW_ARGS[@]}" &
-    PREVIEW_PID=$!
+    echo "👁️  Windows 프리뷰 창 신호 전송 → $SHARED_DIR/camera_preview.txt"
+    echo "preview" > "$SHARED_DIR/camera_preview.txt" 2>/dev/null || \
+        echo "⚠️  신호 파일 쓰기 실패 (WSL→Windows 공유 폴더 확인)"
 fi
 
 # ── 녹화 (압축 기본: RGB JPEG + Depth PNG lossless) ────────────
@@ -129,9 +190,15 @@ cleanup
 
 echo ""
 echo "=========================================================="
-echo " ✅ CAPTURE-SAFE 완료"
+echo " 📊 센서 무결성 자동 정밀 진단 실행 중 (feedback.md Section 26)..."
+echo "=========================================================="
+DIAG_OUT="$DATA_DIR/diagnostics/$NAME"
+python3 -m auto_mobility.diagnostics.sensor_integrity "$NAME" --out-dir "$DIAG_OUT" || true
 
-echo " 📦 Bag: $BAG_DIR/$NAME"
-echo " 📊 진단 보고서: ${GUARD_BASE}.md"
-echo " 📋 매니페스트: $BAG_DIR/$NAME/dataset_manifest.json"
+echo ""
+echo "=========================================================="
+echo " ✅ CAPTURE-SAFE 완료"
+echo " 📦 Bag        : $BAG_DIR/$NAME"
+echo " 📊 진단 보고서: $DIAG_OUT/sensor_integrity.md"
+echo " 📋 매니페스트 : $BAG_DIR/$NAME/dataset_manifest.json"
 echo "=========================================================="

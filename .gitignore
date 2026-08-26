@@ -19,8 +19,18 @@ bin/
 lib/
 cmake-build-*/
 CMakeCache.txt
-CMakeFiles/
-third_party/ORB_SLAM3/
+# third_party build & installation artifacts
+third_party/installed/
+third_party/FBoW/build/
+third_party/stella_vslam/build/
+third_party/Pangolin/build/
+third_party/ORB_SLAM3/build/
+third_party/ORB_SLAM3/lib/
+third_party/ORB_SLAM3/Thirdparty/DBoW2/build/
+third_party/ORB_SLAM3/Thirdparty/DBoW2/lib/
+third_party/ORB_SLAM3/Thirdparty/g2o/build/
+third_party/ORB_SLAM3/Thirdparty/g2o/lib/
+third_party/ORB_SLAM3/Vocabulary/ORBvoc.txt
 
 
 # ROS / ROS2 build, data and log artifacts
@@ -28,6 +38,7 @@ install/
 log/
 .colcon/
 ros2_data/
+output_preview/
 
 # Point Cloud / 3D Asset / Dataset files (large files)
 *.ply

@@ -33,7 +33,14 @@ def export_from_db(db_path: str, out_path: str, opt: int = 0) -> str:
 
     cmd = ["rtabmap-export", "--poses_camera", f"--opt={opt}",
            f"--output={base}_export_poses", db_path]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    env = os.environ.copy()
+    ros_lib = "/opt/ros/humble/lib"
+    if os.path.isdir(ros_lib):
+        curr_ld = env.get("LD_LIBRARY_PATH", "")
+        if ros_lib not in curr_ld:
+            env["LD_LIBRARY_PATH"] = f"{ros_lib}:{curr_ld}" if curr_ld else ros_lib
+
+    r = subprocess.run(cmd, capture_output=True, text=True, env=env)
     out = r.stdout + r.stderr
 
     m = re.search(r'"([^"]*_camera_poses\.txt)"', out)

@@ -8,7 +8,9 @@
       → 상대 타이밍(프레임 간격)이 캡처 시점 그대로 보존되고, RTAB-Map 에 입력되는
         stamp 의 clock domain 은 WSL 로 정렬된다 (TF lookup 안전).
     - offset 은 수신 시각과 원본 stamp 의 차이의 롤링 중앙값으로 추정 (네트워크 지터 강건).
-    - sim_time(오프라인 bag 재생) 모드에서는 /clock 기반 재생성 (기존 동작 유지).
+    - sim_time(오프라인 bag 재생) 모드에서는 /clock 기반 stamp 를 사용한다.
+      (bag 재생 시 /clock 이 bag 원본 stamp 와 동일 clock domain 이므로,
+        IMU 는 bag 원본 stamp 유지 + 이미지는 /clock stamp 로 단조 증가하게 정렬된다.
   - CameraInfo: Windows 전용 토픽(/camera/camera/color/camera_info_windows) 구독 → 표준
     토픽(/camera/camera/color/camera_info)으로 재발행 (피드백 루프 없음).
   - 수신 카메라 정보가 없는 동안 기본 intrinsics 를 사용하되 명시적 WARNING 을 반복 출력.
@@ -148,7 +150,7 @@ class CompressedRepublisher(Node):
         self.get_logger().info(f'Depth: {depth_comp} -> {depth_out}')
         self.get_logger().info(
             f'Info:  {info_in} (Win) -> {info_out} | '
-            f'timestamp: {"pass-through+offset" if not self.use_sim_time else "sim_time 재생성"}'
+            f'timestamp: {"pass-through+offset" if not self.use_sim_time else "/clock 기반"}'
         )
 
         # ── TF Static Broadcaster (camera_tf_pub.py가 전담하므로 기본 비활성화) ──
@@ -170,6 +172,12 @@ class CompressedRepublisher(Node):
         self._depth_src_stamp = None
         self._info_src_stamp = None
 
+        # ── 무결성 및 발행 카운터 ──
+        self._received_seq_rgb = 0
+        self._published_seq_rgb = 0
+        self._received_seq_depth = 0
+        self._published_seq_depth = 0
+
         # ── Callback Groups (직렬 순차 실행으로 타임스탬프 역전 및 스레드 경쟁 원천 차단) ──
         self._rgb_cg   = MutuallyExclusiveCallbackGroup()
         self._depth_cg = MutuallyExclusiveCallbackGroup()
@@ -182,6 +190,8 @@ class CompressedRepublisher(Node):
         self._rgb_stamper = MonotonicStamper()
         self._depth_stamper = MonotonicStamper()
         self._info_stamper = MonotonicStamper()
+        self._last_sim_rgb_src = 0.0
+        self._last_sim_depth_src = 0.0
 
         # ── 구독자 ──
         self.create_subscription(CompressedImage, rgb_comp,   self._on_rgb,   TRANSPORT_QOS, callback_group=self._rgb_cg)
@@ -195,16 +205,13 @@ class CompressedRepublisher(Node):
         self._pub_depth = self.create_publisher(Image,      depth_out, SENSOR_QOS)
         self._pub_info  = self.create_publisher(CameraInfo, info_out,  SENSOR_QOS)
 
-        # ── 30Hz 동기 발행 타이머 ──
-        self.create_timer(0.033, self._publish_sync, callback_group=self._timer_cg)
-
         # ── 5초 상태 보고 타이머 ──
-        self._cnt = {'rgb': 0, 'depth': 0, 'info': 0, 'pub': 0}
+        self._cnt = {'rgb': 0, 'depth': 0, 'info': 0, 'pub_rgb': 0, 'pub_depth': 0}
         self._t0  = time.monotonic()
         self._last_info_warn = 0.0
         self.create_timer(5.0, self._report, callback_group=self._timer_cg)
 
-        self.get_logger().info('CompressedRepublisher v4 Ready (source timestamp preservation)')
+        self.get_logger().info('CompressedRepublisher v5 Ready (lossless direct callback pipeline)')
 
     # ── TF ──────────────────────────────────────────────────────────────
     def _send_static_tf(self):
@@ -225,42 +232,125 @@ class CompressedRepublisher(Node):
             tfs.append(tf)
         self._tf_broadcaster.sendTransform(tfs)
 
+    # ── stamp 결정 ───────────────────────────────────────────────────────
+    def _out_stamp(self, src_sec, stamper):
+        """실시간 모드: 원본 stamp + clock offset (보정치 없으면 수신 시각 fallback).
+        sim_time 모드: /clock 시각 (기존 v3 동작)."""
+        if self.use_sim_time:
+            return None  # 호출부에서 get_clock().now() 사용
+        offset = self._offset_est.estimate()
+        if src_sec is not None and offset is not None:
+            return stamper.next(src_sec + offset)
+        return stamper.next(time.time())
+
+    def _get_cam_info_copy(self, stamp, frame_id):
+        with self._lock:
+            info = self._cam_info
+        if info is None:
+            now_t = time.time()
+            if now_t - self._last_info_warn > 30.0:
+                self.get_logger().warn(
+                    '[republish] CameraInfo 미수신! 기본 intrinsics(fx=385) 사용 중 '
+                    f'({CAMERA_INFO_WINDOWS_TOPIC} 미발행/미기록) — 기하 왜곡 위험'
+                )
+                self._last_info_warn = now_t
+            info = self._default_cam_info()
+
+        info_out = CameraInfo()
+        info_out.header.stamp = stamp
+        info_out.header.frame_id = frame_id
+        info_out.width = info.width
+        info_out.height = info.height
+        info_out.distortion_model = info.distortion_model
+        info_out.d = list(info.d)
+        info_out.k = list(info.k)
+        info_out.r = list(info.r)
+        info_out.p = list(info.p)
+        info_out.binning_x = info.binning_x
+        info_out.binning_y = info.binning_y
+        info_out.roi = info.roi
+        return info_out
+
     # ── 구독 콜백 ────────────────────────────────────────────────────────
     def _on_rgb(self, msg: CompressedImage):
         try:
+            self._received_seq_rgb += 1
+            src = _stamp_sec(msg)
+            self._offset_est.add(src, time.time())
+
             arr = np.frombuffer(bytes(msg.data), dtype=np.uint8)
             img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            if img is not None:
-                src = _stamp_sec(msg)
-                self._offset_est.add(src, time.time())
-                with self._lock:
-                    self._rgb_img = img
-                    self._rgb_seq += 1
-                    self._rgb_src_stamp = src
-                self._cnt['rgb'] += 1
+            if img is None:
+                self.get_logger().warn('RGB imdecode failed')
+                return
+
+            if self.use_sim_time:
+                if src is not None and src > 0:
+                    if src <= self._last_sim_rgb_src:
+                        return
+                    self._last_sim_rgb_src = src
+                    rgb_stamp = msg.header.stamp
+                else:
+                    rgb_stamp = self.get_clock().now().to_msg()
+            else:
+                rgb_stamp = _sec_to_stamp(self._out_stamp(src, self._rgb_stamper))
+
+            frame_id = 'camera_color_optical_frame'
+            rgb_out = self.bridge.cv2_to_imgmsg(
+                cv2.cvtColor(img, cv2.COLOR_BGR2RGB), encoding='rgb8')
+            rgb_out.header.stamp = rgb_stamp
+            rgb_out.header.frame_id = frame_id
+            self._pub_rgb.publish(rgb_out)
+            self._published_seq_rgb += 1
+            self._cnt['pub_rgb'] += 1
+
+            # CameraInfo 동기 발행
+            info_msg = self._get_cam_info_copy(rgb_stamp, frame_id)
+            self._pub_info.publish(info_msg)
+
+            self._cnt['rgb'] += 1
         except Exception as e:
             self.get_logger().error(f'RGB decode: {e}')
 
     def _on_depth(self, msg: CompressedImage):
         try:
+            self._received_seq_depth += 1
+            src = _stamp_sec(msg)
+            self._offset_est.add(src, time.time())
+
             raw = bytes(msg.data)
             arr = np.frombuffer(raw, dtype=np.uint8)
             idx = raw.find(b'\x89PNG')
             img = cv2.imdecode(arr[idx:] if idx != -1 else arr[12:], cv2.IMREAD_UNCHANGED)
-            if img is not None:
-                src = _stamp_sec(msg)
-                self._offset_est.add(src, time.time())
-                with self._lock:
-                    self._depth_img = img
-                    self._depth_seq += 1
-                    self._depth_src_stamp = src
-                self._cnt['depth'] += 1
+            if img is None:
+                self.get_logger().warn('Depth imdecode failed')
+                return
+
+            if self.use_sim_time:
+                if src is not None and src > 0:
+                    if src <= self._last_sim_depth_src:
+                        return
+                    self._last_sim_depth_src = src
+                    depth_stamp = msg.header.stamp
+                else:
+                    depth_stamp = self.get_clock().now().to_msg()
+            else:
+                depth_stamp = _sec_to_stamp(self._out_stamp(src, self._depth_stamper))
+
+            frame_id = 'camera_color_optical_frame'
+            dep_out = self.bridge.cv2_to_imgmsg(img, encoding='16UC1')
+            dep_out.header.stamp = depth_stamp
+            dep_out.header.frame_id = frame_id
+            self._pub_depth.publish(dep_out)
+            self._published_seq_depth += 1
+            self._cnt['pub_depth'] += 1
+
+            self._cnt['depth'] += 1
         except Exception as e:
             self.get_logger().error(f'Depth decode: {e}')
 
     def _on_info(self, msg: CameraInfo):
-        # Windows에서 수신하는 CameraInfo: 캐시만 하고 직접 재발행 안 함
-        # (피드백 루프 방지: 자신이 발행한 msg는 타임스탬프로 구분)
+        # Windows에서 수신하는 CameraInfo: 캐시
         src = _stamp_sec(msg)
         self._offset_est.add(src, time.time())
         with self._lock:
@@ -273,99 +363,6 @@ class CompressedRepublisher(Node):
             self._info_src_stamp = src
         self._cnt['info'] += 1
 
-    # ── stamp 결정 ───────────────────────────────────────────────────────
-    def _out_stamp(self, src_sec, stamper):
-        """실시간 모드: 원본 stamp + clock offset (보정치 없으면 수신 시각 fallback).
-        sim_time 모드: /clock 시각 (기존 v3 동작)."""
-        if self.use_sim_time:
-            return None  # 호출부에서 get_clock().now() 사용
-        offset = self._offset_est.estimate()
-        if src_sec is not None and offset is not None:
-            return stamper.next(src_sec + offset)
-        # offset 미수렴(초기 프레임)이거나 원본 stamp 없음 → 수신 시각 fallback
-        return stamper.next(time.time())
-
-    # ── 동기 발행 타이머 ────────────────────────────────────────────────
-    def _publish_sync(self):
-        with self._lock:
-            rgb_img   = self._rgb_img
-            depth_img = self._depth_img
-            cam_info  = self._cam_info
-            rs_, ds_  = self._rgb_seq, self._depth_seq
-            rgb_src   = self._rgb_src_stamp
-            depth_src = self._depth_src_stamp
-            info_src  = self._info_src_stamp
-
-        # 스트림별 독립 발행: RGB/Depth 각각 새 프레임이 도착하면 발행.
-        # (v4-2: "둘 다 새 프레임"일 때만 발행하면 RELIABLE 재전송 지연으로
-        #  발행율이 입력(30Hz)보다 떨어짐을 실측 — RGB/Depth 분리)
-        new_rgb   = rgb_img is not None and rs_ != self._last_pub_rgb
-        new_depth = depth_img is not None and ds_ != self._last_pub_dep
-        if not new_rgb and not new_depth:
-            return
-
-        # CameraInfo 미수신 시 D435i 기본값 사용 + 명시적 경고 (30초 1회)
-        if cam_info is None:
-            now_t = time.time()
-            if now_t - self._last_info_warn > 30.0:
-                self.get_logger().warn(
-                    '[republish] CameraInfo 미수신! 기본 intrinsics(fx=385) 사용 중 '
-                    f'({CAMERA_INFO_WINDOWS_TOPIC} 미발행/미기록) — 기하 왜곡 위험'
-                )
-                self._last_info_warn = now_t
-            cam_info = self._default_cam_info()
-
-        # ── 타임스탬프 (실시간: 원본 보존+offset / sim_time: /clock) ──
-        if self.use_sim_time:
-            clock = self.get_clock().now().to_msg()
-            rgb_stamp = clock
-            depth_stamp = clock
-            info_stamp = clock
-        else:
-            rgb_stamp = _sec_to_stamp(self._out_stamp(rgb_src, self._rgb_stamper))
-            depth_stamp = _sec_to_stamp(self._out_stamp(depth_src, self._depth_stamper))
-            info_stamp = _sec_to_stamp(self._out_stamp(info_src, self._info_stamper))
-
-        frame_id = 'camera_color_optical_frame'
-
-        # RGB
-        if new_rgb:
-            rgb_out = self.bridge.cv2_to_imgmsg(
-                cv2.cvtColor(rgb_img, cv2.COLOR_BGR2RGB), encoding='rgb8')
-            rgb_out.header.stamp    = rgb_stamp
-            rgb_out.header.frame_id = frame_id
-            self._pub_rgb.publish(rgb_out)
-            self._last_pub_rgb = rs_
-
-        # Depth: z16(mm, uint16) → 16UC1(mm) 유지
-        if new_depth:
-            dep_out = self.bridge.cv2_to_imgmsg(depth_img, encoding='16UC1')
-            dep_out.header.stamp    = depth_stamp
-            dep_out.header.frame_id = frame_id
-            self._pub_depth.publish(dep_out)
-            self._last_pub_dep = ds_
-
-        # CameraInfo
-        info_out = CameraInfo()
-        info_out.header.stamp    = info_stamp
-        info_out.header.frame_id = frame_id
-        info_out.width  = cam_info.width
-        info_out.height = cam_info.height
-        info_out.distortion_model = cam_info.distortion_model
-        info_out.d = list(cam_info.d)
-        info_out.k = list(cam_info.k)
-        info_out.r = list(cam_info.r)
-        info_out.p = list(cam_info.p)
-        info_out.binning_x = cam_info.binning_x
-        info_out.binning_y = cam_info.binning_y
-        info_out.roi       = cam_info.roi
-        self._pub_info.publish(info_out)
-
-        self._cnt['pub'] += 1
-
-        # TF 주기적 리프레시
-        self._send_static_tf()
-
     # ── 상태 보고 ────────────────────────────────────────────────────────
     def _report(self):
         dt = time.monotonic() - self._t0
@@ -374,14 +371,15 @@ class CompressedRepublisher(Node):
         c = self._cnt
         offset = self._offset_est.estimate()
         offset_str = f'{offset * 1000.0:.0f}ms' if offset is not None else 'N/A(수렴 전)'
-        if c['rgb'] > 0 or c['pub'] > 0:
+        if c['rgb'] > 0 or c['depth'] > 0:
             self.get_logger().info(
-                f'[republish] RGB:{c["rgb"]/dt:.1f}Hz Depth:{c["depth"]/dt:.1f}Hz '
-                f'Info:{c["info"]/dt:.1f}Hz SyncPub:{c["pub"]/dt:.1f}Hz clock_offset={offset_str}'
+                f'[republish] RGB In/Out:{c["rgb"]/dt:.1f}/{c["pub_rgb"]/dt:.1f}Hz '
+                f'Depth In/Out:{c["depth"]/dt:.1f}/{c["pub_depth"]/dt:.1f}Hz '
+                f'Info:{c["info"]/dt:.1f}Hz clock_offset={offset_str}'
             )
         else:
             self.get_logger().warn('[republish] Windows 카메라 압축 토픽 수신 없음')
-        self._cnt = {'rgb': 0, 'depth': 0, 'info': 0, 'pub': 0}
+        self._cnt = {'rgb': 0, 'depth': 0, 'info': 0, 'pub_rgb': 0, 'pub_depth': 0}
         self._t0  = time.monotonic()
 
     # ── 기본 카메라 모델 ──────────────────────────────────────────────────
