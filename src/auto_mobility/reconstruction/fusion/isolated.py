@@ -54,6 +54,7 @@ def integrate_frames_isolated(
     gpu_limits: dict | None = None,
     frames_per_chunk: int = 400,
     chunk_pause_s: float = 8.0,
+    planned_block_count: int | None = None,
 ) -> IsolatedFusionResult:
     work_dir = Path(work_dir).resolve()
     dataset_dir = Path(dataset_dir).resolve()
@@ -97,6 +98,7 @@ def integrate_frames_isolated(
         "weight_dtype": "float32",
         "extraction_mode": "mesh_only",
         "allow_cpu_migration": False,
+        "planned_block_count": int(planned_block_count) if planned_block_count else None,
         "mesh_out": str(mesh_out),
         "pcd_out": str(pcd_out),
         "stats_out": str(stats_out),

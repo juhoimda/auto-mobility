@@ -160,6 +160,15 @@ def _gpu_used_mb() -> float | None:
         return None
 
 
+def _canonical_rtab_path(bag: str, project_dir: Path, profile: str = "normal") -> Path:
+    """Deterministic canonical RTAB trajectory path (P0 #8)."""
+    return project_dir / "ros2_data" / "trajectories" / f"rtab_{profile}_{bag}_trajectory.txt"
+
+
+def _canonical_cuvslam_path(bag: str, project_dir: Path) -> Path:
+    return project_dir / "ros2_data" / "trajectories" / f"cuvslam_{bag}_trajectory.txt"
+
+
 def _run_slam_subprocess(bag: str, project_dir: Path, backend: str,
                          dataset_dir: Path | None = None) -> Path | None:
     """Run one SLAM backend in isolated subprocess (§4 sequential).
@@ -167,18 +176,25 @@ def _run_slam_subprocess(bag: str, project_dir: Path, backend: str,
     - RTAB: via run_slam.sh (ROS-isolated)
     - cuVSLAM: via python -m auto_mobility.reconstruction.pose.backends.cuvslam_worker
       (CUDA context stays in child; parent VRAM recovers after exit).
-    Returns trajectory path if cache-valid.
+    Returns trajectory path if cache-valid (P0 #8 deterministic canonical path).
     """
     traj_dir = project_dir / "ros2_data" / "trajectories"
     traj_dir.mkdir(parents=True, exist_ok=True)
     if backend == "rtab":
         script = project_dir / "scripts" / "pipeline" / "run_slam.sh"
-        # content-verified reuse (#50)
-        cand = sorted(traj_dir.glob(f"*{bag}*rtab*trajectory*.txt"))
-        for c in cand:
-            if _verify_trajectory_cache(c, dataset_dir):
-                print(f"[v2] reusing cached RTAB trajectory: {c}")
-                return c
+        canonical = _canonical_rtab_path(bag, project_dir)
+        # content-verified reuse (#50) — canonical first, then legacy glob fallback
+        if _verify_trajectory_cache(canonical, dataset_dir):
+            print(f"[v2] reusing cached RTAB trajectory: {canonical}")
+            return canonical
+        # legacy glob for backward compat: match any rtab * bag * trajectory
+        # also consider pattern where bag appears before/after rtab
+        for pat in (f"*{bag}*rtab*trajectory*.txt", f"*rtab*{bag}*trajectory*.txt",
+                    f"*rtab*trajectory*.txt"):
+            for c in sorted(traj_dir.glob(pat)):
+                if bag in c.name and _verify_trajectory_cache(c, dataset_dir):
+                    print(f"[v2] reusing cached RTAB trajectory (legacy): {c}")
+                    return c
         if not script.is_file():
             print(f"[v2] run_slam.sh not found: {script}")
             return None
@@ -192,11 +208,14 @@ def _run_slam_subprocess(bag: str, project_dir: Path, backend: str,
         except OSError as exc:
             print(f"[v2] run_slam.sh failed: {exc}")
             return None
-        # verify content after child exit (#50)
-        cand = sorted(traj_dir.glob(f"*{bag}*rtab*trajectory*.txt"))
-        for c in cand:
-            if _verify_trajectory_cache(c, dataset_dir):
-                return c
+        # verify content after child exit (#50) — check canonical path directly (P0 #8)
+        if _verify_trajectory_cache(canonical, dataset_dir):
+            return canonical
+        # fallback glob if canonical not yet (legacy naming)
+        for pat in (f"*{bag}*rtab*trajectory*.txt", f"*rtab*{bag}*trajectory*.txt"):
+            for c in sorted(traj_dir.glob(pat)):
+                if _verify_trajectory_cache(c, dataset_dir):
+                    return c
         return None
     elif backend == "cuvslam":
         # §3/§4 cuVSLAM RGB-D via isolated worker subprocess
@@ -374,7 +393,15 @@ def run(args: argparse.Namespace) -> int:
         if not traj_files:
             traj_root = Path("ros2_data/trajectories")
             if traj_root.is_dir():
-                traj_files = sorted(traj_root.glob(f"*{args.bag}*trajectory*.txt"))
+                # include both bag-containing and generic trajectory files, dedup
+                raw = sorted(traj_root.glob(f"*{args.bag}*trajectory*.txt"))
+                # also consider canonical locations that may not contain bag substring? search all
+                all_traj = sorted(traj_root.glob("*trajectory*.txt"))
+                raw_set = {str(p.resolve()) for p in raw}
+                for p in all_traj:
+                    if str(p.resolve()) not in raw_set and args.bag in p.name:
+                        raw.append(p)
+                traj_files = raw
         if args.run_slam:
             # §5/#50: per-backend cache verification decides reuse vs
             # regeneration — an unrelated stale file must NOT block
@@ -387,25 +414,63 @@ def run(args: argparse.Namespace) -> int:
                     traj_files.append(g)
             print(f"[v2] available/generated {len(traj_files)} "
                   f"trajectory file(s) after sequential isolation")
+        # P0 #9/10: all auto-discovered trajectories must be verified (TUM+SHA256+fingerprint+sidecar)
+        # and backend identity comes from sidecar, not filename
+        verified_traj_files = []
         for tp in traj_files:
             tp = Path(tp)
-            if tp.is_file():
+            if not tp.is_file():
+                continue
+            if not _verify_trajectory_cache(tp, dataset_dir):
+                print(f"[v2] REJECTED_STALE_CACHE (auto-discovered not verified): {tp}")
+                continue
+            verified_traj_files.append(tp)
+        # P0 #10: backend identity from sidecar, dedup per backend (latest mtime wins)
+        if verified_traj_files:
+            by_backend_path = {}
+            for tp in sorted(verified_traj_files, key=lambda p: p.stat().st_mtime):
+                meta_path = Path(str(tp) + ".meta.json")
+                be = None
+                if meta_path.is_file():
+                    try:
+                        be = str(json.loads(meta_path.read_text()).get("backend", "")).strip()
+                    except Exception:
+                        be = None
+                if not be:
+                    stem = tp.stem.replace(f"_{args.bag}", "")
+                    if "rtab" in stem.lower():
+                        be = "rtab"
+                    elif "cuvslam" in stem.lower():
+                        be = "cuvslam"
+                    else:
+                        be = stem
+                by_backend_path[be] = tp
+            for be, tp in by_backend_path.items():
                 try:
-                    name = tp.stem.replace(f"_{args.bag}", "")
-                    trajs[name] = Trajectory.from_tum_file(str(tp))
+                    trajs[be] = Trajectory.from_tum_file(str(tp))
+                    print(f"[v2] verified trajectory {be}: {tp}")
                 except Exception as exc:
                     print(f"[v2] skip trajectory {tp}: {exc}")
         if trajs:
             print(f"[v2] running standard pipeline with {len(trajs)} trajectory candidate(s)")
             from auto_mobility.reconstruction.pipeline.standard import run_standard
-
+            # P0 #12 hard ceiling propagation: total - reserve
+            hard_ceiling = None
+            if profile.gpu.present and profile.gpu.vram_total_mb:
+                hard_ceiling = max(0, int(profile.gpu.vram_total_mb) - int(budgets.vram_reserve_mb))
+            # safe_mode adjustments (§15): top_k=1, no fine, sequential etc handled inside pipeline
+            effective_top_k = 1 if safe_mode else min(2, max(1, args.top_k))
+            if safe_mode and effective_top_k != args.top_k:
+                print(f"[v2] SAFE MODE: top_k clamped {args.top_k} -> {effective_top_k}")
             std_result = run_standard(
                 dataset_dir, trajs, out_dir,
                 vram_budget_mb=float(budgets.vram_budget_mb),
                 ram_budget_mb=float(budgets.ram_budget_mb),
                 scheduler=scheduler,
                 budget=budget,
-                top_k=min(2, max(1, args.top_k)),
+                top_k=effective_top_k,
+                hard_ceiling_mb=float(hard_ceiling) if hard_ceiling else None,
+                safe_mode=safe_mode,
             )
             manifest["standard_result"] = {
                 k: v for k, v in std_result.items()

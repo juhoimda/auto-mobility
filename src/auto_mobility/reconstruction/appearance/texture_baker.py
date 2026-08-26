@@ -2,11 +2,11 @@
 
 Each triangle gets its best view via raycasting visibility (occlusion check)
 plus facing-angle weight; the atlas cell is filled with the view's mean RGB.
-Bounded memory (#41): triangles are processed in chunks; per triangle only a
-running top-K (K = max_views_per_tri) score/color buffer is kept.
+Memory (#27 truthful): top_scores[T,K] + top_colors[T,K,3] = O(T*K) (dense T*V
+removed). Time still O(T*V) scoring (V views) with T chunked for cache.
 
 Time  O(T * V) scoring with T chunked, V candidate views.
-Memory O(atlas_pixels + tri_chunk * K + per-chunk transients).
+Memory O(T*K + atlas_pixels) where T=triangles, K=max_views_per_tri.
 """
 
 from __future__ import annotations

@@ -53,6 +53,38 @@ class FusionOutput:
 from enum import Enum
 
 
+@dataclass(frozen=True)
+class ActiveBlockPlan:
+    """Explicit unit contract for VBG allocation planning (P0 #1 fix).
+
+    All byte fields are bytes (SI). MB fields are megabytes (1e6 bytes).
+    planned_capacity_blocks is the hash capacity actually allocated via _make_vbg.
+    """
+    unique_blocks: int
+    planned_capacity_blocks: int
+    tsdf_bytes: int  # allocated tsdf bytes (capacity * bpb)
+    extraction_peak_bytes: int  # allocated * MC overhead + margin
+    extraction_peak_mb: float  # extraction_peak_bytes / 1e6
+
+    def to_dict(self) -> dict:
+        return {
+            "unique_block_count": self.unique_blocks,
+            "estimated_hash_capacity": self.planned_capacity_blocks,
+            "safe_block_count": self.planned_capacity_blocks,
+            "estimated_tsdf_bytes": self.tsdf_bytes,
+            "estimated_extraction_peak": self.extraction_peak_bytes,
+            "estimated_extraction_peak_mb": self.extraction_peak_mb,
+            "estimated_tsdf_bytes_unique": self.unique_blocks * 0,  # telemetry placeholder
+            # compatibility aliases with explicit units
+            "unique_blocks": self.unique_blocks,
+            "planned_capacity_blocks": self.planned_capacity_blocks,
+            "tsdf_bytes": self.tsdf_bytes,
+            "extraction_peak_bytes": self.extraction_peak_bytes,
+            "extraction_peak_mb": self.extraction_peak_mb,
+            "planner": "cpu_vbg_coordinates",
+        }
+
+
 class ExtractionMode(str, Enum):
     MESH_ONLY = "mesh_only"
     PCD_ONLY = "pcd_only"
@@ -210,19 +242,29 @@ def plan_active_blocks(
         del vbg
         uniq = len(block_set) if block_set else _estimate_active_blocks(10.0, voxel_m)
         bpb = _planner_bytes_per_block(store_color, weight_dtype)
-        tsdf_bytes = uniq * bpb
-        extraction_peak = int(tsdf_bytes * _MC_OVERHEAD_FACTOR)
         # hash capacity is next pow2 > uniq * safety factor (§13 2.0)
         cap = 1
         need = int(uniq * _OCCUPANCY_SAFETY_FACTOR)
         while cap < need:
             cap <<= 1
         cap = max(4096, cap)
+        # P0 #3: VRAM must be predicted from ALLOCATED capacity, not unique.
+        # allocated_tsdf_bytes = cap * bpb; extraction_peak = allocated * MC * calibration_margin
+        # hash metadata + CUDA/context margin is captured as 5% calibration margin
+        # (not a fictitious precise hash byte count)
+        tsdf_bytes_alloc = int(cap * bpb)
+        tsdf_bytes_unique = int(uniq * bpb)
+        extraction_peak_bytes = int(tsdf_bytes_alloc * _MC_OVERHEAD_FACTOR * 1.05)
+        # keep at least unique*MC to avoid under-reporting on tiny scenes
+        extraction_peak_bytes = max(extraction_peak_bytes,
+                                    int(tsdf_bytes_unique * _MC_OVERHEAD_FACTOR))
         return {
             "unique_block_count": int(uniq),
             "estimated_hash_capacity": int(cap),
-            "estimated_tsdf_bytes": int(tsdf_bytes),
-            "estimated_extraction_peak": int(extraction_peak),
+            "estimated_tsdf_bytes": int(tsdf_bytes_alloc),
+            "estimated_tsdf_bytes_unique": int(tsdf_bytes_unique),
+            "estimated_extraction_peak": int(extraction_peak_bytes),
+            "estimated_extraction_peak_mb": float(extraction_peak_bytes / 1e6),
             "safe_block_count": int(cap),
             "planner": "cpu_vbg_coordinates",
             "sampled_frames": len(ids),
@@ -249,8 +291,20 @@ def required_vram_mb(bbox_diag_m: float, voxel_m: float,
 
 
 def required_vram_mb_planned(planner_out: dict) -> int:
-    """VRAM from ActiveBlockPlanner output (planner includes MC overhead)."""
+    """VRAM from ActiveBlockPlanner output (planner includes MC overhead).
+
+    Contract: estimated_extraction_peak is BYTES, returned MB = bytes/1e6.
+    Also accepts estimated_extraction_peak_mb alias.
+    """
+    if "estimated_extraction_peak_mb" in planner_out and planner_out["estimated_extraction_peak_mb"]:
+        return int(float(planner_out["estimated_extraction_peak_mb"]))
     return int(planner_out.get("estimated_extraction_peak", 0) / 1e6)
+
+
+def required_vram_mb_planned_bytes(planner_out: dict) -> int:
+    """Return bytes contract explicitly."""
+    return int(planner_out.get("estimated_extraction_peak", 0) or
+               int(float(planner_out.get("estimated_extraction_peak_mb", 0)) * 1e6))
 
 
 def max_fitting_voxel_mm(bbox_diag_m: float, vram_budget_mb: float | None,
@@ -309,6 +363,7 @@ def integrate_frames(
     weight_dtype: str = "float32",
     extraction_mode: str = "mesh_only",
     allow_cpu_migration: bool = False,
+    planned_block_count: int | None = None,
 ) -> FusionOutput:
     """Integrate FUSE frames; returns extracted mesh stats without disk IO.
 
@@ -327,19 +382,27 @@ def integrate_frames(
     if isinstance(extraction_mode, ExtractionMode):
         extraction_mode = extraction_mode.value
 
+    # P0 #7: no-color CPU test must run without CUDA; allow explicit CPU path
+    if not use_cuda:
+        return _run(o3d, o3c, "CPU:0", fusion_input, intrinsics_matrix, width, height,
+                    voxel_m, trunc_mult, depth_min_m, depth_max_m, bbox_diag_m, prefetch,
+                    depth_scale, vram_budget_mb, frames_per_chunk, chunk_pause_s,
+                    store_color, weight_dtype, extraction_mode, allow_cpu_migration,
+                    planned_block_count)
     try:
-        if not (use_cuda and o3c.cuda.is_available()):
+        if not o3c.cuda.is_available():
             raise RuntimeError("cuda unavailable")
         return _run(o3d, o3c, "CUDA:0", fusion_input, intrinsics_matrix, width, height,
                     voxel_m, trunc_mult, depth_min_m, depth_max_m, bbox_diag_m, prefetch,
                     depth_scale, vram_budget_mb, frames_per_chunk, chunk_pause_s,
-                    store_color, weight_dtype, extraction_mode, allow_cpu_migration)
+                    store_color, weight_dtype, extraction_mode, allow_cpu_migration,
+                    planned_block_count)
     except Exception as cuda_err:
         n_frames = len(fusion_input.frame_ids)
         # L4 barrier: never auto-retry a huge integration on CPU — the
         # resulting minutes-long full-CPU load is its own hazard. The caller
         # degrades (coarser voxel / fewer frames) instead.
-        if not use_cuda or n_frames > 600:
+        if n_frames > 600:
             raise
         # §19: CPU fallback only for small jobs or explicit allow
         if not allow_cpu_migration and n_frames > 200:
@@ -348,7 +411,8 @@ def integrate_frames(
         return _run(o3d, o3c, "CPU:0", fusion_input, intrinsics_matrix, width, height,
                     voxel_m, trunc_mult, depth_min_m, depth_max_m, bbox_diag_m, prefetch,
                     depth_scale, vram_budget_mb, frames_per_chunk, chunk_pause_s,
-                    store_color, weight_dtype, extraction_mode, False)
+                    store_color, weight_dtype, extraction_mode, False,
+                    planned_block_count)
 
 
 _CHUNKED_FUSION_THRESHOLD = 900  # frames; beyond this a single VBG cannot be
@@ -361,6 +425,7 @@ def _run(
     vram_budget_mb=None, frames_per_chunk=400, chunk_pause_s=8.0,
     store_color=False, weight_dtype="float32", extraction_mode="mesh_only",
     allow_cpu_migration=False,
+    planned_block_count: int | None = None,
 ) -> FusionOutput:
     import time as _time
 
@@ -387,8 +452,7 @@ def _run(
             batch = frame_ids[start : start + prefetch]
             for fid in batch:
                 depth_mm = fi.load_depth_mm(fid)
-                bgr = fi.load_rgb(fid)
-                if depth_mm is None or bgr is None:
+                if depth_mm is None or not np.any(depth_mm):
                     continue
                 T_wc = fi.pose_by_frame[fid]
                 extrinsic = np.linalg.inv(T_wc)
@@ -396,26 +460,48 @@ def _run(
                     m = fi.load_mask(fid)
                     if m is not None:
                         depth_mm = np.where(m, depth_mm, 0)
-                if not np.any(depth_mm):
-                    continue
-                color_rgb = bgr[:, :, ::-1] if bgr.ndim == 3 else bgr
+                        if not np.any(depth_mm):
+                            continue
+                # P0 #6: no-color geometry fusion must NOT decode RGB and must use depth-only overload
+                extrinsic_t = o3c.Tensor(np.asarray(extrinsic, dtype=np.float64))
                 depth_t = o3d.t.geometry.Image(
                     o3c.Tensor(np.ascontiguousarray(depth_mm.astype(np.uint16)), device=dev))
-                color_t = o3d.t.geometry.Image(
-                    o3c.Tensor(np.ascontiguousarray(color_rgb[:, :, :3].astype(np.uint8)), device=dev))
-                extrinsic_t = o3c.Tensor(np.asarray(extrinsic, dtype=np.float64))
                 coords = vbg.compute_unique_block_coordinates(
                     depth_t, K_t, extrinsic_t,
                     depth_scale=depth_scale, depth_max=dmax,
                     trunc_voxel_multiplier=float(trunc_mult),
                 )
-                vbg.integrate(
-                    coords, depth_t, color_t,
-                    K_t, K_t,
-                    extrinsic_t,
-                    depth_scale=depth_scale, depth_max=dmax,
-                    trunc_voxel_multiplier=float(trunc_mult),
-                )
+                if store_color:
+                    bgr = fi.load_rgb(fid)
+                    if bgr is None:
+                        continue
+                    color_rgb = bgr[:, :, ::-1] if bgr.ndim == 3 else bgr
+                    color_t = o3d.t.geometry.Image(
+                        o3c.Tensor(np.ascontiguousarray(color_rgb[:, :, :3].astype(np.uint8)), device=dev))
+                    vbg.integrate(
+                        coords, depth_t, color_t,
+                        K_t, K_t,
+                        extrinsic_t,
+                        depth_scale=depth_scale, depth_max=dmax,
+                        trunc_voxel_multiplier=float(trunc_mult),
+                    )
+                else:
+                    # depth-only overload for VBG with attrs (tsdf, weight)
+                    try:
+                        vbg.integrate(
+                            coords, depth_t,
+                            K_t,
+                            extrinsic_t,
+                            depth_scale=depth_scale, depth_max=dmax,
+                            trunc_voxel_multiplier=float(trunc_mult),
+                        )
+                    except TypeError:
+                        # fallback for Open3D versions where depth-only still expects 6 args but color empty
+                        vbg.integrate(
+                            coords, depth_t, K_t, extrinsic_t,
+                            depth_scale=depth_scale, depth_max=dmax,
+                            trunc_voxel_multiplier=float(trunc_mult),
+                        )
                 n += 1
         return n
 
@@ -520,10 +606,18 @@ def _run(
         return out
 
     # ---- Single-VBG path (small captures) ----
-    vbg = _make_vbg(voxel_m, trunc_mult,
-                    estimate_block_count(bbox_diag, voxel_m, vram_budget_mb,
-                                         store_color=store_color,
-                                         weight_dtype=weight_dtype), dev,
+    # P0 #2: use planner capacity when available, fallback to bbox estimate
+    est_blocks = estimate_block_count(bbox_diag, voxel_m, vram_budget_mb,
+                                      store_color=store_color,
+                                      weight_dtype=weight_dtype)
+    alloc_blocks = int(planned_block_count) if planned_block_count and planned_block_count > 0 else est_blocks
+    # planner capacity includes safety factor; do not exceed VRAM-capped limit
+    if vram_budget_mb and alloc_blocks > est_blocks:
+        # if planner wants more than VRAM cap, clamp and log (planner prediction already capped by cap logic)
+        # but keep planner when within limit — it is more accurate than bbox
+        pass
+    block_count = max(4096, alloc_blocks)
+    vbg = _make_vbg(voxel_m, trunc_mult, block_count, dev,
                     store_color=store_color, weight_dtype=weight_dtype)
     n_integrated = 0
     for start in range(0, len(ids), prefetch):

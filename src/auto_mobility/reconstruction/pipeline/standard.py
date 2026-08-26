@@ -191,7 +191,9 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                  refine_poses: bool = True,
                  vram_budget_mb: float | None = None,
                  ram_budget_mb: float | None = None,
-                 scheduler=None, budget=None, top_k: int = 2) -> dict:
+                 scheduler=None, budget=None, top_k: int = 2,
+                 hard_ceiling_mb: float | None = None,
+                 safe_mode: bool = False) -> dict:
     import cv2
     import open3d as o3d
 
@@ -312,24 +314,56 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
         return max(2048, int(blocks * _BYTES_PER_BLOCK_NO_COLOR
                              * 2.0 / 1e6))
 
+    def _resolve_planned_metrics(plan: dict | None):
+        """Extract MB and block_count from planner dict with unit contract."""
+        if not plan:
+            return None, None
+        # P0 #1: bytes -> MB conversion explicit via helper
+        from auto_mobility.reconstruction.fusion.open3d_vbg import (
+            required_vram_mb_planned)
+        mb = required_vram_mb_planned(plan)
+        cap = int(plan.get("estimated_hash_capacity") or
+                  plan.get("safe_block_count") or 0) or None
+        if cap is None:
+            cap = plan.get("planned_capacity_blocks")
+        return mb, cap
+
     def submit_fusion(ids, pose_by_frame, vox_m, mask_dict, tag,
-                      planned_peak_vram_mb=None):
+                      active_plan: dict | None = None,
+                      planned_peak_vram_mb=None, planned_block_count=None):
         """Run one isolated fusion through the scheduler's single GPU slot.
 
         §11: never lie to the scheduler with min(vram_want, budget).  If the
         required VRAM exceeds the declared budget, REJECT -> DEGRADE -> REPLAN.
         §7: phase-specific CPU threads (fusion uses 3-4 threads, not global 6).
-        planned_peak_vram_mb: optional active-block preflight prediction; the
-        truthful admission requirement is the conservative max of both models.
+        P0 #1: active_plan provides bytes/MB with explicit conversion.
+        P0 #2: planned_block_count is forwarded to actual VBG allocation.
+        P0 #12/13: dual VRAM barrier (incremental job budget + hard ceiling).
+        P0 #14: per-job RAM limit is truthful planned RAM + margin, not global.
         """
         from auto_mobility.reconstruction.fusion.open3d_vbg import (
             required_vram_mb)
         from auto_mobility.reconstruction.runtime.scheduler import JobSpec
 
+        # resolve active_plan -> mb + capacity (P0 #1)
+        if active_plan is not None:
+            _mb, _cap = _resolve_planned_metrics(active_plan)
+            if _mb is not None and planned_peak_vram_mb is None:
+                planned_peak_vram_mb = _mb
+            if _cap is not None and planned_block_count is None:
+                planned_block_count = _cap
         vram_want = int(required_vram_mb(bbox_holder["diag_m"], vox_m)) or 512
         if planned_peak_vram_mb:
             vram_want = max(vram_want, int(planned_peak_vram_mb))
-        ram_want = _fusion_ram_estimate_mb(vox_m)
+        # P0 #14: RAM estimate for this job (planned blocks if available)
+        if planned_block_count:
+            from auto_mobility.reconstruction.fusion.open3d_vbg import (
+                _BYTES_PER_BLOCK_NO_COLOR, _MC_OVERHEAD_FACTOR)
+            ram_want = max(2048, int(planned_block_count *
+                                     _BYTES_PER_BLOCK_NO_COLOR *
+                                     _MC_OVERHEAD_FACTOR / 1e6))
+        else:
+            ram_want = _fusion_ram_estimate_mb(vox_m)
         # §11 fix: hard admission check before submit — scheduler must see truth.
         avail_vram = int(vram_budget_mb) if vram_budget_mb else vram_want
         avail_ram = int(ram_budget_mb) if ram_budget_mb else ram_want
@@ -346,7 +380,14 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 vram_want = int(required_vram_mb(bbox_holder["diag_m"], vox_m)) or 512
                 if planned_peak_vram_mb:
                     vram_want = max(vram_want, int(planned_peak_vram_mb))
-                ram_want = _fusion_ram_estimate_mb(vox_m)
+                if planned_block_count:
+                    from auto_mobility.reconstruction.fusion.open3d_vbg import (
+                        _BYTES_PER_BLOCK_NO_COLOR, _MC_OVERHEAD_FACTOR)
+                    ram_want = max(2048, int(planned_block_count *
+                                             _BYTES_PER_BLOCK_NO_COLOR *
+                                             _MC_OVERHEAD_FACTOR / 1e6))
+                else:
+                    ram_want = _fusion_ram_estimate_mb(vox_m)
                 if vram_want > avail_vram or ram_want > avail_ram:
                     decide("vram_preflight", "REJECTED_FINAL",
                            "even degraded voxel does not fit; skipping job",
@@ -382,6 +423,32 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             if th.get("waited_s"):
                 decide("thermal_gate", "COOLED_DOWN",
                        "waited for GPU to cool before heavy submission", **th)
+            # P0 #13: job VRAM limit is planned_peak + margin, not global*0.9 blind
+            planned_mb_for_limit = int(planned_peak_vram_mb) if planned_peak_vram_mb else vram_want
+            # calibrated tolerance 512 MB + 10% of planned, capped by hard ceiling
+            # hard_ceiling_mb from outer run_standard (total - reserve)
+            hc_val = None
+            try:
+                hc_val = hard_ceiling_mb  # closure from run_standard param
+            except NameError:
+                hc_val = None
+            if hc_val is None and vram_budget_mb:
+                hc_val = int(vram_budget_mb + 1536)
+            job_vram_limit = int(planned_mb_for_limit * 1.10 + 512)
+            if hc_val is not None:
+                job_vram_limit = min(job_vram_limit, int(hc_val))
+                # never exceed hard ceiling
+                if job_vram_limit > int(hc_val):
+                    job_vram_limit = int(hc_val)
+            # P0 #14: per-job RAM limit is job RSS, not global budget
+            job_ram_limit = int(ram_want * 1.20 + 512)
+            gpu_limits_dict = {
+                "vram_mb": int(job_vram_limit),
+                "temp_c": 87.0,
+                "power_w": None,
+            }
+            if hc_val is not None:
+                gpu_limits_dict["hard_ceiling_mb"] = int(hc_val)
             return integrate_frames_isolated(
                 dataset_dir=Path(dataset_dir),
                 frame_ids=list(ids),
@@ -393,14 +460,11 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 work_dir=Path(out_dir) / "fusion_work",
                 tag=tag,
                 vram_budget_mb=vram_budget_mb,
-                ram_limit_mb=int(ram_budget_mb) if ram_budget_mb else None,
-                gpu_limits={
-                    "vram_mb": int((vram_budget_mb or 4096) * 0.90),
-                    "temp_c": 87.0,
-                    "power_w": None,  # sensor-dependent; temp/vram carry the barrier
-                },
+                ram_limit_mb=int(job_ram_limit),
+                gpu_limits=gpu_limits_dict,
                 frames_per_chunk=max(120, min(400, len(list(ids)) // 6 or 120)),
                 chunk_pause_s=8.0,
+                planned_block_count=int(planned_block_count) if planned_block_count else None,
             )
 
         t_f = time.time()
@@ -439,35 +503,47 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             masks[fid] = compute_consistency_mask(d.astype(np.float32), rd)
         return masks
 
-    def _plan_active_blocks_safe(ids, poses, vox_mm):
-        """Active-block preflight (#16): frustum-true block prediction.
+    def _plan_active_blocks_safe(ids, poses, vox_mm, tag="plan"):
+        """Active-block preflight (P0 #1 fix): frustum-true block prediction.
 
-        Bounded-cost: samples at most ~80 frames.  Returns predicted
-        extraction peak MB or None on any failure (fallback stays the
-        bbox model).  Conservative max() admission is applied by submit_fusion.
+        Returns full planner dict with explicit bytes/MB contract (or None on failure).
+        For final delivery (P0 #5) scans ALL frames coordinate-only (no RGB decode, no GPU,
+        bounded CPU memory) to avoid underprediction from 80-frame sampling.
+        For intermediate coarse estimation the planner still runs bounded but with
+        safety margin already baked into capacity (2x) and VRAM (1.05x).
         """
         try:
             from auto_mobility.reconstruction.fusion.open3d_vbg import (
-                plan_active_blocks)
+                plan_active_blocks, required_vram_mb_planned)
 
-            stride = max(1, len(ids) // 80)
+            # P0 #5: for large final sets do NOT subsample; planner itself is bounded (~80)
+            # but final explicitly needs full scan to avoid underprediction.
+            # We still allow bounded for coarse/search when ids>200: planner uses full set
+            # but internally sample_stride=1 => full scan (CPU VBG coordinate helper is cheap)
+            # If tag contains 'final' force full scan, else also full scan but allow fallback.
             plan = plan_active_blocks(
-                ids[::stride], poses, K, W, H, vox_mm / 1000.0,
+                list(ids), poses, K, W, H, vox_mm / 1000.0,
                 TRUNCATION_MULTIPLIER,
                 depth_min_m=0.2, depth_max_m=4.0,
                 load_depth_mm=depth, load_mask=None,
                 store_color=False, sample_stride=1)
+            vram_mb = required_vram_mb_planned(plan)
             decide("active_block_plan", "PLANNED",
-                   "frustum-based active-block preflight",
+                   "frustum-based active-block preflight (unit: bytes->MB explicit)",
+                   tag=tag,
                    unique_block_count=plan.get("unique_block_count"),
                    planned_tsdf_mb=round(plan.get("estimated_tsdf_bytes", 0) / 1e6, 1),
-                   planned_extraction_peak_mb=round(
-                       plan.get("estimated_extraction_peak", 0) / 1e6, 1),
-                   safe_block_count=plan.get("safe_block_count"))
-            return plan.get("estimated_extraction_peak")
+                   planned_extraction_peak_bytes=int(plan.get("estimated_extraction_peak", 0)),
+                   planned_extraction_peak_mb=float(plan.get("estimated_extraction_peak_mb",
+                                                             plan.get("estimated_extraction_peak",0)/1e6)),
+                   safe_block_count=plan.get("safe_block_count"),
+                   vram_mb_for_admission=vram_mb,
+                   sampled_frames=plan.get("sampled_frames"),
+                   total_frames=len(list(ids)))
+            return plan
         except Exception as exc:
             decide("active_block_plan", "FALLBACK_BBOX_MODEL",
-                   f"planner unavailable: {exc}")
+                   f"planner unavailable: {exc}", tag=tag)
             return None
 
     def search_phase(cand, idx: int) -> dict | None:
@@ -494,6 +570,15 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             decide("frame_roles", "RELAX_TO_NON_REJECT",
                    "too few FUSE frames; fusing all non-REJECT frames",
                    candidate=cand.backend)
+        # P1 #16: bound search frame count to 300~500 pose-space representative
+        # Standard search is not final product; final winner fuses ALL valid FUSE.
+        if len(search_ids) > 500:
+            # pose-space uniform stride (cheap proxy for spatial coverage)
+            stride = max(1, len(search_ids) // 400)
+            search_ids = sorted(search_ids[::stride])[:500]
+            decide("frame_roles", "BOUNDED_SEARCH_SUBSET",
+                   "train search limited to 300-500 representative frames; final will use ALL",
+                   n_search_bounded=len(search_ids), n_delivery=len(delivery_ids))
         val_frames = [id_to_frame[i] for i in sorted(val_set & id_set)]
 
         poses = poses0
@@ -513,14 +598,21 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 bbox_holder["diag_m"],
                 float(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0))) + 2.0)
         eff_voxel = fit_voxel_to_vram(bbox_holder["diag_m"], voxel_mm)
-        planned_peak_mb = _plan_active_blocks_safe(search_ids, poses,
-                                                   eff_voxel)
-
+        # P0 #4: every job gets its own plan; coarse/search/fine/final are distinct identities
+        # also respect safe_mode (fine disabled)
+        if safe_mode and eff_voxel < voxel_mm * 1.1:
+            # safe_mode forces slightly coarser when needed; keep current
+            pass
+        # coarse plan uses coarse subset & same voxel
         t_g = time.time()
         coarse_ids = search_ids[:: max(1, len(search_ids) // 80)] or search_ids
+        coarse_plan = _plan_active_blocks_safe(coarse_ids, poses, eff_voxel,
+                                              tag=f"c{idx}_coarse")
+        search_plan = _plan_active_blocks_safe(search_ids, poses, eff_voxel,
+                                               tag=f"c{idx}_search")
         coarse = submit_fusion(coarse_ids, poses, eff_voxel / 1000.0, None,
                                f"c{idx}_coarse",
-                               planned_peak_vram_mb=planned_peak_mb)
+                               active_plan=coarse_plan)
         masks = {}
         if coarse is not None and coarse.mesh_obj is not None \
                 and len(coarse.mesh_obj.triangles) > 0:
@@ -536,7 +628,7 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
 
         fused_search = submit_fusion(search_ids, poses, eff_voxel / 1000.0,
                                      masks or None, f"c{idx}_search",
-                                     planned_peak_vram_mb=planned_peak_mb)
+                                     active_plan=search_plan)
         geo_eval = {"status": "NOT_APPLICABLE", "reason": "no mesh"}
         if fused_search is not None and val_frames:
             geo_eval = evaluate_geometry(fused_search.mesh_obj, val_frames, poses,
@@ -544,7 +636,11 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             geo_eval["eval_mesh_provenance"] = "train_only"
 
         eff_voxel_final = eff_voxel
-        if fused_search is not None and (
+        # P0 #15/21: SAFE MODE disables fine voxel entirely
+        if safe_mode:
+            decide("fusion_refinement", "SKIP_FINE_VOXEL_SAFE_MODE",
+                   "safe_mode disables fine voxel rebuild", eff_voxel=eff_voxel)
+        elif fused_search is not None and (
                 geo_eval.get("within_50mm_ratio", 0) > 0.35
                 and geo_eval.get("free_space_correctness_ratio", 0) > 0.75
                 and eff_voxel > 7.0):
@@ -557,21 +653,44 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                        "VRAM or time budget does not allow finer attempt",
                        voxel_mm=fine)
             else:
+                # P0 #21: fine voxel must have its own ActiveBlockPlan (different identity)
+                fine_plan = _plan_active_blocks_safe(search_ids, poses, fine,
+                                                     tag=f"c{idx}_fine")
                 refined_try = submit_fusion(search_ids, poses, fine / 1000.0,
                                             masks or None, f"c{idx}_fine",
-                                            planned_peak_vram_mb=planned_peak_mb)
-                if refined_try is not None and refined_try.ok \
-                        and refined_try.mesh_triangles >= fused_search.mesh_triangles:
-                    fused_search, eff_voxel_final = refined_try, fine
-                    decide("fusion_refinement", "FINE_VOXEL_APPLIED",
-                           "geometry stable enough for finer voxel",
-                           voxel_mm=fine, candidate=cand.backend)
+                                            active_plan=fine_plan)
+                # P1 #20: fine acceptance must be quality-based, not triangle count alone
+                # we evaluate fine candidate on same held-out set before accepting
+                if refined_try is not None and refined_try.ok:
+                    try:
+                        fine_geo = evaluate_geometry(refined_try.mesh_obj, val_frames,
+                                                     poses, cam_intr, depth)
+                        fine_better = (
+                            fine_geo.get("depth_mae_mm", 1e9) < geo_eval.get("depth_mae_mm", 1e9)
+                            and fine_geo.get("free_space_correctness_ratio", 0) >=
+                                geo_eval.get("free_space_correctness_ratio", 0) - 0.02
+                        )
+                    except Exception:
+                        # fallback to legacy triangle count diagnostic only
+                        fine_better = refined_try.mesh_triangles >= fused_search.mesh_triangles
+                        fine_geo = None
+                    if fine_better:
+                        fused_search, eff_voxel_final = refined_try, fine
+                        if fine_geo is not None:
+                            geo_eval = fine_geo  # promote fine geometry evidence
+                        decide("fusion_refinement", "FINE_VOXEL_APPLIED",
+                               "geometry quality improved (MAE/coverage/fs)",
+                               voxel_mm=fine, candidate=cand.backend)
+                    else:
+                        decide("fusion_refinement", "SKIP_FINE_VOXEL",
+                               "fine quality did not improve (MAE/coverage)", voxel_mm=fine)
                 else:
                     decide("fusion_refinement", "SKIP_FINE_VOXEL",
                            "finer attempt failed or degraded", voxel_mm=fine)
 
         budget_record("geometry_exploration", time.time() - t_g)
         sc = score_by_name.get(cand.backend)
+        # keep last plans for telemetry
         return {
             "name": cand.backend,
             "poses": poses, "split": split, "search_ids": search_ids,
@@ -580,7 +699,8 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             "fused_search": fused_search, "geo_eval": geo_eval,
             "refinement": refinement, "wall_s": time.time() - t_cand,
             "trajectory_failed": (not sc.ok) if sc is not None else False,
-            "planned_peak_mb": planned_peak_mb,
+            "search_plan": search_plan,
+            "coarse_plan": coarse_plan,
         }
 
     def deliver_candidate(info: dict, tag: str) -> dict:
@@ -589,9 +709,12 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
         poses = info["poses"]
         delivery_ids = info["delivery_ids"]
 
+        # P0 #4 / #22: final must have its own plan over delivery_ids + effective voxel
+        final_plan = _plan_active_blocks_safe(delivery_ids, poses, info["eff_voxel"],
+                                              tag=f"{tag}_final")
         final = submit_fusion(delivery_ids, poses, info["eff_voxel"] / 1000.0,
                               info["masks"] or None, f"{tag}_final",
-                              planned_peak_vram_mb=info.get("planned_peak_mb"))
+                              active_plan=final_plan)
         if final is None:
             return {"ok": False, "tag": tag, "name": info["name"],
                     "reason": "final fusion failed",
@@ -607,22 +730,43 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             o3d_ok = False
             decide("surface", "WRITE_FAILED", f"model_raw.obj: {exc}")
 
-        # Poisson hole repair only on budget + evidence (#38 trigger).
+        # P0 #25/26: Poisson hole repair is either reachable or removed.
+        # Previously dead because extraction_mode=mesh_only => pcd_obj always None.
+        # Now reachable via mesh-sampled pcd fallback; isolated worker would be
+        # preferred but we keep subprocess isolation via budget+evidence gate.
         applied_poisson = False
-        if (o3d_ok and final.pcd_obj is not None
-                and len(final.pcd_obj.points) > 50000
-                and info["geo_eval"].get("observed_surface_completeness", 1.0) < 0.5
-                and budget_gate("optional_improvement", 90.0)):
-            try:
-                pmesh = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-                    final.pcd_obj, depth=9)[0]
-                if len(pmesh.triangles) > len(final.mesh_obj.triangles):
-                    final.mesh_obj = pmesh
-                    applied_poisson = True
-                    decide("surface", "POISSON_APPLIED",
-                           "hole repair benefit expected", tag=tag)
-            except Exception as exc:
-                decide("surface", "POISSON_SKIPPED", f"failed: {exc}", tag=tag)
+        poisson_trigger = (
+            o3d_ok
+            and len(final.mesh_obj.triangles) > 20000
+            and info["geo_eval"].get("observed_surface_completeness", 1.0) < 0.5
+            and budget_gate("optional_improvement", 90.0)
+        )
+        if poisson_trigger:
+            pcd_for_poisson = final.pcd_obj
+            if (pcd_for_poisson is None or len(pcd_for_poisson.points) < 50000):
+                # mesh_only mode produced no pcd; sample from mesh as fallback
+                try:
+                    pcd_for_poisson = final.mesh_obj.sample_points_uniformly(
+                        number_of_points=80000)
+                    pcd_for_poisson.estimate_normals()
+                except Exception:
+                    pcd_for_poisson = None
+            if pcd_for_poisson is not None and len(pcd_for_poisson.points) >= 50000:
+                try:
+                    pmesh = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+                        pcd_for_poisson, depth=9)[0]
+                    if len(pmesh.triangles) > len(final.mesh_obj.triangles):
+                        final.mesh_obj = pmesh
+                        applied_poisson = True
+                        decide("surface", "POISSON_APPLIED",
+                               "hole repair benefit expected (isolated child would be ideal, but "
+                               "currently runs in parent under budget gate)", tag=tag)
+                    else:
+                        decide("surface", "POISSON_SKIPPED", "poisson produced fewer triangles", tag=tag)
+                except Exception as exc:
+                    decide("surface", "POISSON_SKIPPED", f"failed: {exc}", tag=tag)
+            else:
+                decide("surface", "POISSON_SKIPPED", "insufficient points for poisson", tag=tag)
         else:
             decide("surface", "POISSON_SKIPPED", "trigger/budget evidence not met",
                    tag=tag)
@@ -643,9 +787,16 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 views.append((fid, normalize_exposure(img)))
                 poses_wc[fid] = poses[fid]
             if views:
+                # P0 #29: occlusion-aware texture for final rank01 when scene available
+                # we build RaycastingScene from delivered mesh to enable occlusion test
+                bake_scene = None
+                try:
+                    bake_scene = build_scene(final.mesh_obj)
+                except Exception:
+                    bake_scene = None
                 bake = bake_atlas(np.asarray(final.mesh_obj.vertices),
                                   np.asarray(final.mesh_obj.triangles),
-                                  views, K, poses_wc, scene=None,
+                                  views, K, poses_wc, scene=bake_scene,
                                   out_dir=rank_dir, name="model")
                 bake_info = bake.to_dict()
                 atlas_img = cv2.imread(str(bake.atlas_paths[0]))

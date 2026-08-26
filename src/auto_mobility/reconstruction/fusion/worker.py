@@ -89,6 +89,7 @@ def run_with_spec(spec_path: Path) -> int:
         weight_dtype=str(spec.get("weight_dtype", "float32")),
         extraction_mode=str(spec.get("extraction_mode", "mesh_only")),
         allow_cpu_migration=bool(spec.get("allow_cpu_migration", False)),
+        planned_block_count=spec.get("planned_block_count"),
     )
 
     if out.mesh_obj is not None and len(out.mesh_obj.triangles) > 0:

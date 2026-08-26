@@ -98,9 +98,13 @@ def main() -> int:
         if bgr is None or depth is None:
             continue
         odom_est, slam_est = tracker.track(ts_ns, [bgr], depths=[depth])
-        pose = odom_est.world_from_rig if odom_est and odom_est.world_from_rig is not None else None
-        if pose is None and slam_est is not None and slam_est.world_from_rig is not None:
+        # P0 #11: prioritize SLAM-corrected pose when available (loop/global correction lives in slam_est);
+        # odometry-only pose lacks global correction and would degrade reconstruction quality if preferred.
+        pose = None
+        if slam_est is not None and getattr(slam_est, "world_from_rig", None) is not None:
             pose = slam_est.world_from_rig
+        if pose is None and odom_est is not None and getattr(odom_est, "world_from_rig", None) is not None:
+            pose = odom_est.world_from_rig
         if pose is None:
             if i % 200 == 0:
                 print(f"  [{i}/{len(rows)}] lost")
