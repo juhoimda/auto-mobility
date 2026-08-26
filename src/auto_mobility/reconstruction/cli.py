@@ -22,12 +22,14 @@ from pathlib import Path
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="auto-mobility-reconstruction")
     p.add_argument("bag", nargs="?", default="", help="bag name or frames dir")
-    p.add_argument("--standard", action="store_true", help="standard pipeline mode")
-    p.add_argument("--preview", action="store_true", help="fast visual inspection preview mode")
+    p.add_argument("--mode", choices=["quick", "preview", "standard", "full"], default=None,
+                   help="pipeline execution mode (quick | preview | standard | full)")
+    p.add_argument("--standard", action="store_true", help="standard pipeline mode (default)")
+    p.add_argument("--preview", action="store_true", help="fast visual inspection preview mode (dual RTAB & cuVSLAM OBJs)")
     p.add_argument("--safe-mode", "--preview-safe", action="store_true", dest="safe_mode_cli",
                    help="force SAFE MODE (conservative concurrency, reserve, bounds)")
-    p.add_argument("--quick", action="store_true", help="compat: developer time-budget shortcut")
-    p.add_argument("--full", action="store_true", help="compat: accepted, full search")
+    p.add_argument("--quick", action="store_true", help="developer sanity / pipeline health check shortcut")
+    p.add_argument("--full", action="store_true", help="exhaustive search and validation mode")
     p.add_argument("--phase", default="all", help="compat: accepted (single-phase search removed in V2)")
     p.add_argument("--top-k", type=int, default=2, help="finalists to deliver (cap 2)")
     p.add_argument("--dataset-dir", type=Path, default=None,
@@ -36,12 +38,41 @@ def build_parser() -> argparse.ArgumentParser:
                    help="TUM trajectory file to judge (repeatable)")
     p.add_argument("--output", type=Path, default=Path("output"))
     p.add_argument("--budget-min", type=float, default=None,
-                   help="wall-time budget in minutes (default 30; quick 12; preview 15)")
+                   help="wall-time budget in minutes (default 30; quick 12; preview 15; full 45)")
     p.add_argument("--run-slam", action="store_true",
-                   help="generate missing trajectories via run_slam.sh")
+                   help="generate missing trajectories via run_slam.sh / cuvslam worker")
     p.add_argument("--no-cache", action="store_true", help="compat: accepted (cache is content-verified)")
     p.add_argument("--no-resume", action="store_true", help="compat: accepted")
     return p
+
+
+def resolve_execution_mode(args: argparse.Namespace):
+    """Resolve and validate mutual exclusion of CLI execution modes (§1, §21, §22)."""
+    from auto_mobility.reconstruction.config import ExecutionMode
+
+    flags = []
+    if getattr(args, "mode", None):
+        flags.append(args.mode.lower())
+    if getattr(args, "quick", False):
+        flags.append("quick")
+    if getattr(args, "preview", False):
+        flags.append("preview")
+    if getattr(args, "full", False):
+        flags.append("full")
+    if getattr(args, "standard", False):
+        flags.append("standard")
+
+    unique_flags = list(set(flags))
+    if len(unique_flags) > 1:
+        # If standard was passed alongside another explicit mode, reject ambiguous combinations
+        raise ValueError(
+            f"Cannot combine multiple execution modes ({', '.join(sorted(unique_flags))}). "
+            "Please choose exactly one of --quick, --preview, --standard, or --full."
+        )
+    if unique_flags:
+        return ExecutionMode(unique_flags[0])
+    return ExecutionMode.STANDARD
+
 
 
 def _check_trajectory_cache(tp: Path) -> bool:
@@ -321,45 +352,42 @@ def run(args: argparse.Namespace) -> int:
     from auto_mobility.reconstruction.runtime import (
         BudgetManager, Scheduler, compute_resource_budgets, load_or_probe_profile,
     )
-    from auto_mobility.reconstruction.config import default_config
+    from auto_mobility.reconstruction.config import (
+        ExecutionMode, SafetyMode, default_config, policy_for_mode)
     from auto_mobility.reconstruction.runtime.run_state import (
         detect_previous_host_reset, mark_completed, write_run_state)
 
     t_start = time.monotonic()
     cfg = default_config()
-    is_preview = bool(getattr(args, "preview", False))
+    resolved_mode = resolve_execution_mode(args)
+    policy = policy_for_mode(resolved_mode)
+    is_preview = (resolved_mode == ExecutionMode.PREVIEW)
+    is_quick = (resolved_mode == ExecutionMode.QUICK)
     safe_mode_cli = bool(getattr(args, "safe_mode_cli", False))
+
     if is_preview and args.output == Path("output"):
         out_dir = Path("output_preview")
     else:
         out_dir = args.output
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if is_preview:
-        args.standard = True
-
     # §25 unclean-run detection before any heavy work
-    # single lightweight profile probe; reused for detection AND budgets (#13)
     profile = load_or_probe_profile(out_dir / "cache", measure_overhead=False)
     reset_info = detect_previous_host_reset(out_dir)
-    safe_mode = bool(reset_info.get("previous_host_reset")) or safe_mode_cli or is_preview
+    safe_mode = bool(reset_info.get("previous_host_reset")) or safe_mode_cli
     if safe_mode:
         print(f"[v2] SAFE MODE activated (reset={bool(reset_info.get('previous_host_reset'))}, "
-              f"cli={safe_mode_cli}, preview={is_preview}) — sequential, coarser, more reserve")
-    # §9 optional overhead measurement in separate call (subprocess-only)
-    # we measure overhead lazily once per machine and cache it; here we keep 0 until calibration
+              f"cli={safe_mode_cli}) — sequential, coarser, more reserve")
     if safe_mode:
-        # §26 SAFE MODE profile adjustments (§26): more reserve, smaller block target, no fine
         from dataclasses import replace as _rep
         cfg = _rep(cfg, resources=_rep(cfg.resources, vram_reserve_gb=2.0,
                                         vram_free_fraction=0.45))
     budgets = compute_resource_budgets(profile, cfg.resources)
-    # write RUNNING state atomically
     try:
         write_run_state(out_dir, profile, status="RUNNING")
     except Exception:
         pass
-    budget_min = args.budget_min if args.budget_min is not None else (15.0 if is_preview else (12.0 if args.quick else 30.0))
+    budget_min = args.budget_min if args.budget_min is not None else policy.budget_minutes
     budget = BudgetManager(budget_min * 60.0, cfg.budget)
     scheduler = Scheduler(
         cpu_threads=budgets.cpu_threads,
@@ -367,14 +395,15 @@ def run(args: argparse.Namespace) -> int:
         gpu_slots=budgets.gpu_heavy_slots,
         vram_mb=budgets.vram_budget_mb,
     ).start()
-    print(f"[v2] gpu={profile.gpu.model} vram_budget={budgets.vram_budget_mb}MB "
-          f"ram_budget={budgets.ram_budget_mb}MB time_budget={budget_min:.0f}min")
+    print(f"[v2] mode={resolved_mode.value} safe_mode={safe_mode} gpu={profile.gpu.model} "
+          f"vram_budget={budgets.vram_budget_mb}MB ram_budget={budgets.ram_budget_mb}MB "
+          f"time_budget={budget_min:.0f}min")
 
     dataset_dir = args.dataset_dir or Path("ros2_data/frames") / args.bag
     manifest = {
         "schema_version": "recon-v2",
         "dataset_dir": str(dataset_dir),
-        "mode": "preview" if is_preview else ("standard" if args.standard else "default"),
+        "mode": resolved_mode.value,
         "machine_profile": profile.to_dict(),
         "resource_budgets": budgets.to_dict(),
         "budget_plan": budget.to_dict(),
@@ -400,16 +429,14 @@ def run(args: argparse.Namespace) -> int:
         print(f"[v2] dataset dir not found or missing frames.csv: {dataset_dir}")
 
     trajs = {}
-    if args.standard and ds is not None:
+    if ds is not None:
         from auto_mobility.trajectory.io import Trajectory
 
         traj_files = list(args.trajectory or [])
         if not traj_files:
             traj_root = Path("ros2_data/trajectories")
             if traj_root.is_dir():
-                # include both bag-containing and generic trajectory files, dedup
                 raw = sorted(traj_root.glob(f"*{args.bag}*trajectory*.txt"))
-                # also consider canonical locations that may not contain bag substring? search all
                 all_traj = sorted(traj_root.glob("*trajectory*.txt"))
                 raw_set = {str(p.resolve()) for p in raw}
                 for p in all_traj:
@@ -417,19 +444,15 @@ def run(args: argparse.Namespace) -> int:
                         raw.append(p)
                 traj_files = raw
         if args.run_slam:
-            # §5/#50: per-backend cache verification decides reuse vs
-            # regeneration — an unrelated stale file must NOT block
-            # generation of a missing backend.
             generated = _generate_trajectories(
-                args.bag, Path(__file__).resolve().parents[2], dataset_dir)
+                args.bag, Path(__file__).resolve().parents[3], dataset_dir)
             existing = {str(Path(t).resolve()) for t in traj_files}
+
             for g in generated:
                 if str(Path(g).resolve()) not in existing:
                     traj_files.append(g)
             print(f"[v2] available/generated {len(traj_files)} "
                   f"trajectory file(s) after sequential isolation")
-        # P0 #9/10: all auto-discovered trajectories must be verified (TUM+SHA256+fingerprint+sidecar)
-        # and backend identity comes from sidecar, not filename
         verified_traj_files = []
         for tp in traj_files:
             tp = Path(tp)
@@ -439,7 +462,6 @@ def run(args: argparse.Namespace) -> int:
                 print(f"[v2] REJECTED_STALE_CACHE (auto-discovered not verified): {tp}")
                 continue
             verified_traj_files.append(tp)
-        # P0 #10: backend identity from sidecar, dedup per backend (latest mtime wins)
         if verified_traj_files:
             by_backend_path = {}
             for tp in sorted(verified_traj_files, key=lambda p: p.stat().st_mtime):
@@ -468,16 +490,14 @@ def run(args: argparse.Namespace) -> int:
                 except Exception as exc:
                     print(f"[v2] skip trajectory {tp}: {exc}")
         if trajs:
-            print(f"[v2] running standard pipeline with {len(trajs)} trajectory candidate(s)")
+            print(f"[v2] running pipeline ({resolved_mode.value}) with {len(trajs)} trajectory candidate(s)")
             from auto_mobility.reconstruction.pipeline.standard import run_standard
-            # P0 #12 hard ceiling propagation: total - reserve
             hard_ceiling = None
             if profile.gpu.present and profile.gpu.vram_total_mb:
                 hard_ceiling = max(0, int(profile.gpu.vram_total_mb) - int(budgets.vram_reserve_mb))
-            # safe_mode adjustments (§15): top_k=1, no fine, sequential etc handled inside pipeline
-            effective_top_k = 1 if safe_mode else min(2, max(1, args.top_k))
-            if safe_mode and effective_top_k != args.top_k:
-                print(f"[v2] SAFE MODE / PREVIEW: top_k clamped {args.top_k} -> {effective_top_k}")
+            effective_top_k = 1 if safe_mode and not is_preview else min(2, max(1, args.top_k))
+            if safe_mode and effective_top_k != args.top_k and not is_preview:
+                print(f"[v2] SAFE MODE: top_k clamped {args.top_k} -> {effective_top_k}")
             std_result = run_standard(
                 dataset_dir, trajs, out_dir,
                 vram_budget_mb=float(budgets.vram_budget_mb),
@@ -488,6 +508,8 @@ def run(args: argparse.Namespace) -> int:
                 hard_ceiling_mb=float(hard_ceiling) if hard_ceiling else None,
                 safe_mode=safe_mode,
                 preview=is_preview,
+                quick=is_quick,
+                mode_policy=policy,
             )
             manifest["standard_result"] = {
                 k: v for k, v in std_result.items()
@@ -495,46 +517,65 @@ def run(args: argparse.Namespace) -> int:
             }
             manifest["trajectory_scores"] = std_result.get("trajectory_scores", [])
             manifest["holdout_split"] = std_result.get("holdout", manifest.get("holdout_split"))
-            winner_subdir = "preview" if is_preview else "final"
-            print(f"[v2] standard ok={std_result.get('ok')} winner={std_result.get('winner')} "
-                  f"wall={std_result.get('wall_s')}s -> {out_dir}/{winner_subdir}/rank_01")
 
-            winner_tag = "rank_01" if std_result.get("ok") else None
-            if winner_tag:
-                _register_final_artifacts(
-                    out_dir, out_dir / winner_subdir / winner_tag,
-                    dataset_spec={"dir": dataset_dir.name,
-                                  "n_frames": len(ds),
-                                  "audit_ok": audit_ok},
-                    fusion_spec={"backend": "open3d_vbg_cuda",
-                                 "voxel_mm_effective": std_result.get(
-                                     "rank_01", {}).get("voxel_mm_effective")},
-                    decisions_log=lambda *a, **k: std_result.setdefault(
-                        "extra_decisions", []).append(
-                        {"stage": a[0], "decision": a[1], "reason": a[2],
-                         "evidence": k}),
-                )
-                manifest["standard_result"]["decisions"] += manifest[
-                    "standard_result"].get("extra_decisions", [])
-
-                if is_preview:
-                    obj_path = out_dir / "preview" / winner_tag / "model.obj"
-                    mtl_path = out_dir / "preview" / winner_tag / "model.mtl"
-                    tex_dir = out_dir / "preview" / winner_tag / "textures"
-                    print("\n" + "=" * 60)
-                    print("  PREVIEW OBJ READY\n")
-                    print(f"  OBJ:\n    {obj_path}\n")
-                    print(f"  MTL:\n    {mtl_path}\n")
-                    print(f"  TEXTURE:\n    {tex_dir}\n")
-                    print("  VIEW COMMAND:")
-                    print(f"    python3 src/auto_mobility/mesh/view_mesh.py {obj_path}")
-                    print("=" * 60 + "\n")
+            if is_preview:
+                preview_backends = std_result.get("backends", {})
+                for bname, binfo in preview_backends.items():
+                    b_dir = out_dir / "preview" / bname
+                    if b_dir.is_dir():
+                        _register_final_artifacts(
+                            out_dir, b_dir,
+                            dataset_spec={"dir": dataset_dir.name,
+                                          "n_frames": len(ds),
+                                          "audit_ok": audit_ok},
+                            fusion_spec={"backend": "open3d_vbg_cuda",
+                                         "voxel_mm_effective": binfo.get("voxel_mm_effective")},
+                            decisions_log=lambda *a, **k: std_result.setdefault(
+                                "extra_decisions", []).append(
+                                {"stage": a[0], "decision": a[1], "reason": a[2],
+                                 "evidence": k}),
+                        )
+                print("\n" + "=" * 60)
+                print("  🎉 PREVIEW OBJs READY (RTAB & cuVSLAM)\n")
+                for bname in preview_backends.keys():
+                    obj_p = out_dir / "preview" / bname / "model.obj"
+                    print(f"  [{bname.upper()} PREVIEW]")
+                    print(f"    OBJ:     {obj_p}")
+                    print(f"    VIEW:    python3 src/auto_mobility/mesh/view_mesh.py {obj_p}\n")
+                print(f"  Comparison Report:\n    {out_dir / 'preview' / 'preview_report.md'}")
+                print("=" * 60 + "\n")
+            elif is_quick:
+                print("\n" + "=" * 60)
+                print("  ⚡ QUICK SANITY CHECK COMPLETE")
+                print(f"  Result: {std_result.get('quick_check', {}).get('status')}")
+                print(f"  Report: {out_dir / 'quick' / 'quick_check.json'}")
+                print("  Note: NOT FOR QUALITY EVALUATION")
+                print("=" * 60 + "\n")
+            else:
+                winner_tag = "rank_01" if std_result.get("ok") else None
+                if winner_tag:
+                    _register_final_artifacts(
+                        out_dir, out_dir / "final" / winner_tag,
+                        dataset_spec={"dir": dataset_dir.name,
+                                      "n_frames": len(ds),
+                                      "audit_ok": audit_ok},
+                        fusion_spec={"backend": "open3d_vbg_cuda",
+                                     "voxel_mm_effective": std_result.get(
+                                         "rank_01", {}).get("voxel_mm_effective")},
+                        decisions_log=lambda *a, **k: std_result.setdefault(
+                            "extra_decisions", []).append(
+                            {"stage": a[0], "decision": a[1], "reason": a[2],
+                             "evidence": k}),
+                    )
+                    manifest["standard_result"]["decisions"] += manifest[
+                        "standard_result"].get("extra_decisions", [])
         else:
             print("[v2] no trajectory candidates found. Run scripts/pipeline/run_slam.sh "
                   f"{args.bag} --slam=rtab (or pass --run-slam).")
 
     scheduler.shutdown()
     elapsed = time.monotonic() - t_start
+
     try:
         budget.spend("pose_exploration", min(elapsed, budget.phase_allocated("pose_exploration")))
     except Exception:

@@ -82,7 +82,9 @@ def bake_atlas(
     (out_dir / "textures").mkdir(parents=True, exist_ok=True)
     cell = atlas_size // grid
     n_cells = grid * grid
-    atlas = np.zeros((atlas_size, atlas_size, 3), dtype=np.uint8)
+    # Initialize atlas with neutral warm grey instead of solid black (0,0,0)
+    # so unmapped fallback faces render as natural surface instead of pitch black
+    atlas = np.full((atlas_size, atlas_size, 3), 180, dtype=np.uint8)
     occupied = 0
     untextured = 0
 
@@ -101,7 +103,6 @@ def bake_atlas(
     view_ids = [fid for fid, _ in views if fid in poses_wc]
     img_by_fid = dict(views)
     T_count = len(triangles)
-    # #41/#42: bounded top-K buffers instead of full dense S[T,V]/C[T,V,3].
     K_top = max(1, int(max_views_per_tri))
     tri_chunk = max(1, int(tri_chunk))
     top_scores = np.full((T_count, K_top), -1.0, dtype=np.float32)
@@ -137,7 +138,6 @@ def bake_atlas(
             cols, _ = sample_view_color(
                 img, K, T_wc, c_tris.reshape(-1, 3), img.shape[1], img.shape[0])
             cols = cols.reshape(n_c, 3, 3).mean(axis=1).astype(np.float32)
-            # running top-K merge: candidate enters if it beats the current min
             min_idx = np.argmin(top_scores[s0:s1], axis=1)
             min_val = top_scores[np.arange(s0, s1), min_idx]
             better = scores > min_val
@@ -163,7 +163,7 @@ def bake_atlas(
     cell_of_face = {}
     for tid in order:
         if occupied >= n_cells:
-            continue  # 아틀라스 포화: 해당 면은 텍스처/정점색 없음(폴백 UV)
+            continue
         cx, cy = occupied % grid, occupied // grid
         x0, y0 = cx * cell, cy * cell
         atlas[y0:y0 + cell, x0:x0 + cell] = face_colors[tid]
@@ -175,8 +175,7 @@ def bake_atlas(
     atlas_path = out_dir / "textures" / f"{name}_atlas_0.png"
     cv2.imwrite(str(atlas_path), atlas[..., ::-1])
 
-    # 정점 색상: 아틀라스 셀 예산과 무관하게 모든 뷰의 유효 샘플을 평균 블렌딩
-    # (텍스처 미지원 뷰어(Open3D 등)에서 전체 컬러 표현용)
+    # Vertex colors blending
     pts = np.asarray(vertices, dtype=np.float64)
     vw_sum = np.zeros((len(vertices), 3), dtype=np.float64)
     vw_cnt = np.zeros(len(vertices), dtype=np.float64)
@@ -187,15 +186,27 @@ def bake_atlas(
         vw_sum[ok] += cols[ok]
         vw_cnt[ok] += 1.0
     has_vcol = vw_cnt > 0
-    vcol = np.full((len(vertices), 3), 0.5)
+    vcol = np.full((len(vertices), 3), 0.7)
     vcol[has_vcol] = vw_sum[has_vcol] / vw_cnt[has_vcol][:, None] / 255.0
+
+    # Vertex normals for smooth MeshLab / Blender shading
+    v_normals = np.zeros_like(pts)
+    for tid in range(T_count):
+        if valid_face[tid]:
+            v_normals[triangles[tid]] += normals[tid]
+    v_nrm = np.linalg.norm(v_normals, axis=1)
+    v_valid = v_nrm > 1e-12
+    v_normals[v_valid] /= v_nrm[v_valid, None]
 
     obj_lines = [f"mtllib {name}.mtl", f"o {name}"]
     for (vx, vy, vz), (cr, cg, cb) in zip(vertices, vcol):
         obj_lines.append(
             f"v {vx:.6f} {vy:.6f} {vz:.6f} {cr:.6f} {cg:.6f} {cb:.6f}")
 
-    # 더미 UV 3개(포화/무색 면 폴백) + 셀별 코너 UV 3개씩 (면들이 공유)
+    for nx, ny, nz in v_normals:
+        obj_lines.append(f"vn {nx:.6f} {ny:.6f} {nz:.6f}")
+
+    # UV lines
     vt_lines = ["vt 0.000000 0.000000", "vt 1.000000 0.000000",
                 "vt 0.000000 1.000000"]
     cell_vt = {}
@@ -215,16 +226,22 @@ def bake_atlas(
         a, b, c = (triangles[tid] + 1).tolist()
         ids = cell_vt.get(cell_of_face.get(tid))
         if ids is None:
-            obj_lines.append(f"f {a}/1 {b}/2 {c}/3")
+            obj_lines.append(f"f {a}/1/{a} {b}/2/{b} {c}/3/{c}")
         else:
             i0, i1, i2 = ids
-            obj_lines.append(f"f {a}/{i0} {b}/{i1} {c}/{i2}")
+            obj_lines.append(f"f {a}/{i0}/{a} {b}/{i1}/{b} {c}/{i2}/{c}")
 
     obj_path = out_dir / f"{name}.obj"
     obj_path.write_text("\n".join(obj_lines) + "\n", encoding="utf-8")
     (out_dir / f"{name}.mtl").write_text(
-        f"newmtl baked\nKa 1.0 1.0 1.0\nKd 1.0 1.0 1.0\n"
+        f"newmtl baked\n"
+        f"Ka 0.8 0.8 0.8\n"
+        f"Kd 0.9 0.9 0.9\n"
+        f"Ks 0.1 0.1 0.1\n"
+        f"d 1.0\n"
+        f"illum 2\n"
         f"map_Kd textures/{name}_atlas_0.png\n",
         encoding="utf-8",
     )
     return BakeResult(obj_path, out_dir / f"{name}.mtl", (atlas_path,), untextured)
+

@@ -5,11 +5,98 @@ No deep raw-dict access in business logic: everything lands in frozen dataclasse
 """
 
 from dataclasses import dataclass, field, fields, replace
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 import yaml
 
 from auto_mobility.reconstruction.model import SCHEMA_VERSION
+
+
+class ExecutionMode(str, Enum):
+    QUICK = "quick"
+    PREVIEW = "preview"
+    STANDARD = "standard"
+    FULL = "full"
+
+
+class SafetyMode(str, Enum):
+    NORMAL = "normal"
+    SAFE = "safe"
+
+
+@dataclass(frozen=True)
+class ModePolicy:
+    mode: ExecutionMode
+    geometry_frame_target: Optional[int]
+    final_candidates: int
+    enable_fine: bool
+    enable_poisson: bool
+    enable_texture: bool
+    texture_view_target: int
+    require_dual_backend_artifacts: bool
+    quality_artifact: bool
+    budget_minutes: float
+
+
+def policy_for_mode(mode: ExecutionMode | str) -> ModePolicy:
+    if isinstance(mode, str):
+        mode = ExecutionMode(mode.lower())
+    if mode == ExecutionMode.QUICK:
+        return ModePolicy(
+            mode=ExecutionMode.QUICK,
+            geometry_frame_target=100,
+            final_candidates=1,
+            enable_fine=False,
+            enable_poisson=False,
+            enable_texture=False,
+            texture_view_target=0,
+            require_dual_backend_artifacts=False,
+            quality_artifact=False,
+            budget_minutes=12.0,
+        )
+    elif mode == ExecutionMode.PREVIEW:
+        return ModePolicy(
+            mode=ExecutionMode.PREVIEW,
+            geometry_frame_target=800,
+            final_candidates=2,
+            enable_fine=False,
+            enable_poisson=False,
+            enable_texture=True,
+            texture_view_target=32,
+            require_dual_backend_artifacts=True,
+            quality_artifact=True,
+            budget_minutes=15.0,
+        )
+    elif mode == ExecutionMode.STANDARD:
+        return ModePolicy(
+            mode=ExecutionMode.STANDARD,
+            geometry_frame_target=None,
+            final_candidates=2,
+            enable_fine=True,
+            enable_poisson=True,
+            enable_texture=True,
+            texture_view_target=80,
+            require_dual_backend_artifacts=False,
+            quality_artifact=True,
+            budget_minutes=30.0,
+        )
+    elif mode == ExecutionMode.FULL:
+        return ModePolicy(
+            mode=ExecutionMode.FULL,
+            geometry_frame_target=None,
+            final_candidates=2,
+            enable_fine=True,
+            enable_poisson=True,
+            enable_texture=True,
+            texture_view_target=80,
+            require_dual_backend_artifacts=False,
+            quality_artifact=True,
+            budget_minutes=45.0,
+        )
+    else:
+        raise ValueError(f"Unknown execution mode: {mode}")
+
 
 
 @dataclass(frozen=True)

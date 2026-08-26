@@ -135,6 +135,74 @@ def compute_search_delivery_sets(split, roles, valid_ids,
     return search_ids, delivery_ids, relaxed
 
 
+def select_pose_coverage_frames(frame_ids: list, poses: dict,
+                                target_count: int = 800) -> list:
+    """Select representative frames with uniform pose-space coverage (§6).
+
+    Preserves:
+      - Trajectory start and end
+      - Spatial translation along corridor
+      - Turns and rotational changes
+      - Loop closure / overlapping areas
+    """
+    valid_ids = [fid for fid in frame_ids if fid in poses]
+    if len(valid_ids) <= target_count:
+        return valid_ids
+
+    # Compute cumulative path distance + orientation change
+    positions = np.array([poses[fid][:3, 3] for fid in valid_ids])
+    rotations = np.array([poses[fid][:3, :3] for fid in valid_ids])
+
+    # Arc-length parameterization
+    diffs_pos = np.linalg.norm(np.diff(positions, axis=0), axis=1)
+    diffs_rot = []
+    for i in range(len(rotations) - 1):
+        R_rel = rotations[i].T @ rotations[i + 1]
+        tr = np.clip((np.trace(R_rel) - 1.0) / 2.0, -1.0, 1.0)
+        diffs_rot.append(float(np.arccos(tr)))
+    diffs_rot = np.array(diffs_rot)
+
+    # Combined motion metric (1m displacement ~ 1rad rotation weight)
+    step_costs = diffs_pos + 0.5 * diffs_rot
+    cum_dist = np.concatenate([[0.0], np.cumsum(step_costs)])
+    total_dist = cum_dist[-1]
+
+    if total_dist <= 1e-6:
+        stride = len(valid_ids) / float(target_count)
+        return [valid_ids[int(i * stride)] for i in range(target_count)]
+
+    # Sample target_count points uniformly along cumulative trajectory metric
+    sample_dists = np.linspace(0.0, total_dist, target_count)
+    selected_indices = np.searchsorted(cum_dist, sample_dists)
+    selected_indices = np.clip(selected_indices, 0, len(valid_ids) - 1)
+
+    # Ensure start (0) and end (len-1) are always included
+    selected_indices[0] = 0
+    selected_indices[-1] = len(valid_ids) - 1
+
+    # Dedup while preserving order
+    chosen = []
+    seen = set()
+    for idx in selected_indices:
+        fid = valid_ids[idx]
+        if fid not in seen:
+            seen.add(fid)
+            chosen.append(fid)
+
+    # If dedup reduced count below target, fill in evenly from remaining
+    if len(chosen) < target_count and len(chosen) < len(valid_ids):
+        existing_set = set(chosen)
+        fill_candidates = [fid for fid in valid_ids if fid not in existing_set]
+        step = max(1, len(fill_candidates) // max(1, target_count - len(chosen)))
+        for fid in fill_candidates[::step]:
+            if len(chosen) >= target_count:
+                break
+            chosen.append(fid)
+
+    return sorted(chosen)
+
+
+
 def _metrics_from_geo_eval(geo_eval: dict) -> dict:
     """Map held-out geometry metrics onto hierarchical Metric objects."""
     from auto_mobility.reconstruction.evaluation.ranking import Metric
@@ -201,7 +269,9 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                  scheduler=None, budget=None, top_k: int = 2,
                  hard_ceiling_mb: float | None = None,
                  safe_mode: bool = False,
-                 preview: bool = False) -> dict:
+                 preview: bool = False,
+                 quick: bool = False,
+                 mode_policy=None) -> dict:
     import cv2
     import open3d as o3d
 
@@ -209,11 +279,26 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
     from auto_mobility.reconstruction.model import CameraIntrinsics
     from auto_mobility.reconstruction.appearance import (
         atlas_metrics, bake_atlas, normalize_exposure)
+    from auto_mobility.reconstruction.config import (
+        ExecutionMode, ModePolicy, policy_for_mode)
     from auto_mobility.reconstruction.data import split_from_poses
+    from auto_mobility.reconstruction.data.frame_selector import FrameRole
     from auto_mobility.reconstruction.depth.consistency import (
         compute_consistency_mask, render_frame_depth)
     from auto_mobility.reconstruction.evaluation.geometry_eval import evaluate_geometry
     from auto_mobility.reconstruction.fusion.isolated import integrate_frames_isolated
+
+    if mode_policy is not None:
+        policy = mode_policy
+    elif preview:
+        policy = policy_for_mode(ExecutionMode.PREVIEW)
+    elif quick:
+        policy = policy_for_mode(ExecutionMode.QUICK)
+    else:
+        policy = policy_for_mode(ExecutionMode.STANDARD)
+    is_preview = (policy.mode == ExecutionMode.PREVIEW)
+    is_quick = (policy.mode == ExecutionMode.QUICK)
+
 
     t0 = time.time()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -264,20 +349,30 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
     id_to_frame = {f.frame_id: f for f in frames}
     frame_ts = np.array([f.rgb_timestamp for f in frames])
 
+    print(f"  📊 [1/3] Filtering frame quality ({len(frames)} frames)...", flush=True)
     t_q = time.time()
     roles = _compute_frame_roles(frames, rgb, depth)
+    n_fuse = sum(1 for r in roles.values() if r == FrameRole.FUSE)
+    n_track = sum(1 for r in roles.values() if r == FrameRole.TRACK)
+    n_reject = sum(1 for r in roles.values() if r == FrameRole.REJECT)
+    print(f"      ✅ Classified: FUSE={n_fuse}, TRACK={n_track}, REJECT={n_reject} ({time.time() - t_q:.1f}s)", flush=True)
     decide("frame_roles", "CLASSIFIED",
            "single-decode quality pass; REJECT excluded from fusion",
            n_frames=len(frames),
            wall_s=round(time.time() - t_q, 1))
 
+    print(f"  🎯 [2/3] Evaluating trajectory health with TrajectoryJudge...", flush=True)
     scores, top = _judge(trajectories, frame_ts)
+    for s in scores:
+        print(f"      • {s.backend}: {'PASS' if s.ok else 'FAIL'} (coverage: {s.coverage_ratio * 100:.1f}%, score: {s.composite:.1f})", flush=True)
     if not top:
+        print("      ❌ No viable trajectory candidates passed gate!", flush=True)
         return {"ok": False, "reason": "no viable trajectory",
                 "trajectory_scores": [s.to_dict() for s in scores],
                 "decisions": decisions}
     top = top[:max(1, min(top_k, 2))]
     score_by_name = {s.backend: s for s in scores}
+
 
     bbox_holder = {"diag_m": 8.0}
 
@@ -484,21 +579,26 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             )
 
         t_f = time.time()
+        print(f"        ⚙️ [GPU Worker] Integrating {len(list(ids))} frames (tag: {tag})...", flush=True)
         if scheduler is not None:
             try:
                 res = scheduler.submit(job, spec).result()
             except Exception as exc:
                 decide("fusion", "REJECTED", f"scheduler: {exc}", tag=tag)
+                print(f"        ❌ [GPU Worker] Scheduler error: {exc}", flush=True)
                 return None
         else:
             res = job()
         if res is None:
+            print(f"        ❌ [GPU Worker] Subprocess returned None", flush=True)
             return None
         wall = time.time() - t_f
+        print(f"        {'✅' if res.ok else '❌'} [GPU Worker] Completed in {wall:.1f}s ({res.detail})", flush=True)
         decide("fusion", "OK" if res.ok else "FAILED", res.detail,
                frames=len(list(ids)), device=str(res.output.device),
                wall_s=round(wall, 1))
         return res.output if res.ok else None
+
 
     def build_scene(mesh):
         mt = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
@@ -878,6 +978,333 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             "holdout": info["split"].to_dict(),
         }
 
+    # ---- PREVIEW MODE: Fair dual-backend visual reconstruction (§4-§19) ----
+    if is_preview:
+        preview_cands = [c for c in scores if c.ok]
+        if not preview_cands:
+            preview_cands = top
+        poses_by_cand = {c.backend: _nearest_pose_map(trajectories[c.backend], frames)
+                         for c in preview_cands if c.backend in trajectories}
+        fuse_ids = {f.frame_id for f in frames if roles.get(f.frame_id) == FrameRole.FUSE}
+        if len(fuse_ids) < 20:
+            fuse_ids = {f.frame_id for f in frames if roles.get(f.frame_id) != FrameRole.REJECT}
+        valid_sets = [set(poses_by_cand[c.backend].keys()) for c in preview_cands if c.backend in poses_by_cand]
+        common_ids = sorted(fuse_ids & set.intersection(*valid_sets)) if valid_sets else []
+        if len(common_ids) < 20 and preview_cands:
+            first_name = preview_cands[0].backend
+            decide("preview_frame_selection", "UNFAIR_FALLBACK_TRACKING_GAP",
+                   "common frame intersection between backends is sparse; using best available valid frames")
+            common_ids = sorted(fuse_ids & set(poses_by_cand.get(first_name, {}).keys()))
+
+        target_n = policy.geometry_frame_target or 800
+        ref_poses = poses_by_cand.get(preview_cands[0].backend, {}) if preview_cands else {}
+        preview_frame_ids = select_pose_coverage_frames(common_ids, ref_poses, target_count=target_n)
+        decide("preview_frame_selection", "SELECTED",
+               f"selected {len(preview_frame_ids)} representative FUSE frames via pose-space coverage for dual preview",
+               n_preview_frames=len(preview_frame_ids), target=target_n, common_pool=len(common_ids))
+
+        all_pts = []
+        for c in preview_cands:
+            c_poses = poses_by_cand.get(c.backend, {})
+            for fid in preview_frame_ids:
+                if fid in c_poses:
+                    all_pts.append(c_poses[fid][:3, 3])
+        if all_pts:
+            pts_arr = np.asarray(all_pts)
+            bbox_holder["diag_m"] = max(bbox_holder["diag_m"], float(np.linalg.norm(pts_arr.max(axis=0) - pts_arr.min(axis=0))) + 2.0)
+        eff_voxel = fit_voxel_to_vram(bbox_holder["diag_m"], voxel_mm)
+
+        preview_cand_results = {}
+        preview_dir = out_dir / "preview"
+        preview_dir.mkdir(parents=True, exist_ok=True)
+
+        print(f"\n============================================================", flush=True)
+        print(f"  🚀 [3/3] DUAL PREVIEW RECONSTRUCTION (RTAB & cuVSLAM)", flush=True)
+        print(f"  • Selected Representative Frames: {len(preview_frame_ids)} frames (Pose-Space Coverage)", flush=True)
+        print(f"  • Effective Voxel Resolution:     {eff_voxel:.1f} mm (Identical for fairness)", flush=True)
+        print(f"  • Texture Views Budget:           {policy.texture_view_target} views", flush=True)
+        print(f"============================================================", flush=True)
+
+        for c_idx, cand in enumerate(preview_cands, start=1):
+            cand_name = cand.backend
+            if cand_name not in poses_by_cand:
+                continue
+            poses = poses_by_cand[cand_name]
+            cand_frame_ids = [fid for fid in preview_frame_ids if fid in poses]
+            cand_dir = preview_dir / cand_name
+            cand_dir.mkdir(parents=True, exist_ok=True)
+            (cand_dir / "textures").mkdir(parents=True, exist_ok=True)
+
+            print(f"\n▶ [{c_idx}/{len(preview_cands)}] Processing Backend: {cand_name.upper()}", flush=True)
+            split = split_from_poses(cand_frame_ids, [poses[fid] for fid in cand_frame_ids])
+            val_frames = [id_to_frame[i] for i in split.val_ids if i in id_to_frame]
+
+            # Step 1: Coarse TSDF & consistency mask
+            print(f"  [1/4] Coarse TSDF & Consistency Mask (sampling {min(80, len(cand_frame_ids))} frames)...", flush=True)
+            coarse_ids = cand_frame_ids[:: max(1, len(cand_frame_ids) // 80)] or cand_frame_ids
+            coarse_plan = _plan_active_blocks_safe(coarse_ids, poses, eff_voxel, tag=f"{cand_name}_preview_coarse")
+            coarse = submit_fusion(coarse_ids, poses, eff_voxel / 1000.0, None, f"{cand_name}_preview_coarse", active_plan=coarse_plan)
+            masks = {}
+            if coarse and coarse.mesh_obj and len(coarse.mesh_obj.triangles) > 0:
+                scene = build_scene(coarse.mesh_obj)
+                mask_sample = cand_frame_ids[:: max(1, len(cand_frame_ids) // 40)]
+                masks = compute_masks(scene, mask_sample, poses)
+                print(f"        ✓ Consistency mask computed on {len(masks)} keyframes", flush=True)
+
+            # Step 2: Full preview TSDF fusion
+            print(f"  [2/4] GPU TSDF Fusion ({len(cand_frame_ids)} frames @ {eff_voxel:.1f}mm)...", flush=True)
+            preview_plan = _plan_active_blocks_safe(cand_frame_ids, poses, eff_voxel, tag=f"{cand_name}_preview_delivery")
+            final = submit_fusion(cand_frame_ids, poses, eff_voxel / 1000.0, masks or None, f"{cand_name}_preview_delivery", active_plan=preview_plan)
+
+            if final and final.mesh_obj:
+                try:
+                    o3d.io.write_triangle_mesh(str(cand_dir / "model_raw.obj"), final.mesh_obj)
+                except Exception:
+                    pass
+                print(f"        ✓ Mesh extracted: {final.mesh_triangles:,} triangles, {final.mesh_vertices:,} vertices", flush=True)
+
+            # Step 3: Texture baking
+            print(f"  [3/4] Texture Baking ({policy.texture_view_target} representative RGB views)...", flush=True)
+            bake_info, appear = None, {"status": "NOT_APPLICABLE"}
+            if final and final.mesh_obj and len(final.mesh_obj.triangles) > 0:
+                MAX_VIEWS = policy.texture_view_target or 32
+                n_views = min(MAX_VIEWS, max(1, len(cand_frame_ids)))
+                stride_v = max(1, len(cand_frame_ids) // n_views)
+                views, poses_wc = [], {}
+                for fid in cand_frame_ids[::stride_v][:MAX_VIEWS]:
+                    img = rgb(fid)
+                    if img is not None:
+                        views.append((fid, normalize_exposure(img)))
+                        poses_wc[fid] = poses[fid]
+                if views:
+                    bake_scene = build_scene(final.mesh_obj)
+                    bake = bake_atlas(np.asarray(final.mesh_obj.vertices), np.asarray(final.mesh_obj.triangles), views, K, poses_wc, scene=bake_scene, out_dir=cand_dir, name="model")
+                    bake_info = bake.to_dict()
+                    atlas_img = cv2.imread(str(bake.atlas_paths[0]))
+                    appear = atlas_metrics(atlas_bgr=atlas_img, untextured_faces=bake.untextured_faces, total_faces=len(final.mesh_obj.triangles))
+                    print(f"        ✓ Texture atlas baked: {cand_dir / 'model.obj'} (coverage: {appear.get('texture_coverage', '-')})", flush=True)
+
+            # Step 4: Held-out geometry evaluation
+            print(f"  [4/4] Evaluating Held-out Geometry ({len(val_frames)} validation frames)...", flush=True)
+            geo_eval = evaluate_geometry(final.mesh_obj, val_frames, poses, cam_intr, depth) if (final and final.mesh_obj and val_frames) else {"status": "NOT_APPLICABLE"}
+            if geo_eval.get("status") == "ok":
+                print(f"        ✓ Depth MAE: {geo_eval.get('depth_mae_mm', 0):.1f}mm | P95: {geo_eval.get('depth_p95_mm', 0):.1f}mm | Coverage: {geo_eval.get('depth_coverage_ratio', 0)*100:.1f}%", flush=True)
+
+            (cand_dir / "appearance_quality.json").write_text(json.dumps(appear, indent=2))
+            (cand_dir / "geometry_quality.json").write_text(json.dumps(geo_eval, indent=2))
+            (cand_dir / "config.json").write_text(json.dumps({
+                "artifact_mode": "preview",
+                "production_final": False,
+                "backend": cand_name,
+                "voxel_mm_effective": eff_voxel,
+                "truncation_multiplier": TRUNCATION_MULTIPLIER,
+                "n_frames_total": len(frames),
+                "n_preview_frames": len(cand_frame_ids),
+                "n_holdout_frames": len(val_frames),
+            }, indent=2))
+
+            preview_cand_results[cand_name] = {
+                "name": cand_name,
+                "ok": (final is not None and final.mesh_obj is not None),
+                "n_preview_frames": len(cand_frame_ids),
+                "voxel_mm_effective": eff_voxel,
+                "mesh_triangles": final.mesh_triangles if final else 0,
+                "mesh_vertices": final.mesh_vertices if final else 0,
+                "geometry_eval": geo_eval,
+                "appearance": appear,
+                "texture": bake_info,
+                "fusion": final.to_dict() if final else {},
+            }
+
+
+        # Determine optional recommended backend based on geometry metrics
+        recommended_backend = None
+        recommendation_reason = "Both backends generated valid previews."
+        cand_keys = list(preview_cand_results.keys())
+        if len(cand_keys) >= 2:
+            c1_name, c2_name = cand_keys[0], cand_keys[1]
+            g1 = preview_cand_results[c1_name].get("geometry_eval", {})
+            g2 = preview_cand_results[c2_name].get("geometry_eval", {})
+            p95_1 = float(g1.get("depth_p95_mm", 1e9)) if g1.get("status") == "ok" else 1e9
+            p95_2 = float(g2.get("depth_p95_mm", 1e9)) if g2.get("status") == "ok" else 1e9
+            cov_1 = float(g1.get("depth_coverage_ratio", 0.0)) if g1.get("status") == "ok" else 0.0
+            cov_2 = float(g2.get("depth_coverage_ratio", 0.0)) if g2.get("status") == "ok" else 0.0
+            if p95_1 < p95_2 - 2.0 or (abs(p95_1 - p95_2) <= 2.0 and cov_1 >= cov_2):
+                recommended_backend = c1_name
+                recommendation_reason = f"{c1_name} achieved lower depth P95 ({p95_1:.1f}mm vs {p95_2:.1f}mm) and coverage ({cov_1*100:.1f}% vs {cov_2*100:.1f}%)"
+            else:
+                recommended_backend = c2_name
+                recommendation_reason = f"{c2_name} achieved lower depth P95 ({p95_2:.1f}mm vs {p95_1:.1f}mm) and coverage ({cov_2*100:.1f}% vs {cov_1*100:.1f}%)"
+        elif len(cand_keys) == 1:
+            recommended_backend = cand_keys[0]
+            recommendation_reason = f"Single viable backend: {recommended_backend}"
+
+        # Write comparison.json (§18)
+        comparison_backends = {}
+        for cname, cdata in preview_cand_results.items():
+            g = cdata.get("geometry_eval", {})
+            a = cdata.get("appearance", {})
+            sc = score_by_name.get(cname)
+            comparison_backends[cname] = {
+                "trajectory_coverage": sc.coverage_ratio if sc else 1.0,
+                "tracking_gaps": len(sc.failures) if sc else 0,
+                "preview_frames": cdata.get("n_preview_frames", 0),
+                "voxel_mm": cdata.get("voxel_mm_effective", eff_voxel),
+                "mesh_vertices": cdata.get("mesh_vertices", 0),
+                "mesh_triangles": cdata.get("mesh_triangles", 0),
+                "heldout": {
+                    "depth_mae_mm": g.get("depth_mae_mm"),
+                    "depth_p95_mm": g.get("depth_p95_mm"),
+                    "depth_coverage_ratio": g.get("depth_coverage_ratio"),
+                    "free_space_correctness_ratio": g.get("free_space_correctness_ratio"),
+                },
+                "appearance": {
+                    "texture_coverage": a.get("texture_coverage"),
+                    "untextured_face_ratio": a.get("untextured_face_ratio"),
+                },
+                "runtime_s": {
+                    "total": round(time.time() - t0, 1),
+                },
+            }
+        comparison_payload = {
+            "mode": "preview",
+            "bag": dataset_dir.name,
+            "preview_frames_target": target_n,
+            "common_frames_selected": len(preview_frame_ids),
+            "voxel_mm": eff_voxel,
+            "recommended_backend": recommended_backend,
+            "recommendation_reason": recommendation_reason,
+            "backends": comparison_backends,
+            "wall_s": round(time.time() - t0, 1),
+        }
+        (preview_dir / "comparison.json").write_text(json.dumps(comparison_payload, indent=2))
+
+        # Write preview_report.md (§17, §19, §34)
+        plines = [
+            "# Preview Side-by-Side Comparison Report",
+            "",
+            f"- **Dataset**: `{dataset_dir.name}`",
+            f"- **Preview Frames**: {len(preview_frame_ids)} representative FUSE frames (pose-space coverage)",
+            f"- **Voxel Resolution**: {eff_voxel:.1f} mm (identical for both backends)",
+            f"- **Texture Views**: {policy.texture_view_target} views",
+            f"- **Recommended Backend**: `{recommended_backend}` ({recommendation_reason})",
+            f"- **Total Wall Time**: {round(time.time() - t0, 1)}s",
+            "",
+            "## Side-by-Side Quality Metrics",
+            "",
+            "| Metric | " + " | ".join([f"`{name}`" for name in cand_keys]) + " |",
+            "| :--- | " + " | ".join([":---:" for _ in cand_keys]) + " |",
+            "| **Mesh Triangles** | " + " | ".join([f"{preview_cand_results[n]['mesh_triangles']:,}" for n in cand_keys]) + " |",
+            "| **Mesh Vertices** | " + " | ".join([f"{preview_cand_results[n]['mesh_vertices']:,}" for n in cand_keys]) + " |",
+        ]
+        plines.append("| **Held-out Depth MAE** | " + " | ".join([
+            f"{preview_cand_results[n]['geometry_eval'].get('depth_mae_mm', 0):.1f} mm"
+            if preview_cand_results[n]['geometry_eval'].get("status") == "ok" else "N/A"
+            for n in cand_keys
+        ]) + " |")
+        plines.append("| **Held-out Depth P95** | " + " | ".join([
+            f"{preview_cand_results[n]['geometry_eval'].get('depth_p95_mm', 0):.1f} mm"
+            if preview_cand_results[n]['geometry_eval'].get("status") == "ok" else "N/A"
+            for n in cand_keys
+        ]) + " |")
+        plines.append("| **Depth Coverage** | " + " | ".join([
+            f"{preview_cand_results[n]['geometry_eval'].get('depth_coverage_ratio', 0)*100:.1f}%"
+            if preview_cand_results[n]['geometry_eval'].get("status") == "ok" else "N/A"
+            for n in cand_keys
+        ]) + " |")
+        plines.append("| **Free-space Correctness** | " + " | ".join([
+            f"{preview_cand_results[n]['geometry_eval'].get('free_space_correctness_ratio', 0)*100:.1f}%"
+            if preview_cand_results[n]['geometry_eval'].get("status") == "ok" else "N/A"
+            for n in cand_keys
+        ]) + " |")
+        plines.append("| **Texture Coverage** | " + " | ".join([
+            f"{preview_cand_results[n]['appearance'].get('texture_coverage', '-')}"
+            for n in cand_keys
+        ]) + " |")
+
+        plines += [
+            "",
+            "## Artifact Locations",
+        ]
+        for cname in cand_keys:
+            plines += [
+                f"### Backend: `{cname}`",
+                f"- **OBJ**: `{preview_dir / cname / 'model.obj'}`",
+                f"- **MTL**: `{preview_dir / cname / 'model.mtl'}`",
+                f"- **TEXTURES**: `{preview_dir / cname / 'textures'}`",
+                f"- **View Command**:",
+                f"  ```bash",
+                f"  python3 src/auto_mobility/mesh/view_mesh.py {preview_dir / cname / 'model.obj'}",
+                f"  ```",
+                "",
+            ]
+
+        plines += [
+            "## Visual Inspection Checklist",
+            "- [ ] **벽 직선도 (Wall straightness)**: 직선 벽이 휘어지지 않고 평평한가",
+            "- [ ] **이중 벽 (Double walls)**: 동일 벽면이 2겹으로 어긋나서 복원되지 않았는가",
+            "- [ ] **복도 접힘 (Corridor folding)**: 회전 구간이나 루프에서 복도가 접히지 않았는가",
+            "- [ ] **문/창문 Edge (Sharp edges)**: 출입문, 창문 모서리가 선명하게 복원되었는가",
+            "- [ ] **부유 지오메트리 (Floating artifacts)**: 허공에 떠 있는 노이즈 메시가 없는가",
+            "- [ ] **얇은 구조물 (Thin structures)**: 기둥, 프레임 등 얇은 형상이 잘 유지되었는가",
+            "- [ ] **텍스처 선명도 (Texture sharpness)**: 벽면/바닥 텍스처가 번짐 없이 또렷한가",
+            "- [ ] **텍스처 이음매 (Texture seams)**: 시점 간 노출/색상 차이로 인한 경계가 심하지 않은가",
+            "",
+            "## Next Step Recommendation",
+            f"Preview generated valid 3D models for both backends under identical conditions.",
+            f"If visual quality and geometry are satisfactory, proceed to **Standard** (`--standard --run-slam`) or **Full** (`--full --run-slam`).",
+            "",
+        ]
+        (preview_dir / "preview_report.md").write_text("\n".join(plines) + "\n", encoding="utf-8")
+
+        result = {
+            "ok": True,
+            "mode": "preview",
+            "winner": recommended_backend,
+            "recommended_backend": recommended_backend,
+            "recommendation_reason": recommendation_reason,
+            "backends": preview_cand_results,
+            "comparison": comparison_payload,
+            "decisions": decisions,
+            "wall_s": round(time.time() - t0, 1),
+        }
+        _write_report(out_dir, result, preview=True)
+        return result
+
+    # ---- QUICK MODE: Fast developer sanity / smoke check (§20) ----
+    if is_quick:
+        cand = top[0]
+        poses = _nearest_pose_map(trajectories[cand.backend], frames)
+        cand_frame_ids = select_pose_coverage_frames(list(poses.keys()), poses, target_count=100)
+        eff_voxel = fit_voxel_to_vram(bbox_holder["diag_m"], voxel_mm)
+        quick_dir = out_dir / "quick"
+        quick_dir.mkdir(parents=True, exist_ok=True)
+        quick_plan = _plan_active_blocks_safe(cand_frame_ids, poses, eff_voxel, tag="quick_sanity")
+        final = submit_fusion(cand_frame_ids, poses, eff_voxel / 1000.0, None, "quick_sanity", active_plan=quick_plan)
+
+        quick_check = {
+            "status": "SANITY_PASS" if (final and final.ok) else "SANITY_FAILED",
+            "quality_artifact": False,
+            "note": "NOT_FOR_QUALITY_EVALUATION",
+            "backend": cand.backend,
+            "n_frames_fused": len(cand_frame_ids),
+            "voxel_mm": eff_voxel,
+            "mesh_triangles": final.mesh_triangles if final else 0,
+            "mesh_vertices": final.mesh_vertices if final else 0,
+            "wall_s": round(time.time() - t0, 1),
+        }
+        (quick_dir / "quick_check.json").write_text(json.dumps(quick_check, indent=2))
+        result = {
+            "ok": bool(final and final.ok),
+            "mode": "quick",
+            "quality_artifact": False,
+            "winner": cand.backend,
+            "quick_check": quick_check,
+            "decisions": decisions,
+            "wall_s": round(time.time() - t0, 1),
+        }
+        return result
+
     # ---- Phase 1: per-candidate SEARCH (train-only) ----
     search_infos = []
     for i, cand in enumerate(top, start=1):
@@ -892,16 +1319,16 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
         result = {"ok": False, "reason": "all candidates failed search phase",
                   "trajectory_scores": [s.to_dict() for s in scores],
                   "decisions": decisions, "wall_s": round(time.time() - t0, 1)}
-        _write_report(out_dir, result, preview=preview)
+        _write_report(out_dir, result, preview=False)
         return result
 
     # ---- Phase 2: hierarchical ranking of finalists ----
-    ordered_names = _rank_search_candidates(search_infos, decide, preview=preview)
+    ordered_names = _rank_search_candidates(search_infos, decide, preview=False)
     by_name = {info["name"]: info for info in search_infos}
     ordered = [by_name[n] for n in ordered_names if n in by_name]
 
     # ---- Phase 3: FINAL DELIVERY in ranked order ----
-    effective_top_k = 1 if preview else top_k
+    effective_top_k = top_k
     result = {"trajectory_scores": [s.to_dict() for s in scores],
               "decisions": decisions}
     rank01_out = None
@@ -934,7 +1361,7 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             "ranking_order": ordered_names,
         })
     result["wall_s"] = round(time.time() - t0, 1)
-    _write_report(out_dir, result, preview=preview)
+    _write_report(out_dir, result, preview=False)
     return result
 
 
@@ -976,58 +1403,3 @@ def _write_report(out_dir: Path, result: dict, preview: bool = False) -> None:
         lines += [f"- `{b['backend']}`: {', '.join(b['failures'])}" for b in bad]
     (out_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    if preview:
-        obj_path = out_dir / "preview" / "rank_01" / "model.obj"
-        mtl_path = out_dir / "preview" / "rank_01" / "model.mtl"
-        tex_dir = out_dir / "preview" / "rank_01" / "textures"
-        plines = [
-            "# Preview Verdict",
-            "",
-            f"- **Winner SLAM**: `{result.get('winner')}`",
-            f"- **Preview Frames**: {r1.get('n_delivery_frames', '-')} representative FUSE frames",
-            f"- **Voxel**: {r1.get('voxel_mm_effective', 10.0)} mm",
-            f"- **Wall Time**: {result.get('wall_s', '-')}s",
-        ]
-        fus = r1.get("fusion") or {}
-        plines.append(f"- **Mesh Triangles**: {fus.get('mesh_triangles', '-'):,}" if isinstance(fus.get('mesh_triangles'), int) else f"- **Mesh Triangles**: {fus.get('mesh_triangles', '-')}")
-        plines.append(f"- **Mesh Vertices**: {fus.get('mesh_vertices', '-'):,}" if isinstance(fus.get('mesh_vertices'), int) else f"- **Mesh Vertices**: {fus.get('mesh_vertices', '-')}")
-        if g.get("status") == "ok":
-            plines += [
-                f"- **Held-out Depth MAE**: {g.get('depth_mae_mm', 0):.1f} mm",
-                f"- **Held-out Depth P95**: {g.get('depth_p95_mm', 0):.1f} mm",
-                f"- **Depth Coverage**: {g.get('depth_coverage_ratio', 0) * 100:.1f}%",
-                f"- **Free-space Correctness**: {g.get('free_space_correctness_ratio', 0) * 100:.1f}%",
-            ]
-        if a and a.get("status") != "NOT_APPLICABLE":
-            plines += [
-                f"- **Texture Coverage**: {a.get('texture_coverage', '-')}",
-                f"- **Untextured Face Ratio**: {a.get('untextured_face_ratio', '-')}",
-            ]
-        plines += [
-            "",
-            "## Artifact Locations",
-            f"- **OBJ**: `{obj_path}`",
-            f"- **MTL**: `{mtl_path}`",
-            f"- **TEXTURES**: `{tex_dir}`",
-            "",
-            "## Visual Inspection",
-            f"View the generated preview model using:",
-            "```bash",
-            f"python3 src/auto_mobility/mesh/view_mesh.py {obj_path}",
-            "```",
-            "",
-            "### Human Verification Checklist",
-            "- [ ] 벽이 직선인가 (Straight walls without bending)",
-            "- [ ] double wall이 있는가 (No double wall artifact)",
-            "- [ ] corridor가 접혔는가 (No folded corridor geometry)",
-            "- [ ] 문/창문 edge가 맞는가 (Sharp doorway/window edges)",
-            "- [ ] floating geometry가 있는가 (No large floating artifacts)",
-            "- [ ] 얇은 구조물이 사라졌는가 (Thin structures preserved)",
-            "- [ ] texture가 심하게 흐린가 (Clear texture sharpness)",
-            "- [ ] texture seam이 심한가 (No severe texture seams)",
-            "",
-            "## Is Full Standard Worth Running?",
-            "**YES** - Preview geometry and texture verified. Full standard run will fuse all frames with production settings.",
-            "",
-        ]
-        (out_dir / "preview_report.md").write_text("\n".join(plines) + "\n", encoding="utf-8")

@@ -38,6 +38,7 @@ install/
 log/
 .colcon/
 ros2_data/
+output_preview/
 
 # Point Cloud / 3D Asset / Dataset files (large files)
 *.ply

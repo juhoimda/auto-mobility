@@ -45,6 +45,36 @@ from auto_mobility.trajectory.io import Trajectory
 from auto_mobility.reconstruction.cli import _nearest_pose
 
 
+def get_gpu_gate_fingerprint() -> dict:
+    """Compute environment fingerprint for GPU Gate pass cache (§10)."""
+    import hashlib
+    import open3d as o3d
+    gpu = _probe_gpu()
+    fp_str = f"{gpu.model}:{gpu.vram_total_mb}:{o3d.__version__}:{sys.version}"
+    return {
+        "gpu_model": gpu.model,
+        "vram_total_mb": gpu.vram_total_mb,
+        "open3d_version": o3d.__version__,
+        "python_version": sys.version.split()[0],
+        "fingerprint_sha": hashlib.sha256(fp_str.encode()).hexdigest()[:16],
+    }
+
+
+def check_gpu_gate_cache(cache_dir: Path) -> dict | None:
+    """Check if valid GPU_GATE_PASS cache exists for current environment."""
+    cert_path = cache_dir / "gpu_gate_pass.json"
+    if not cert_path.is_file():
+        return None
+    try:
+        data = json.loads(cert_path.read_text())
+        curr_fp = get_gpu_gate_fingerprint()
+        if data.get("fingerprint_sha") == curr_fp.get("fingerprint_sha") and data.get("gate_passed"):
+            return data
+    except Exception:
+        pass
+    return None
+
+
 def _read_gpu_stats():
     try:
         res = subprocess.run(
@@ -62,6 +92,8 @@ def _read_gpu_stats():
     except Exception:
         pass
     return None
+
+
 
 
 def run_gate(dataset_dir: Path, traj_path: Path, n_frames: int = 150, voxel_mm: float = 10.0):
