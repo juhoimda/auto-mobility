@@ -383,7 +383,7 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
     from auto_mobility.reconstruction.pose.judge import select_top_trajectories
     top = select_top_trajectories(scores, top_k=2)
     for s in scores:
-        print(f"      • {s.backend}: {'PASS' if s.ok else 'FAIL'} (coverage: {s.coverage_ratio * 100:.1f}%, score: {s.composite:.1f})", flush=True)
+        print(f"      • {s.backend}: {'PASS' if s.ok else 'FAIL'} (coverage: {s.coverage_ratio * 100:.1f}%, score: {s.composite():.1f})", flush=True)
     if not top:
         print("      ❌ No viable trajectory candidates passed gate!", flush=True)
         return {"ok": False, "reason": "no viable trajectory",

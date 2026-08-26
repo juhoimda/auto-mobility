@@ -95,7 +95,7 @@ def main() -> int:
     )
     # SLAM must be explicitly enabled.  Without this config the second return
     # value of track() is always None, so a corridor is exported as raw VO.
-    slam_cfg = cuvslam.Slam.Config(use_gpu=True, sync_mode=True,
+    slam_cfg = cuvslam.Tracker.SlamConfig(use_gpu=True, sync_mode=True,
                                    retention_time_ms=0)
     tracker = cuvslam.Tracker(rig, odom_cfg, slam_cfg)
     print(f"[cuvslam_worker] RGBD SLAM tracker {W}x{H} fx={fx:.1f}")
@@ -148,8 +148,6 @@ def main() -> int:
             "dataset_fingerprint": _dataset_fingerprint(dataset)}
     meta_json = json.dumps(meta, indent=2)
     Path(str(out_traj) + ".meta.json").write_text(meta_json)
-    if out_traj.suffix:
-        out_traj.with_suffix(".meta.json").write_text(meta_json)
     print(f"[cuvslam_worker] wrote {len(traj)}/{len(rows)} -> {out_traj} {time.time()-t0:.1f}s")
     return 0 if len(traj) >= 10 else 3
 

@@ -51,7 +51,7 @@ def run(bag_dir: Path, out_trajectory: Path) -> Path:
     with open(log, "w") as fh:
         subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT,
                        check=True, timeout=3600)
-    meta = {"schema_version": "recon-v2/sidecar-1", "backend": "cuvslam",
+    meta = {"schema_version": "recon-v2/sidecar-2", "backend": "cuvslam",
             "profile": "standard", "log": str(log)}
-    out_trajectory.with_suffix(".meta.json").write_text(json.dumps(meta))
+    Path(str(out_trajectory) + ".meta.json").write_text(json.dumps(meta))
     return out_trajectory

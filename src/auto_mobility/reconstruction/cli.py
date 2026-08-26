@@ -541,8 +541,14 @@ def run(args: argparse.Namespace) -> int:
                                 {"stage": a[0], "decision": a[1], "reason": a[2],
                                  "evidence": k}),
                         )
+                ready = [bname for bname, binfo in preview_backends.items()
+                         if int(binfo.get("mesh_triangles", 0) or 0) > 0
+                         and (out_dir / "preview" / bname / "model.obj").is_file()]
                 print("\n" + "=" * 60)
-                print("  🎉 PREVIEW OBJs READY (RTAB & cuVSLAM)\n")
+                if ready:
+                    print(f"  ✅ PREVIEW OBJ READY ({', '.join(ready)})\n")
+                else:
+                    print("  ❌ PREVIEW OBJ NOT CREATED (fusion/quality gate failed)\n")
                 for bname in preview_backends.keys():
                     obj_p = out_dir / "preview" / bname / "model.obj"
                     print(f"  [{bname.upper()} PREVIEW]")

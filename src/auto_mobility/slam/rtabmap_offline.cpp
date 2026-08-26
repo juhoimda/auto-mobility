@@ -342,6 +342,11 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "💾 Finalizing RTAB-Map memory and saving database..." << std::endl;
+    // Rtabmap::close(true) releases the in-memory optimized-pose cache in
+    // this RTAB-Map build. Copy it before close; otherwise a safe exporter
+    // would see an empty map and be forced to reject the run.
+    std::map<int, rtabmap::Transform> optimized;
+    optimized = rtabmap.getLocalOptimizedPoses();
     rtabmap.close(true);
 
     // rtabmap.process() optimizes only graph/keyframe poses.  Exporting
@@ -349,7 +354,11 @@ int main(int argc, char** argv) {
     // loop closure and creates folded/doubled rooms in dense TSDF fusion.
     // Convert optimized keyframe poses into an odom->map correction and
     // interpolate that correction for every non-keyframe record.
-    const std::map<int, rtabmap::Transform> & optimized = rtabmap.getLocalOptimizedPoses();
+    if (optimized.empty()) {
+        // Some builds only populate the cache during close; retain a guarded
+        // fallback for those versions, still rejecting raw odometry below.
+        optimized = rtabmap.getLocalOptimizedPoses();
+    }
     struct KeyframeCorrection {
         double timestamp;
         rtabmap::Transform correction;

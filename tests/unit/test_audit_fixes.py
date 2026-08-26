@@ -141,7 +141,7 @@ def _write_traj(path: Path):
 
 
 def _sidecar(path: Path, dataset_dir, *, sha=None, fp=True):
-    meta = {"schema_version": "recon-v2/sidecar-1", "backend": "cuvslam"}
+    meta = {"schema_version": "recon-v2/sidecar-2", "backend": "cuvslam"}
     meta["trajectory_sha256"] = sha or hashlib.sha256(
         path.read_bytes()).hexdigest()
     meta["dataset_fingerprint"] = (

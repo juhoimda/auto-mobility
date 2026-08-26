@@ -462,11 +462,23 @@ def _run(
                 extrinsic_t = o3c.Tensor(np.asarray(extrinsic, dtype=np.float64))
                 depth_t = o3d.t.geometry.Image(
                     o3c.Tensor(np.ascontiguousarray(depth_mm.astype(np.uint16)), device=dev))
-                coords = vbg.compute_unique_block_coordinates(
-                    depth_t, K_t, extrinsic_t,
-                    depth_scale=depth_scale, depth_max=dmax,
-                    trunc_voxel_multiplier=float(trunc_mult),
-                )
+                try:
+                    coords = vbg.compute_unique_block_coordinates(
+                        depth_t, K_t, extrinsic_t,
+                        depth_scale=depth_scale, depth_max=dmax,
+                        trunc_voxel_multiplier=float(trunc_mult),
+                    )
+                except RuntimeError as exc:
+                    if "No block is touched in TSDF volume" not in str(exc):
+                        raise
+                    continue
+                # A non-zero raw depth image can still have no valid TSDF
+                # samples after depth-range clipping or a consistency mask.
+                # Open3D aborts the *whole* CUDA worker if integrate() is
+                # called with an empty coordinate tensor, so skip only this
+                # frame and preserve the remaining delivery sequence.
+                if int(coords.shape[0]) == 0:
+                    continue
                 if store_color:
                     bgr = fi.load_rgb(fid)
                     if bgr is None:
@@ -474,13 +486,18 @@ def _run(
                     color_rgb = bgr[:, :, ::-1] if bgr.ndim == 3 else bgr
                     color_t = o3d.t.geometry.Image(
                         o3c.Tensor(np.ascontiguousarray(color_rgb[:, :, :3].astype(np.uint8)), device=dev))
-                    vbg.integrate(
-                        coords, depth_t, color_t,
-                        K_t, K_t,
-                        extrinsic_t,
-                        depth_scale=depth_scale, depth_max=dmax,
-                        trunc_voxel_multiplier=float(trunc_mult),
-                    )
+                    try:
+                        vbg.integrate(
+                            coords, depth_t, color_t,
+                            K_t, K_t,
+                            extrinsic_t,
+                            depth_scale=depth_scale, depth_max=dmax,
+                            trunc_voxel_multiplier=float(trunc_mult),
+                        )
+                    except RuntimeError as exc:
+                        if "No block is touched in TSDF volume" not in str(exc):
+                            raise
+                        continue
                 else:
                     # depth-only overload for VBG with attrs (tsdf, weight)
                     try:
@@ -498,6 +515,10 @@ def _run(
                             depth_scale=depth_scale, depth_max=dmax,
                             trunc_voxel_multiplier=float(trunc_mult),
                         )
+                    except RuntimeError as exc:
+                        if "No block is touched in TSDF volume" not in str(exc):
+                            raise
+                        continue
                 n += 1
         return n
 
