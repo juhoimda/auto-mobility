@@ -371,8 +371,13 @@ def run(args: argparse.Namespace) -> int:
     is_quick = (resolved_mode == ExecutionMode.QUICK)
     safe_mode_cli = bool(getattr(args, "safe_mode_cli", False))
 
-    if is_preview and args.output == Path("output"):
-        out_dir = Path("output_preview")
+    if args.output == Path("output"):
+        # Keep every execution mode isolated by bag.  A fixed output directory
+        # silently replaced another bag's OBJ, report, run state, and cache.
+        safe_bag = "".join(c if c.isalnum() or c in "._-" else "_"
+                           for c in (args.bag or "unnamed"))
+        base_dir = Path("output_preview") if is_preview else Path("output")
+        out_dir = base_dir / safe_bag
     else:
         out_dir = args.output
     out_dir.mkdir(parents=True, exist_ok=True)

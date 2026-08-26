@@ -91,7 +91,7 @@ if [ -z "$1" ]; then
     echo "   --run-slam  : 누락된 SLAM 궤적을 run_slam.sh / worker 로 자동 생성"
     echo "   --no-cache  : 기존 캐시 무시하고 강제 재생성 (--force 동일)"
     echo "   --no-resume : 이전 실행 상태 복원 비활성화"
-    echo "   --output DIR: 커스텀 평가 결과 저장 디렉터리 (Preview 기본: output_preview)"
+    echo "   --output DIR: 커스텀 평가 결과 저장 디렉터리 (Preview 기본: output_preview/<bag>)"
     echo "=========================================================="
     exit 1
 fi
