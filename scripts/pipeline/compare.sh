@@ -103,6 +103,8 @@ if [ -z "$1" ]; then
     echo "   --no-cache  : 기존 캐시 무시하고 강제 재생성 (--force 동일, trajectory/fusion/output 모든 재사용 bypass)"
     echo "   --no-resume : 이전 실행 상태 복원 비활성화"
     echo "   --compare-backends : dual delivery (RTAB & cuVSLAM) 비교 모드 — standard에서 명시 안 해도 이번 품질비교 실행은 RTAB/cuvslam 둘 다 요구"
+    echo "   --fast-compare : Standard dual-backend 고속 비교 (adaptive 1600~2000 frames, 48/40/32 views, checkpoint, tail reserve)"
+    echo "   --reuse-preview : Preview provenance가 일치하면 frame roles / benchmark split 재사용"
     echo "   --deliver-backends LIST : 표준 듀얼/단일 전달 지정 (예: rtab,cuvslam 또는 all) — 미지정 시 단일/듀얼 동작은 help/report에 명시"
     echo "   --output DIR: 커스텀 평가 결과 저장 디렉터리"
     echo "                 Preview 기본: output_preview/<bag>  (이번 benchmark 실행은 output_preview/hallway/<run_id> 권장)"

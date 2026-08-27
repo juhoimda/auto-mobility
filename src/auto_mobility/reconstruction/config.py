@@ -18,6 +18,7 @@ class ExecutionMode(str, Enum):
     PREVIEW = "preview"
     STANDARD = "standard"
     FULL = "full"
+    FAST_COMPARE = "fast_compare"
 
 
 class SafetyMode(str, Enum):
@@ -37,6 +38,12 @@ class ModePolicy:
     require_dual_backend_artifacts: bool
     quality_artifact: bool
     budget_minutes: float
+    # Fast-compare adaptive fields
+    geometry_frame_min: Optional[int] = None
+    geometry_frame_max: Optional[int] = None
+    coarse_frame_target: Optional[int] = None
+    search_frame_target: Optional[int] = None
+    texture_view_fallbacks: tuple = ()
 
 
 def policy_for_mode(mode: ExecutionMode | str) -> ModePolicy:
@@ -93,6 +100,24 @@ def policy_for_mode(mode: ExecutionMode | str) -> ModePolicy:
             require_dual_backend_artifacts=False,
             quality_artifact=True,
             budget_minutes=45.0,
+        )
+    elif mode == ExecutionMode.FAST_COMPARE:
+        return ModePolicy(
+            mode=ExecutionMode.FAST_COMPARE,
+            geometry_frame_target=1800,  # adaptive midpoint
+            geometry_frame_min=1600,
+            geometry_frame_max=2000,
+            coarse_frame_target=56,  # 48~64 range
+            search_frame_target=270,  # 240~300 range
+            final_candidates=2,
+            enable_fine=False,
+            enable_poisson=False,
+            enable_texture=True,
+            texture_view_target=48,
+            texture_view_fallbacks=(40, 32),
+            require_dual_backend_artifacts=True,
+            quality_artifact=True,
+            budget_minutes=30.0,
         )
     else:
         raise ValueError(f"Unknown execution mode: {mode}")

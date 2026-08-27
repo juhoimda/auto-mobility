@@ -17,6 +17,7 @@ Resource invariants (#25/#26/#31):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -28,6 +29,18 @@ TRUNCATION_MULTIPLIER = 4.0
 
 _MC_OVERHEAD_FACTOR = 2.0
 _MIN_FUSION_RAM_MB = 2048
+
+# Fast-compare constants
+FAST_GEOMETRY_MIN = 1600
+FAST_GEOMETRY_MAX = 2000
+FAST_GEOMETRY_RATIO = 0.40
+TEXTURE_VIEW_PREFERRED = 48
+TEXTURE_VIEW_FALLBACKS = (40, 32)
+TAIL_RESERVE_S = 150  # 120~180 reserve for final tail
+CALIBRATED_COST_PER_MILLION_TV = 2.5  # seconds per 1M triangle-view pairs (calibrated after prefilter+vectorization)
+TEXTURE_SIMPLIFICATION_TARGET = 750_000
+TEXTURE_SIMPLIFICATION_MAX = 1_000_000
+BUDGET_TAIL_RESERVE_S = 150
 
 
 def estimate_fusion_ram_mb(blocks: int) -> int:
@@ -236,6 +249,129 @@ def select_pose_coverage_frames(frame_ids: list, poses: dict,
     return sorted(chosen)
 
 
+def compute_fast_geometry_target(common_pool_size: int) -> int:
+    """Adaptive 1600~2000 representative frames for Fast Compare."""
+    target = max(FAST_GEOMETRY_MIN, round(common_pool_size * FAST_GEOMETRY_RATIO))
+    return int(min(FAST_GEOMETRY_MAX, target))
+
+
+def compute_common_frame_pool(frame_roles, valid_ids: set, poses_by_backend: dict,
+                               benchmark_split) -> list:
+    """Build common pool: non-benchmark FUSE ∩ valid pose in all backends."""
+    from auto_mobility.reconstruction.data.frame_selector import FrameRole
+    role_items = list(frame_roles.items()) if isinstance(frame_roles, dict) else []
+    fuse = {fid for fid, r in role_items if r == FrameRole.FUSE}
+    if len(fuse) < 20:
+        fuse = {fid for fid, r in role_items if r != FrameRole.REJECT}
+    # Non-benchmark = train ∪ tuning
+    bench = set(benchmark_split.benchmark_holdout_ids) if benchmark_split and hasattr(benchmark_split, "benchmark_holdout_ids") else set()
+    allowed = set(valid_ids) & fuse - bench
+    # Intersect valid poses across backends
+    common = allowed
+    for poses in poses_by_backend.values():
+        common = common & set(poses.keys())
+    return sorted(common)
+
+
+def select_texture_views_pose_coverage(frame_ids: list, poses: dict, target_views: int) -> list:
+    """Select texture views via pose-space coverage, preserving start/end/turns."""
+    if len(frame_ids) <= target_views:
+        return list(frame_ids)
+    return select_pose_coverage_frames(frame_ids, poses, target_count=target_views)
+
+
+def estimate_texture_eta_s(triangle_count: int, view_count: int,
+                           calibrated_cost: float = CALIBRATED_COST_PER_MILLION_TV) -> float:
+    """Estimate texture bake time from triangle*view pairs."""
+    from auto_mobility.reconstruction.appearance.texture_baker import estimate_texture_time_s
+    return estimate_texture_time_s(triangle_count, view_count,
+                                   calibrated_cost_per_million_tv=calibrated_cost)
+
+
+def _compute_delivery_checkpoint_identity(dataset_dir: Path, trajectories: dict,
+                                         delivery_ids: list, voxel_mm: float,
+                                         truncation: float = TRUNCATION_MULTIPLIER) -> dict:
+    """Compute provenance identity for final geometry checkpoint."""
+    try:
+        import hashlib
+        # dataset fingerprint
+        h = hashlib.sha256()
+        fp_path = Path(dataset_dir) / "frames.csv"
+        cam_path = Path(dataset_dir) / "camera_info.json"
+        if fp_path.is_file():
+            h.update(fp_path.read_bytes())
+        if cam_path.is_file():
+            h.update(cam_path.read_bytes())
+        align_path = Path(dataset_dir) / "rgbd_alignment_contract.json"
+        if align_path.is_file():
+            h.update(align_path.read_bytes())
+        dataset_fp = h.hexdigest()[:16]
+        # trajectory SHA (sorted by backend)
+        traj_shas = {}
+        for be, traj in sorted(trajectories.items()):
+            # hash of trajectory bytes if available, else positions
+            try:
+                # try to use trajectory file hash if trajectory has attribute
+                traj_shas[be] = hashlib.sha256(str(traj).encode()).hexdigest()[:16]
+            except Exception:
+                traj_shas[be] = be
+        # fusion frame IDs SHA
+        fusion_sha = hashlib.sha256(",".join(map(str, sorted(delivery_ids))).encode()).hexdigest()[:16] if delivery_ids else "empty"
+        # open3d version
+        try:
+            import open3d as o3d
+            o3d_ver = o3d.__version__
+        except Exception:
+            o3d_ver = "unknown"
+        return {
+            "dataset_fingerprint": dataset_fp,
+            "trajectory_shas": traj_shas,
+            "fusion_frame_ids_sha256": fusion_sha,
+            "voxel_mm": voxel_mm,
+            "truncation": truncation,
+            "open3d_version": o3d_ver,
+            "fusion_impl_version": "open3d_vbg_v2",
+        }
+    except Exception:
+        return {}
+
+
+def _check_final_geometry_checkpoint(checkpoint_path: Path, identity: dict) -> bool:
+    """Return True if checkpoint valid and matches identity."""
+    if not checkpoint_path.is_file():
+        return False
+    try:
+        data = json.loads(checkpoint_path.read_text())
+        saved_id = data.get("identity", {})
+        # Must match all fields
+        for k, v in identity.items():
+            if saved_id.get(k) != v:
+                return False
+        # Also check model_raw exists and is not empty
+        mesh_path = Path(data.get("mesh_path", ""))
+        if not mesh_path.is_file() or mesh_path.stat().st_size < 1024:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _write_final_geometry_checkpoint(checkpoint_path: Path, identity: dict, mesh_path: Path,
+                                     fusion_frame_ids: list, voxel_mm: float):
+    """Write FINAL_GEOMETRY_READY checkpoint."""
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "status": "FINAL_GEOMETRY_READY",
+        "identity": identity,
+        "mesh_path": str(mesh_path),
+        "fusion_frame_count": len(fusion_frame_ids),
+        "voxel_mm": voxel_mm,
+        "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    tmp = checkpoint_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, indent=2))
+    tmp.replace(checkpoint_path)
+
 
 def _metrics_from_geo_eval(geo_eval: dict) -> dict:
     """Map held-out geometry metrics onto hierarchical Metric objects."""
@@ -306,7 +442,11 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                  preview: bool = False,
                  quick: bool = False,
                  mode_policy=None,
-                 deliver_backends: list | None = None) -> dict:
+                 deliver_backends: list | None = None,
+                 fast_compare: bool = False,
+                 reuse_preview: bool = False,
+                 no_cache: bool = False,
+                 wall_budget_s: float | None = None) -> dict:
     import cv2
     import open3d as o3d
 
@@ -327,6 +467,8 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
 
     if mode_policy is not None:
         policy = mode_policy
+    elif fast_compare:
+        policy = policy_for_mode(ExecutionMode.FAST_COMPARE)
     elif preview:
         policy = policy_for_mode(ExecutionMode.PREVIEW)
     elif quick:
@@ -335,11 +477,18 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
         policy = policy_for_mode(ExecutionMode.STANDARD)
     is_preview = (policy.mode == ExecutionMode.PREVIEW)
     is_quick = (policy.mode == ExecutionMode.QUICK)
+    is_fast_compare = (policy.mode == ExecutionMode.FAST_COMPARE) or bool(fast_compare)
 
 
     t0 = time.time()
     out_dir.mkdir(parents=True, exist_ok=True)
     decisions = []
+    # Telemetry collector per feedback #25
+    from auto_mobility.reconstruction.runtime.telemetry import TelemetryCollector
+    telemetry = TelemetryCollector()
+    stage_timings: dict = {}
+    # Wall budget for tail reserve calculation
+    total_wall_budget_s = float(wall_budget_s) if wall_budget_s else float(policy.budget_minutes * 60.0)
 
     def decide(stage, what, why, **ev):
         decisions.append({"stage": stage, "decision": what,
@@ -362,6 +511,21 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             budget.spend(phase, spent_s)
         except Exception as exc:
             decide("budget_gate", "OVERSPEND_RECORDED", f"phase {phase}: {exc}")
+
+    def wall_remaining_s() -> float:
+        return max(0.0, total_wall_budget_s - (time.time() - t0))
+
+    def tail_reserve_gate(estimated_texture_s: float) -> bool:
+        """Ensure final tail reserve is not consumed before texture."""
+        remaining = wall_remaining_s()
+        need = BUDGET_TAIL_RESERVE_S + estimated_texture_s
+        if remaining < need:
+            decide("tail_reserve", "DEGRADE",
+                   f"remaining {remaining:.0f}s < tail {BUDGET_TAIL_RESERVE_S}s + eta {estimated_texture_s:.0f}s",
+                   wall_remaining_s=remaining, tail_reserve_s=BUDGET_TAIL_RESERVE_S,
+                   estimated_texture_s=estimated_texture_s)
+            return False
+        return True
 
     ds = FrameDataset(str(dataset_dir))
     alignment = ds.dataset_info.get("depth_color_alignment", "unknown")
@@ -507,6 +671,32 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
 
 
     bbox_holder = {"diag_m": 8.0}
+    shared_voxel_mm: float | None = None  # for fast-compare fairness
+
+    # Precompute shared voxel for fast-compare (P16): single decision for both backends
+    if is_fast_compare and benchmark_split is not None:
+        try:
+            # Combine all candidate trajectories' positions to estimate bbox
+            all_pts_list = []
+            for b in candidate_backends_for_common:
+                pmap = poses_by_backend_for_split.get(b, {})
+                for fid, T in pmap.items():
+                    all_pts_list.append(T[:3, 3])
+            if all_pts_list:
+                pts_arr = np.asarray(all_pts_list)
+                diag = float(np.linalg.norm(pts_arr.max(axis=0) - pts_arr.min(axis=0))) + 2.0
+                bbox_holder["diag_m"] = max(bbox_holder["diag_m"], diag)
+            from auto_mobility.reconstruction.fusion.open3d_vbg import max_fitting_voxel_mm
+            # Request 10mm; if not fits, both degrade to 12.5
+            sw = max_fitting_voxel_mm(bbox_holder["diag_m"], vram_budget_mb, min_voxel_mm=voxel_mm)
+            # Ensure fairness: if 10 fits -> both 10, else both 12.5 etc.
+            shared_voxel_mm = float(sw)
+            decide("shared_voxel", "LOCKED",
+                   f"fast-compare shared voxel {shared_voxel_mm:.1f}mm (diag {bbox_holder['diag_m']:.1f}m)",
+                   voxel_mm=shared_voxel_mm, diag_m=bbox_holder["diag_m"], vram_budget_mb=vram_budget_mb)
+        except Exception as exc:
+            decide("shared_voxel", "FALLBACK", f"shared voxel compute failed: {exc}")
+            shared_voxel_mm = None
 
     def fit_voxel_to_vram(diag_m: float, requested_voxel_mm: float):
         """Degrade the effective voxel just enough to keep fusion on GPU."""
@@ -829,15 +1019,20 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             decide("frame_roles", "RELAX_TO_NON_REJECT",
                    "too few FUSE frames; fusing all non-REJECT frames",
                    candidate=cand.backend)
-        # P1 #16: bound search frame count to 300~500 pose-space representative
-        # Standard search is not final product; final winner fuses ALL valid FUSE.
-        if len(search_ids) > 500:
-            # pose-space uniform stride (cheap proxy for spatial coverage)
-            stride = max(1, len(search_ids) // 400)
-            search_ids = sorted(search_ids[::stride])[:500]
-            decide("frame_roles", "BOUNDED_SEARCH_SUBSET",
-                   "train search limited to 300-500 representative frames; final will use ALL",
-                   n_search_bounded=len(search_ids), n_delivery=len(delivery_ids))
+        # P1 #16: bound search frame count; fast-compare uses 240~300, standard 300~500
+        if is_fast_compare:
+            if len(search_ids) > 300:
+                search_ids = select_pose_coverage_frames(search_ids, poses0, target_count=270)
+                decide("frame_roles", "BOUNDED_SEARCH_SUBSET_FAST",
+                       "fast-compare search limited to 240-300 representative frames",
+                       n_search_bounded=len(search_ids), n_delivery=len(delivery_ids))
+        else:
+            if len(search_ids) > 500:
+                stride = max(1, len(search_ids) // 400)
+                search_ids = sorted(search_ids[::stride])[:500]
+                decide("frame_roles", "BOUNDED_SEARCH_SUBSET",
+                       "train search limited to 300-500 representative frames; final will use ALL",
+                       n_search_bounded=len(search_ids), n_delivery=len(delivery_ids))
         # Benchmark holdout strictly for evaluation (never for fusion)
         val_frames = [id_to_frame[i] for i in sorted(set(benchmark_ids) & id_set) if i in poses0]
         # Ensure benchmark not in search/delivery
@@ -860,7 +1055,13 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             bbox_holder["diag_m"] = max(
                 bbox_holder["diag_m"],
                 float(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0))) + 2.0)
-        eff_voxel = fit_voxel_to_vram(bbox_holder["diag_m"], voxel_mm)
+        # Shared voxel for fast-compare fairness (P16)
+        if is_fast_compare and shared_voxel_mm is not None:
+            eff_voxel = float(shared_voxel_mm)
+            decide("effective_voxel", "SHARED",
+                   f"fast-compare shared voxel {eff_voxel:.1f}mm", backend=cand.backend)
+        else:
+            eff_voxel = fit_voxel_to_vram(bbox_holder["diag_m"], voxel_mm)
         # P0 #4: every job gets its own plan; coarse/search/fine/final are distinct identities
         # also respect safe_mode (fine disabled)
         if safe_mode and eff_voxel < voxel_mm * 1.1:
@@ -883,9 +1084,16 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 "coarse_plan": None,
             }
 
-        # coarse plan uses coarse subset & same voxel
+        # coarse plan uses coarse subset & same voxel; fast-compare 48~64
         t_g = time.time()
-        coarse_ids = search_ids[:: max(1, len(search_ids) // 80)] or search_ids
+        if is_fast_compare:
+            coarse_target = 56
+            if len(search_ids) > coarse_target:
+                coarse_ids = select_pose_coverage_frames(search_ids, poses, target_count=coarse_target)
+            else:
+                coarse_ids = list(search_ids)
+        else:
+            coarse_ids = search_ids[:: max(1, len(search_ids) // 80)] or search_ids
         coarse_plan = _plan_active_blocks_safe(coarse_ids, poses, eff_voxel,
                                               tag=f"c{idx}_coarse")
         search_plan = _plan_active_blocks_safe(search_ids, poses, eff_voxel,
@@ -923,13 +1131,16 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             geo_eval_benchmark["eval_mesh_provenance"] = "train_only_benchmark"
 
         eff_voxel_final = eff_voxel
-        # P0 #15/21: SAFE MODE and PREVIEW disable fine voxel entirely
+        # P0 #15/21: SAFE MODE and PREVIEW and FAST_COMPARE disable fine voxel entirely
         if safe_mode:
             decide("fusion_refinement", "SKIP_FINE_VOXEL_SAFE_MODE",
                    "safe_mode disables fine voxel rebuild", eff_voxel=eff_voxel)
         elif preview:
             decide("fusion_refinement", "SKIP_FINE_VOXEL_PREVIEW",
                    "preview mode disables fine voxel rebuild", eff_voxel=eff_voxel)
+        elif is_fast_compare:
+            decide("fusion_refinement", "SKIP_FINE_VOXEL_FAST_COMPARE",
+                   "fast-compare disables fine voxel rebuild", eff_voxel=eff_voxel)
         elif fused_search is not None and (
                 geo_eval.get("within_50mm_ratio", 0) > 0.35
                 and geo_eval.get("free_space_correctness_ratio", 0) > 0.75
@@ -950,10 +1161,11 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                                             masks or None, f"c{idx}_fine",
                                             active_plan=fine_plan)
                 # P1 #20: fine acceptance must be quality-based, not triangle count alone
-                # we evaluate fine candidate on same held-out set before accepting
+                # we evaluate fine candidate on SAME TUNING set before accepting (not benchmark)
                 if refined_try is not None and refined_try.ok:
                     try:
-                        fine_geo = evaluate_geometry(refined_try.mesh_obj, val_frames,
+                        # Benchmark leakage fix: use tuning_frames, not val_frames (benchmark)
+                        fine_geo = evaluate_geometry(refined_try.mesh_obj, tuning_frames,
                                                      poses, cam_intr, depth)
                         fine_better = (
                             fine_geo.get("depth_mae_mm", 1e9) < geo_eval.get("depth_mae_mm", 1e9)
@@ -1001,7 +1213,17 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
         o3d_ok = True
         poses = info["poses"]
         delivery_ids = list(info["delivery_ids"])
-        if preview and len(delivery_ids) > 800:
+
+        # Fast-compare adaptive geometry frame cap (P1)
+        if is_fast_compare and len(delivery_ids) > FAST_GEOMETRY_MAX:
+            target = compute_fast_geometry_target(len(delivery_ids))
+            orig_len = len(delivery_ids)
+            # Use pose-space coverage to select representative subset
+            delivery_ids = select_pose_coverage_frames(delivery_ids, poses, target_count=target)
+            decide("delivery", "FAST_GEOMETRY_REPRESENTATIVE",
+                   f"fast-compare sampled {len(delivery_ids)} from {orig_len} via pose coverage (target {target})",
+                   target=target, original=orig_len, fast_compare=True)
+        elif preview and len(delivery_ids) > 800:
             step = len(delivery_ids) / 800.0
             orig_len = len(delivery_ids)
             delivery_ids = [delivery_ids[int(i * step)] for i in range(800)]
@@ -1009,12 +1231,94 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                    f"sampled 800 representative frames from {orig_len} across corridor for visual preview",
                    target=800, total_valid=orig_len)
 
+        # --- P0-7 Final geometry checkpoint / resume (persistent) ---
+        # Use persistent cache outside staging so next run can resume even after atomic publish
+        _ckpt_dir = Path.cwd() / "cache" / "checkpoints" / dataset_dir.name
+        # also mirror to out_dir parent for diagnostics
+        _ckpt_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_path = _ckpt_dir / f"{info['name']}_final_geometry.json"
+        # fallback: also check old out_dir location for backward compat
+        _legacy_ckpt = out_dir / "checkpoints" / f"{info['name']}_final_geometry.json"
+        if not checkpoint_path.is_file() and _legacy_ckpt.is_file():
+            checkpoint_path = _legacy_ckpt
+        checkpoint_identity = _compute_delivery_checkpoint_identity(
+            dataset_dir, {info["name"]: trajectories[info["name"]]},
+            delivery_ids, info["eff_voxel"])
+        use_checkpoint = False
+        final = None
+        if not no_cache and _check_final_geometry_checkpoint(checkpoint_path, checkpoint_identity):
+            try:
+                data = json.loads(checkpoint_path.read_text())
+                mesh_path = Path(data["mesh_path"])
+                import open3d as _o3d_ckpt
+                mesh = _o3d_ckpt.io.read_triangle_mesh(str(mesh_path))
+                if mesh is not None and len(mesh.triangles) > 0:
+                    from auto_mobility.reconstruction.fusion.open3d_vbg import FusionOutput as _FO
+                    final = _FO()
+                    final.mesh_obj = mesh
+                    final.mesh_vertices = len(mesh.vertices)
+                    final.mesh_triangles = len(mesh.triangles)
+                    final.device = "checkpoint"
+                    use_checkpoint = True
+                    decide("final_geometry_checkpoint", "HIT",
+                           f"reused checkpoint for {info['name']}, skipping TSDF",
+                           backend=info["name"], triangles=len(mesh.triangles))
+                else:
+                    decide("final_geometry_checkpoint", "MISS",
+                           "checkpoint mesh empty, will re-fuse", backend=info["name"])
+            except Exception as exc:
+                decide("final_geometry_checkpoint", "MISS",
+                       f"checkpoint load failed: {exc}", backend=info["name"])
+        else:
+            if no_cache:
+                decide("final_geometry_checkpoint", "BYPASS",
+                       "--no-cache bypassed checkpoint", backend=info["name"])
+            elif not _check_final_geometry_checkpoint(checkpoint_path, checkpoint_identity):
+                decide("final_geometry_checkpoint", "MISS",
+                       "no valid checkpoint, will fuse", backend=info["name"])
+
         # P0 #4 / #22: final must have its own plan over delivery_ids + effective voxel
-        final_plan = _plan_active_blocks_safe(delivery_ids, poses, info["eff_voxel"],
-                                              tag=f"{tag}_final")
-        final = submit_fusion(delivery_ids, poses, info["eff_voxel"] / 1000.0,
-                              info["masks"] or None, f"{tag}_final",
-                              active_plan=final_plan)
+        if final is None:
+            # Skip global planner for chunked (>900) to avoid duplicate depth decode (P1)
+            if len(delivery_ids) > 900 and is_fast_compare:
+                # Use chunk-local planning: still need a lightweight estimate but avoid full scan duplication
+                # submit_fusion will do per-chunk sizing; we pass no active_plan to avoid full scan
+                final_plan = None
+                decide("active_block_plan", "SKIPPED_GLOBAL_FOR_CHUNKED",
+                       "chunked final avoids global full-depth planner duplication",
+                       tag=f"{tag}_final", frames=len(delivery_ids))
+            else:
+                final_plan = _plan_active_blocks_safe(delivery_ids, poses, info["eff_voxel"],
+                                                      tag=f"{tag}_final")
+            final = submit_fusion(delivery_ids, poses, info["eff_voxel"] / 1000.0,
+                                  info["masks"] or None, f"{tag}_final",
+                                  active_plan=final_plan)
+            # Write checkpoint after successful fusion (persistent)
+            if final is not None and final.mesh_obj is not None and len(final.mesh_obj.triangles) > 0:
+                try:
+                    import open3d as _o3d_ckpt2
+                    ckpt_mesh_path = _ckpt_dir / f"{info['name']}_model_raw.ply"
+                    ckpt_mesh_path.parent.mkdir(parents=True, exist_ok=True)
+                    # Save as PLY for checkpoint reuse
+                    _o3d_ckpt2.io.write_triangle_mesh(str(ckpt_mesh_path), final.mesh_obj)
+                    _write_final_geometry_checkpoint(checkpoint_path, checkpoint_identity,
+                                                     ckpt_mesh_path, delivery_ids, info["eff_voxel"])
+                    # also mirror to out_dir for diagnostics
+                    try:
+                        _mirror = out_dir / "checkpoints" / f"{info['name']}_model_raw.ply"
+                        _mirror.parent.mkdir(parents=True, exist_ok=True)
+                        import shutil as _sh2
+                        _sh2.copy(str(ckpt_mesh_path), str(_mirror))
+                        _sh2.copy(str(checkpoint_path), str(out_dir / "checkpoints" / f"{info['name']}_final_geometry.json"))
+                    except Exception:
+                        pass
+                    decide("final_geometry_checkpoint", "WRITTEN",
+                           f"checkpoint written for {info['name']}", triangles=len(final.mesh_obj.triangles))
+                except Exception as exc:
+                    decide("final_geometry_checkpoint", "WRITE_FAILED", str(exc))
+        else:
+            # Loaded from checkpoint, still need to ensure model_raw.obj exists for downstream
+            pass
         if final is None:
             return {"ok": False, "tag": tag, "name": info["name"],
                     "reason": "final fusion failed",
@@ -1126,39 +1430,188 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             decide("surface", "POISSON_SKIPPED", reason, tag=tag)
 
         bake_info, appear = None, {"status": "NOT_APPLICABLE"}
-        if use_texture and len(final.mesh_obj.triangles) > 0 \
-                and budget_gate("optional_improvement", 60.0):
-            # Bounded candidate views: score matrices are O(T x V); an
-            # unbounded V explodes host RAM on long captures (#54/#55).
-            MAX_VIEWS = 32 if preview else 80
-            n_views = min(MAX_VIEWS, max(1, len(delivery_ids)))
-            stride_v = max(1, len(delivery_ids) // n_views)
-            views, poses_wc = [], {}
-            for fid in delivery_ids[::stride_v][:MAX_VIEWS]:
-                img = rgb(fid)
-                if img is None:
-                    continue
-                views.append((fid, normalize_exposure(img)))
-                poses_wc[fid] = poses[fid]
-            if views:
-                # P0 #29: occlusion-aware texture for final rank01 when scene available
-                # we build RaycastingScene from delivered mesh to enable occlusion test
-                bake_scene = None
-                try:
-                    bake_scene = build_scene(final.mesh_obj)
-                except Exception:
+        bake_timings = None
+        if use_texture and len(final.mesh_obj.triangles) > 0:
+            # Adaptive texture policy: fast_compare uses 48→40→32 with ETA + tail reserve
+            if is_fast_compare:
+                candidates = [TEXTURE_VIEW_PREFERRED, *TEXTURE_VIEW_FALLBACKS]
+            elif preview:
+                candidates = [32]
+            else:
+                candidates = [80]
+
+            # Determine initial view target (preferred)
+            initial_target = candidates[0]
+            # For ETA, use current triangle count
+            cur_tris = len(final.mesh_obj.triangles)
+            estimated = estimate_texture_eta_s(cur_tris, initial_target)
+            # Check budget gate with adaptive ETA (P0-5) instead of fixed 60s
+            if not tail_reserve_gate(estimated):
+                # Degrade view count before gating
+                for fallback in candidates[1:]:
+                    est_fallback = estimate_texture_eta_s(cur_tris, fallback)
+                    if tail_reserve_gate(est_fallback):
+                        initial_target = fallback
+                        estimated = est_fallback
+                        decide("texture_eta", "DEGRADE_VIEW",
+                               f"degraded texture views to {fallback} due to tail reserve",
+                               original_views=candidates[0], degraded_views=fallback,
+                               triangles=cur_tris, estimated_s=estimated,
+                               wall_remaining_s=wall_remaining_s())
+                        break
+                else:
+                    # Even smallest fallback doesn't fit tail; need stronger simplification or skip
+                    decide("texture_eta", "TAIL_RESERVE_BLOCK",
+                           f"texture ETA {estimated:.0f}s exceeds tail reserve {BUDGET_TAIL_RESERVE_S}s, will attempt simplification",
+                           triangles=cur_tris, views=initial_target, estimated_s=estimated)
+
+            # Also apply mesh simplification guard: if ETA still large, increase simplification
+            simplification_target = TEXTURE_SIMPLIFICATION_TARGET
+            simplification_max = TEXTURE_SIMPLIFICATION_MAX
+            if is_fast_compare and cur_tris > simplification_target:
+                # Adaptive simplification: 750k~1M, if ETA > 300s, target lower
+                if estimated > 400:
+                    simplification_target = 500_000
+                    simplification_max = 750_000
+                elif estimated > 200:
+                    simplification_target = 650_000
+                    simplification_max = 900_000
+                decide("texture_simplification", "ADAPTIVE_TARGET",
+                       f"texture mesh simplification target {simplification_target}",
+                       original_triangles=cur_tris, estimated_s=estimated)
+                # Recompute ETA on simplified mesh size (more realistic)
+                est_simplified = estimate_texture_eta_s(simplification_target, initial_target)
+                if est_simplified < estimated:
+                    decide("texture_eta", "ESTIMATE_ON_SIMPLIFIED",
+                           f"ETA {estimated:.0f}s on raw {cur_tris} -> {est_simplified:.0f}s on simplified {simplification_target}",
+                           original_eta=estimated, simplified_eta=est_simplified)
+                    estimated = est_simplified
+
+            # Now check budget gate with final estimated (may have degraded views)
+            # Fast-compare: texture is mandatory, bypass optional_improvement budget (only tail reserve matters)
+            if not is_fast_compare and not budget_gate("optional_improvement", estimated):
+                decide("budget_gate", "SKIP_TEXTURE_ETA",
+                       f"texture ETA {estimated:.0f}s exceeds optional_improvement budget",
+                       estimated_s=estimated, views=initial_target)
+                # Still allow baking with further degraded views if possible
+                for fallback in candidates[1:]:
+                    if fallback >= initial_target:
+                        continue
+                    est2 = estimate_texture_eta_s(
+                        simplification_target if is_fast_compare and cur_tris > simplification_target else cur_tris,
+                        fallback)
+                    if budget_gate("optional_improvement", est2):
+                        initial_target = fallback
+                        estimated = est2
+                        decide("texture_eta", "DEGRADE_VIEW_BUDGET",
+                               f"degraded to {fallback} for budget", estimated_s=est2)
+                        break
+                else:
+                    # skip texture entirely if no budget
+                    initial_target = 0
+            elif is_fast_compare:
+                # For fast-compare, ensure texture proceeds even if optional budget exceeded; just log
+                if not budget.can_afford("optional_improvement", estimated):
+                    decide("budget_gate", "OVERRIDE_FOR_FAST_COMPARE",
+                           f"fast-compare overrides budget: ETA {estimated:.0f}s > budget {budget.phase_remaining('optional_improvement'):.0f}s but proceeding (tail reserve already checked)",
+                           estimated_s=estimated)
+
+            t_texture0 = time.time()
+            if initial_target > 0:
+                # Pose-space coverage view selection, share IDs across backends via common pool sorting
+                n_views_actual = min(initial_target, len(delivery_ids))
+                # Ensure start/end preserved via select_pose_coverage_frames
+                selected_fids = select_texture_views_pose_coverage(
+                    delivery_ids, poses, target_views=n_views_actual)
+                # Ensure benchmark not leaked
+                bench_ids_set = set(getattr(info.get("split"), "benchmark_holdout_ids", []) or [])
+                selected_fids = [fid for fid in selected_fids if fid not in bench_ids_set]
+                # If filtering reduced below target, fill from remaining (already sorted)
+                if len(selected_fids) < n_views_actual:
+                    remaining = [fid for fid in delivery_ids if fid not in selected_fids and fid not in bench_ids_set]
+                    selected_fids += remaining[:n_views_actual - len(selected_fids)]
+                assert bench_ids_set.isdisjoint(set(selected_fids)), "benchmark leaked into texture views"
+                views, poses_wc = [], {}
+                for fid in selected_fids:
+                    img = rgb(fid)
+                    if img is None:
+                        continue
+                    views.append((fid, normalize_exposure(img)))
+                    poses_wc[fid] = poses[fid]
+                # Re-estimate with actual views after filtering
+                actual_views = len(views)
+                # Final tail reserve re-check with actual
+                final_est = estimate_texture_eta_s(cur_tris, actual_views)
+                if not tail_reserve_gate(final_est) and actual_views > 32:
+                    # Further degrade if still over tail
+                    for fb in TEXTURE_VIEW_FALLBACKS:
+                        if fb < actual_views:
+                            est3 = estimate_texture_eta_s(cur_tris, fb)
+                            if tail_reserve_gate(est3):
+                                # re-select fewer views
+                                selected_fids2 = select_texture_views_pose_coverage(
+                                    delivery_ids, poses, target_views=fb)
+                                selected_fids2 = [fid for fid in selected_fids2 if fid not in bench_ids_set]
+                                views2, poses_wc2 = [], {}
+                                for fid in selected_fids2:
+                                    img2 = rgb(fid)
+                                    if img2 is None:
+                                        continue
+                                    views2.append((fid, normalize_exposure(img2)))
+                                    poses_wc2[fid] = poses[fid]
+                                if views2:
+                                    views, poses_wc = views2, poses_wc2
+                                    actual_views = len(views)
+                                    decide("texture_eta", "DEGRADE_VIEW_TAIL_FINAL",
+                                           f"final degrade to {actual_views} views for tail reserve",
+                                           estimated_s=est3)
+                                break
+                if views:
                     bake_scene = None
-                bake = bake_atlas(np.asarray(final.mesh_obj.vertices),
-                                  np.asarray(final.mesh_obj.triangles),
-                                  views, K, poses_wc, scene=bake_scene,
-                                  out_dir=rank_dir, name="model")
-                bake_info = bake.to_dict()
-                atlas_img = cv2.imread(str(bake.atlas_paths[0]))
-                appear = atlas_metrics(atlas_bgr=atlas_img,
-                                       untextured_faces=bake.untextured_faces,
-                                       total_faces=len(final.mesh_obj.triangles),
-                                       textured_faces=bake.textured_faces,
-                                       appearance_mode=bake.appearance_mode)
+                    try:
+                        bake_scene = build_scene(final.mesh_obj)
+                    except Exception:
+                        bake_scene = None
+                    # Decide simplification: enable for fast_compare or large meshes
+                    do_simplify = is_fast_compare or (cur_tris > simplification_target)
+                    bake = bake_atlas(np.asarray(final.mesh_obj.vertices),
+                                      np.asarray(final.mesh_obj.triangles),
+                                      views, K, poses_wc, scene=bake_scene,
+                                      out_dir=rank_dir, name="model",
+                                      enable_simplification=do_simplify,
+                                      simplification_target=simplification_target,
+                                      simplification_max=simplification_max)
+                    bake_info = bake.to_dict()
+                    bake_timings = bake.timings.to_dict() if bake.timings else {}
+                    # Record candidate_triangle_view_pairs as per feedback
+                    decide("texture_bake", "COMPLETED",
+                           f"baked {len(views)} views onto {cur_tris} tris",
+                           **bake_timings)
+                    atlas_img = cv2.imread(str(bake.atlas_paths[0]))
+                    # Use texture mesh triangles for appearance metrics if simplified
+                    total_for_appear = bake_timings.get("texture_mesh_triangles", len(final.mesh_obj.triangles)) if bake_timings else len(final.mesh_obj.triangles)
+                    appear = atlas_metrics(atlas_bgr=atlas_img,
+                                           untextured_faces=bake.untextured_faces,
+                                           total_faces=total_for_appear,
+                                           textured_faces=bake.textured_faces,
+                                           appearance_mode=bake.appearance_mode)
+                    # Telemetry for stage
+                    stage_timings[f"texture_{info['name']}"] = {
+                        "texture_total_s": bake_timings.get("texture_total_s", 0),
+                        "views": actual_views,
+                        "triangles": cur_tris,
+                        "pairs": bake_timings.get("candidate_triangle_view_pairs", 0),
+                        "simplified": bake_timings.get("texture_mesh_triangles", cur_tris) != cur_tris,
+                    }
+                    # If simplification was applied, guard quality (MAE/coverage) via optional check
+                    if bake_timings.get("texture_mesh_triangles", cur_tris) != cur_tris and "delivery_ids" in info:
+                        decide("texture_simplification", "APPLIED",
+                               f"simplified {cur_tris} -> {bake_timings.get('texture_mesh_triangles')}",
+                               simplification_s=bake_timings.get("mesh_simplification_s"))
+            budget_record("optional_improvement", time.time() - t_texture0)
+            # Ensure at least appear dict reflects bake
+        else:
+            decide("texture_bake", "SKIPPED", "no texture needed or budget", tag=tag)
         # --- Benchmark evaluation of the DELIVERY mesh (must be real, not proxy) ---
         # Use locked benchmark_holdout_ids filtered to this backend's valid poses
         benchmark_ids_for_eval = []
@@ -1185,13 +1638,20 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 delivery_geo_eval["n_benchmark_frames"] = len(benchmark_frames_for_eval)
             except Exception as exc:
                 delivery_geo_eval = {"status": "EVALUATION_FAILED", "reason": str(exc)}
+        # Benchmark pool vs actual eval views distinction (#2)
+        bench_pool_size = len(bench_split.benchmark_holdout_ids) if bench_split and hasattr(bench_split, "benchmark_holdout_ids") else 0
+        # n_eval_views already in delivery_geo_eval if ok
         # NOT_EVALUATED handling: if 0 frames or missing mesh hash, block promotion
         if delivery_geo_eval.get("status") != "ok":
             delivery_geo_eval["quality"] = {"status": "FAIL", "reasons": ["not_evaluated"]}
+            delivery_geo_eval["benchmark_pool_frames"] = bench_pool_size
+            delivery_geo_eval["benchmark_eval_views"] = 0
         else:
             # Assess quality via geometry_eval.assess_geometry_quality (thresholds)
             from auto_mobility.reconstruction.evaluation.geometry_eval import assess_geometry_quality
             delivery_geo_eval["quality"] = assess_geometry_quality(delivery_geo_eval)
+            delivery_geo_eval["benchmark_pool_frames"] = bench_pool_size
+            delivery_geo_eval["benchmark_eval_views"] = int(delivery_geo_eval.get("n_eval_views", 12))
 
         # Compute SHAs for provenance
         import hashlib as _h3
@@ -1213,9 +1673,9 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             json.dumps(tc.to_dict(), indent=2))
         # Compute final artifact SHAs after contract (OBJ/MTL hashes)
         mesh_sha = tc.obj_hash or "no_obj"
-        # Update config with full provenance
+        # Update config with full provenance + telemetry fields
         (rank_dir / "config.json").write_text(json.dumps({
-            "artifact_mode": "preview" if preview else "final",
+            "artifact_mode": "preview" if preview else "fast_compare" if is_fast_compare else "final",
             "production_final": not preview,
             "winner_backend": info["name"],
             "voxel_mm_requested": info["eff_voxel"],
@@ -1228,14 +1688,18 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             "n_tuning_frames": len(info.get("tuning_frames", [])),
             "benchmark_holdout_ids": benchmark_ids_for_eval,
             "benchmark_holdout_sha256": bench_split.benchmark_holdout_ids_sha256 if bench_split and hasattr(bench_split, 'benchmark_holdout_ids_sha256') else None,
+            "benchmark_pool_frames": bench_pool_size,
+            "benchmark_eval_views": delivery_geo_eval.get("benchmark_eval_views", 0),
             "fusion_frame_ids_sha256": fusion_frame_hash,
             "evaluation_frame_ids_sha256": eval_frame_hash,
             "evaluation_mesh_sha256": mesh_sha,
             "fusion_frames_sha256": fusion_frame_hash,
-            "artifact_origin": "freshly_fused",
+            "artifact_origin": "freshly_fused" if not use_checkpoint else "freshly_fused_checkpoint" if final and getattr(final, "device", "") == "checkpoint" else "freshly_fused",
             "fusion_worker_tag": f"{tag}_final",
             "backend": info["name"],
             "voxel_mm_effective_tag": info["eff_voxel"],
+            "shared_voxel": is_fast_compare and shared_voxel_mm is not None,
+            "texture_timings": bake_timings if 'bake_timings' in locals() else None,
             "refinement": {k: v for k, v in info["refinement"].items()
                            if k != "pose_by_frame"},
             "benchmark_split": bench_split.to_dict() if bench_split and hasattr(bench_split, 'to_dict') else None,
@@ -1588,7 +2052,6 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             recommended_backend = accepted_keys[0]
             recommendation_reason = f"Single viable backend: {recommended_backend}"
 
-        import hashlib
         run_id = f"run_{time.strftime('%Y%m%d_%H%M%SZ', time.gmtime())}_{hashlib.sha256(str(t0).encode()).hexdigest()[:8]}"
 
         # Write comparison.json (§18)
@@ -1831,6 +2294,32 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                    f"benchmark holdout {len(common_holdout)} frames for fair comparison (locked)",
                    benchmark_holdout=len(common_holdout), benchmark_sha=benchmark_split.benchmark_holdout_ids_sha256)
 
+        # Fast-compare: enforce common frame set + shared voxel for fairness (P1)
+        if is_fast_compare:
+            valid_ids_set = set(id_to_frame.keys())
+            poses_by_backend = {b: by_name[b].get("poses", {}) for b in requested if b in by_name}
+            common_pool = compute_common_frame_pool(roles, valid_ids_set, poses_by_backend, benchmark_split)
+            target = compute_fast_geometry_target(len(common_pool))
+            # Use first backend's poses as reference for pose-space sampling
+            ref_be = requested[0] if requested and requested[0] in poses_by_backend else (list(poses_by_backend.keys())[0] if poses_by_backend else None)
+            ref_poses = poses_by_backend.get(ref_be, {}) if ref_be else {}
+            shared_delivery_ids = select_pose_coverage_frames(common_pool, ref_poses, target_count=min(target, len(common_pool))) if common_pool else []
+            # Ensure benchmark not in shared delivery
+            bench_set = set(benchmark_split.benchmark_holdout_ids)
+            shared_delivery_ids = [fid for fid in shared_delivery_ids if fid not in bench_set]
+            assert bench_set.isdisjoint(set(shared_delivery_ids)), "benchmark leaked into fast shared delivery"
+            shared_sha = hashlib.sha256(",".join(map(str, sorted(shared_delivery_ids))).encode()).hexdigest()[:16] if shared_delivery_ids else "empty"
+            for b in requested:
+                if b in by_name:
+                    by_name[b]["delivery_ids"] = list(shared_delivery_ids)
+                    if shared_voxel_mm is not None:
+                        by_name[b]["eff_voxel"] = float(shared_voxel_mm)
+            decide("fast_compare_common_pool", "LOCKED",
+                   f"common pool {len(common_pool)} -> shared delivery {len(shared_delivery_ids)} frames, voxel {shared_voxel_mm}",
+                   common_pool=len(common_pool), shared_delivery=len(shared_delivery_ids),
+                   shared_sha=shared_sha, shared_voxel_mm=shared_voxel_mm,
+                   benchmark_pool=len(bench_set))
+
         # Detect SUSPECT_ARTIFACT_REUSE placeholder: will check after delivery if OBJ hashes identical with different frame identities
         final_candidates = {}
         any_ok = False
@@ -1916,6 +2405,39 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                     "textured_face_coverage": tex.get("textured_face_coverage"),
                     "quality": geo.get("quality"),
                 }
+            # Enrich comparison with fast-compare required fields per spec #24
+            for b in requested:
+                c = final_candidates.get(b, {})
+                geo = c.get("geometry_eval", {})
+                # Try to load texture timings from config
+                cfg_path = out_dir / f"final_candidates/{b}/config.json"
+                tex_timing = {}
+                mesh_tri = c.get("fusion", {}).get("mesh_triangles", 0) if isinstance(c.get("fusion"), dict) else 0
+                tex_tri = mesh_tri
+                texture_views = 0
+                try:
+                    if cfg_path.is_file():
+                        cfgj = json.loads(cfg_path.read_text())
+                        tt = cfgj.get("texture_timings")
+                        if tt:
+                            tex_timing = tt
+                            tex_tri = tt.get("texture_mesh_triangles", mesh_tri)
+                            texture_views = tt.get("texture_views_actual", 0)
+                except Exception:
+                    pass
+                comparison[b].update({
+                    "fusion_frame_count": c.get("n_delivery_frames"),
+                    "fusion_frame_sha": c.get("fusion_frame_ids_sha256"),
+                    "shared_voxel": shared_voxel_mm if is_fast_compare else c.get("voxel_mm_effective"),
+                    "mesh_raw_triangles": mesh_tri,
+                    "texture_mesh_triangles": tex_tri,
+                    "mesh_vertices": c.get("fusion", {}).get("mesh_vertices", 0) if isinstance(c.get("fusion"), dict) else 0,
+                    "texture_views": texture_views,
+                    "benchmark_pool_frames": bench_pool_size if 'bench_pool_size' in locals() else len(benchmark_split.benchmark_holdout_ids),
+                    "benchmark_eval_views": geo.get("benchmark_eval_views", geo.get("n_eval_views", 0)),
+                    "fusion_wall_s": c.get("wall_s") if isinstance(c.get("wall_s"), (int,float)) else None,
+                    "preview_delta": None,  # filled below if preview exists
+                })
             (out_dir / "standard_comparison.json").write_text(json.dumps({
                 "requested_backends": requested,
                 "benchmark_holdout_ids": list(benchmark_split.benchmark_holdout_ids),
@@ -1923,6 +2445,8 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 "evaluation_frame_ids_sha256": benchmark_split.benchmark_holdout_ids_sha256,
                 "common_holdout_size": len(common_holdout),
                 "is_comparable": is_comparable,
+                "is_fast_compare": bool(is_fast_compare),
+                "shared_voxel_mm": shared_voxel_mm if is_fast_compare else None,
                 "backends": comparison,
                 "benchmark_split": benchmark_split.to_dict(),
                 "wall_s": round(time.time()-t0,1),
@@ -1951,14 +2475,17 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
         result["benchmark_split"] = benchmark_split.to_dict()
         # Overall ok: require all requested backends to pass mandatory gates (geometry+appearance) and be EVALUATED
         all_ok = all(final_candidates.get(b, {}).get("ok") and final_candidates.get(b, {}).get("evaluation_status")=="EVALUATED" for b in requested)
-        # Also require texture and geometry quality PASS
+        # Also require texture PASS; geometry PASS is required for standard but not for fast-compare (still comparable)
         for b in requested:
             c = final_candidates.get(b, {})
             if c.get("ok"):
-                geo_q = c.get("geometry_eval", {}).get("quality", {})
                 tex_gate = c.get("texture_contract", {}).get("gate_status")
-                if geo_q.get("status") != "PASS" or tex_gate != "PASS":
+                if tex_gate != "PASS":
                     all_ok = False
+                if not is_fast_compare:
+                    geo_q = c.get("geometry_eval", {}).get("quality", {})
+                    if geo_q.get("status") != "PASS":
+                        all_ok = False
         result["ok"] = bool(all_ok and any_ok and is_comparable)
         if not result["ok"]:
             # Determine reason: NOT_EVALUATED blocks comparison
@@ -1981,6 +2508,33 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 if not is_comparable:
                     result["winner_reason"] = "NON_COMPARABLE"
         result["wall_s"] = round(time.time() - t0, 1)
+        # Telemetry + stage timings (#25)
+        try:
+            # Add stage_timings extra to telemetry
+            for k, v in stage_timings.items():
+                telemetry.records[k] = telemetry.records.get(k, __import__("auto_mobility.reconstruction.runtime.telemetry", fromlist=["StageRecord"]).StageRecord(stage=k))
+                # Update extra
+            telemetry.save(out_dir / "telemetry.json")
+            result["telemetry"] = {k: v.to_dict() for k, v in telemetry.records.items()}
+            # Also write fast_compare aliases if needed
+            if is_fast_compare:
+                # Fast-compare also writes standard_fast_comparison/report aliases
+                try:
+                    import shutil as _sh
+                    src_cmp = out_dir / "standard_comparison.json"
+                    dst_cmp = out_dir / "standard_fast_comparison.json"
+                    if src_cmp.is_file():
+                        _sh.copy(src_cmp, dst_cmp)
+                    src_rep = out_dir / "standard_report.md"
+                    dst_rep = out_dir / "standard_fast_report.md"
+                    if src_rep.is_file():
+                        _sh.copy(src_rep, dst_rep)
+                    # Also enrich comparison with fast specifics: ensure pool vs eval views recorded
+                    # Already includes benchmark_pool_frames via benchmark_split; add explicit fields if missing
+                except Exception as e:
+                    decide("fast_compare_alias", "FAILED", str(e))
+        except Exception as exc:
+            decide("telemetry", "SAVE_FAILED", str(exc))
         _write_report(out_dir, result, preview=False)
         return result
 
@@ -2024,6 +2578,24 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             "ranking_order": ordered_names,
         })
     result["wall_s"] = round(time.time() - t0, 1)
+    try:
+        telemetry.save(out_dir / "telemetry.json")
+        result["telemetry"] = {k: v.to_dict() for k, v in telemetry.records.items()}
+        if is_fast_compare:
+            try:
+                import shutil as _sh
+                src_cmp = out_dir / "standard_comparison.json"
+                dst_cmp = out_dir / "standard_fast_comparison.json"
+                if src_cmp.is_file():
+                    _sh.copy(src_cmp, dst_cmp)
+                src_rep = out_dir / "standard_report.md"
+                dst_rep = out_dir / "standard_fast_report.md"
+                if src_rep.is_file():
+                    _sh.copy(src_rep, dst_rep)
+            except Exception as e:
+                decide("fast_compare_alias", "FAILED", str(e))
+    except Exception as exc:
+        decide("telemetry", "SAVE_FAILED", str(exc))
     _write_report(out_dir, result, preview=False)
     return result
 

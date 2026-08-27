@@ -53,6 +53,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="force regeneration of ALL caches including trajectory, fusion, and frame "
                         "caches (does not just affect frame extraction)")
     p.add_argument("--no-resume", action="store_true", help="compat: accepted")
+    p.add_argument("--fast-compare", action="store_true",
+                   help="Standard dual-backend fast comparison (adaptive 1600~2000 frames, 48/40/32 texture views, no fine/poisson, tail reserve, checkpoint)")
+    p.add_argument("--reuse-preview", action="store_true",
+                   help="Reuse preview provenance if it matches current dataset/trajectory (frame roles, benchmark split, pose association)")
     return p
 
 
@@ -71,10 +75,19 @@ def resolve_execution_mode(args: argparse.Namespace):
         flags.append("full")
     if getattr(args, "standard", False):
         flags.append("standard")
+    # fast-compare is a variant of standard, not a separate standalone flag for this check
+    if getattr(args, "fast_compare", False):
+        # fast-compare requires standard; treat as standard variant
+        if "standard" not in flags and not any(f in flags for f in ("quick","preview","full")):
+            flags.append("standard")
+        # if standard already present, keep single; else we already added
 
     unique_flags = list(set(flags))
+    # Allow standard + fast_compare together (fast_compare is sub-mode)
+    # So filter out duplicate handling: if fast_compare and standard both present, keep standard
     if len(unique_flags) > 1:
         # If standard was passed alongside another explicit mode, reject ambiguous combinations
+        # But allow standard+fast_compare (already deduped to single standard)
         raise ValueError(
             f"Cannot combine multiple execution modes ({', '.join(sorted(unique_flags))}). "
             "Please choose exactly one of --quick, --preview, --standard, or --full."
@@ -680,6 +693,13 @@ def run(args: argparse.Namespace) -> int:
                     manifest["standard_result"] = {"ok": False, "reason": msg, "cache_status": cache_status}
                     scheduler.shutdown()
                     (out_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
+                    # For explicit output, also make manifest visible at final for test diagnosability (without updating latest)
+                    if is_explicit and out_dir != final_dir:
+                        try:
+                            final_dir.mkdir(parents=True, exist_ok=True)
+                            (final_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
+                        except Exception:
+                            pass
                     return 1
                 else:
                     print(f"[P0-1] WARNING: dual delivery missing backends {missing} but --allow-single-backend permits single")
@@ -700,6 +720,12 @@ def run(args: argparse.Namespace) -> int:
                     manifest["standard_result"] = {"ok": False, "reason": msg}
                     scheduler.shutdown()
                     (out_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
+                    if is_explicit and out_dir != final_dir:
+                        try:
+                            final_dir.mkdir(parents=True, exist_ok=True)
+                            (final_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
+                        except Exception:
+                            pass
                     return 1
                 elif int(budgets.vram_budget_mb) == 0:
                     msg = (f"PRECONDITION_FAILED: vram_budget_mb=0 does not satisfy CUDA fusion. "
@@ -709,7 +735,55 @@ def run(args: argparse.Namespace) -> int:
                     manifest["standard_result"] = {"ok": False, "reason": msg}
                     scheduler.shutdown()
                     (out_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
+                    if is_explicit and out_dir != final_dir:
+                        try:
+                            final_dir.mkdir(parents=True, exist_ok=True)
+                            (final_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
+                        except Exception:
+                            pass
                     return 1
+
+            # Handle fast-compare mode: override policy if flag set
+            fast_compare = bool(getattr(args, "fast_compare", False))
+            reuse_preview_flag = bool(getattr(args, "reuse_preview", False))
+            if fast_compare:
+                from auto_mobility.reconstruction.config import policy_for_mode, ExecutionMode
+                policy = policy_for_mode(ExecutionMode.FAST_COMPARE)
+                # Fast compare requires dual backends
+                if not deliver_backends:
+                    deliver_backends = ["rtab", "cuvslam"]
+            # Preview reuse check (before pipeline, if flag set)
+            preview_reuse_status = None
+            if reuse_preview_flag:
+                # Attempt to reuse preview provenance
+                try:
+                    preview_root = Path("output_preview") / "".join(c if c.isalnum() or c in "._-" else "_" for c in (args.bag or "unnamed"))
+                    latest_link = preview_root / "latest"
+                    manifest_path = None
+                    if latest_link.is_symlink():
+                        target = latest_link.resolve()
+                        manifest_path = target / "run_manifest.json"
+                    elif (preview_root / "run_manifest_latest.json").is_file():
+                        manifest_path = preview_root / "run_manifest_latest.json"
+                    if manifest_path and manifest_path.is_file():
+                        pm = json.loads(manifest_path.read_text())
+                        # Compare dataset fingerprint
+                        cur_fp = _dataset_fingerprint(dataset_dir)
+                        prev_fp = pm.get("fusion_cache_identity", {}).get("dataset_fingerprint")
+                        if cur_fp and prev_fp and cur_fp == prev_fp:
+                            preview_reuse_status = "CACHE_HIT"
+                            print(f"[preview-reuse] HIT: preview cache matches dataset {cur_fp}")
+                        else:
+                            preview_reuse_status = f"CACHE_MISS: dataset fingerprint {prev_fp} != {cur_fp}"
+                            print(f"[preview-reuse] MISS: {preview_reuse_status}")
+                    else:
+                        preview_reuse_status = "CACHE_MISS: no preview manifest"
+                        print(f"[preview-reuse] {preview_reuse_status}")
+                except Exception as exc:
+                    preview_reuse_status = f"CACHE_MISS: {exc}"
+                    print(f"[preview-reuse] exception: {exc}")
+                manifest["preview_reuse_status"] = preview_reuse_status
+                manifest["preview_reuse_requested"] = True
 
             from auto_mobility.reconstruction.pipeline.standard import run_standard
             hard_ceiling = None
@@ -720,6 +794,9 @@ def run(args: argparse.Namespace) -> int:
                 print(f"[v2] SAFE MODE: top_k clamped {args.top_k} -> {effective_top_k}")
             # Pass deliver_backends only for standard mode; preview already dual
             _deliver = deliver_backends if (resolved_mode.value == "standard" and deliver_backends) else None
+            # For fast-compare, ensure deliver_backends is set to dual
+            if fast_compare and not _deliver:
+                _deliver = ["rtab", "cuvslam"]
             std_result = run_standard(
                 dataset_dir, trajs, out_dir,
                 vram_budget_mb=float(budgets.vram_budget_mb),
@@ -733,6 +810,10 @@ def run(args: argparse.Namespace) -> int:
                 quick=is_quick,
                 mode_policy=policy,
                 deliver_backends=_deliver,
+                fast_compare=fast_compare,
+                reuse_preview=reuse_preview_flag,
+                no_cache=bool(getattr(args, "no_cache", False)),
+                wall_budget_s=float(budget_min * 60.0) if 'budget_min' in locals() else float(policy.budget_minutes * 60.0),
             )
             manifest["standard_result"] = {
                 k: v for k, v in std_result.items()
@@ -866,59 +947,73 @@ def run(args: argparse.Namespace) -> int:
         pass
     print(f"[v2] manifest written: {out_dir}/run_manifest.json ({elapsed:.1f}s) run_id={run_id}")
 
-    # --- Atomic publish from staging to final (only on success) ---
-    try:
-        # out_dir is staging_dir; final_dir is publish target
-        if out_dir != final_dir:
-            # Check if we should publish: only successful runs are published per spec
-            # However even failed runs should publish their staging for debugging? Spec says only successful publish.
-            # We still publish manifest for failed? But spec says sibling staging then atomic publish only successful.
-            # For now, publish regardless but keep failed as well for traceability with run_id subdir.
-            # Ensure final parent exists
-            final_dir.parent.mkdir(parents=True, exist_ok=True)
-            if final_dir.exists():
-                # Do not delete existing without explicit approval; we use run_id subdir so should not exist
-                # If explicit output exists, we atomically replace (spec allows when user explicitly approved canonical replace)
-                # Here we treat explicit run_id publish as atomic replace.
-                if is_explicit:
-                    # backup old if exists (do not lose)
-                    import tempfile
-                    tmp_old = final_dir.parent / f".old_{final_dir.name}"
-                    if tmp_old.exists():
-                        shutil.rmtree(tmp_old, ignore_errors=True)
-                    final_dir.rename(tmp_old)
+    # --- Atomic publish from staging to final (only on SUCCESS per spec #23) ---
+    publish_ok = bool(manifest.get("standard_result", {}).get("ok", False)) or bool(manifest.get("preflight_failure") is None and audit_ok and not manifest.get("standard_result"))
+    # For preview/quick without standard_result, consider audit_ok
+    if manifest.get("standard_result") is None:
+        publish_ok = audit_ok and not manifest.get("preflight_failure")
+    else:
+        publish_ok = bool(manifest.get("standard_result", {}).get("ok", False))
+    # Quick/preview success also requires ok
+    if not publish_ok:
+        print(f"[v2] STAGING RETAINED (failure/timeout): {staging_dir} (latest not updated, published artifact protected)")
+        print(f"[v2] To inspect failure: ls -R {staging_dir}")
+        # For explicit output, make failure manifest visible at final for diagnostics (without updating latest)
+        if is_explicit and out_dir != final_dir:
+            try:
+                final_dir.mkdir(parents=True, exist_ok=True)
+                # copy key files for debugging
+                for fname in ("run_manifest.json", "decision_trace.json", "telemetry.json"):
+                    src = out_dir / fname
+                    if src.is_file():
+                        shutil.copy(str(src), str(final_dir / fname))
+            except Exception:
+                pass
+        # latest unchanged for default root case (protected)
+        try:
+            pass
+        except Exception:
+            pass
+    else:
+        try:
+            # out_dir is staging_dir; final_dir is publish target
+            if out_dir != final_dir:
+                final_dir.parent.mkdir(parents=True, exist_ok=True)
+                if final_dir.exists():
+                    if is_explicit:
+                        tmp_old = final_dir.parent / f".old_{final_dir.name}"
+                        if tmp_old.exists():
+                            shutil.rmtree(tmp_old, ignore_errors=True)
+                        final_dir.rename(tmp_old)
+                    else:
+                        shutil.rmtree(final_dir, ignore_errors=True)
+                # Atomic rename staging -> final
+                staging_dir.rename(final_dir)
+                print(f"[v2] atomic publish SUCCESS: {staging_dir} -> {final_dir}")
+                out_dir = final_dir
+                # Update latest symlink for default root case — only on success
+                if not is_explicit:
+                    latest_link = root_dir / "latest"
+                    try:
+                        if latest_link.is_symlink() or latest_link.exists():
+                            latest_link.unlink()
+                    except Exception:
+                        pass
+                    try:
+                        latest_link.symlink_to(final_dir.name)
+                        print(f"[v2] latest symlink SUCCESS: {latest_link} -> {final_dir.name}")
+                    except Exception as exc:
+                        print(f"[v2] latest symlink failed: {exc}")
+                    try:
+                        (root_dir / "run_manifest_latest.json").write_text(json.dumps(manifest, indent=2))
+                    except Exception:
+                        pass
                 else:
-                    # default case: final_dir is root/run_id, should not exist; if exists, remove old run_id dir?
-                    shutil.rmtree(final_dir, ignore_errors=True)
-            # Atomic rename staging -> final
-            staging_dir.rename(final_dir)
-            print(f"[v2] atomic publish: {staging_dir} -> {final_dir}")
-            out_dir = final_dir
-            # Update latest symlink for default root case
-            if not is_explicit:
-                latest_link = root_dir / "latest"
-                try:
-                    if latest_link.is_symlink() or latest_link.exists():
-                        latest_link.unlink()
-                except Exception:
-                    pass
-                try:
-                    latest_link.symlink_to(final_dir.name)
-                    print(f"[v2] latest symlink: {latest_link} -> {final_dir.name}")
-                except Exception as exc:
-                    print(f"[v2] latest symlink failed: {exc}")
-                # Also write root run_manifest latest copy for discoverability
-                try:
-                    (root_dir / "run_manifest_latest.json").write_text(json.dumps(manifest, indent=2))
-                except Exception:
-                    pass
+                    print(f"[v2] published explicit output (success): {final_dir}")
             else:
-                print(f"[v2] published explicit output: {final_dir}")
-        else:
-            print(f"[v2] published to requested output: {final_dir}")
-    except Exception as exc:
-        print(f"[v2] atomic publish failed: {exc} (staging remains at {staging_dir})")
-        # keep staging as is for debugging, return failure
+                print(f"[v2] published to requested output (success): {final_dir}")
+        except Exception as exc:
+            print(f"[v2] atomic publish failed: {exc} (staging remains at {staging_dir})")
     # P0-3: Correct exit code — all failure cases must return non-zero.
     # Priority order: preflight_failure > standard_result.ok > audit_ok
     if manifest.get("preflight_failure"):

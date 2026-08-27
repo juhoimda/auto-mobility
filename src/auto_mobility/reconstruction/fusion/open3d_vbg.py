@@ -577,20 +577,24 @@ def _run(
             # §20 worker lifetime: release VBG before accumulating to keep peak low
             del vbg
             gc.collect()
+            # Chunk mesh local cleanup before merge (P1-4): avoids expensive global cleanup on growing accumulator
+            if len(cmesh.vertices) > 50000:
+                cmesh.remove_duplicated_vertices()
+                cmesh.remove_duplicated_triangles()
+                cmesh.remove_degenerate_triangles()
             total_stats["mesh_vertices"] += len(cmesh.vertices)
             total_stats["mesh_triangles"] += len(cmesh.triangles)
             total_stats["pcd_points"] += len(cpcd.points) if cpcd is not None else 0
             if mesh_acc is None:
                 mesh_acc, pcd_acc = cmesh, cpcd
             else:
-                # §22 temporal chunk seam mitigation: vertex weld + cleanup after merge
                 mesh_acc += cmesh
                 if cpcd is not None and pcd_acc is not None:
                     pcd_acc += cpcd
                 elif cpcd is not None:
                     pcd_acc = cpcd
-            # minimal cleanup per chunk to avoid seam explosion
-            if len(mesh_acc.vertices) > 200000:
+            # Bounded periodic cleanup only every 3 chunks or when very large (avoid per-chunk full scan)
+            if (ci + 1) % 3 == 0 and len(mesh_acc.vertices) > 300000:
                 mesh_acc.remove_duplicated_vertices()
                 mesh_acc.remove_duplicated_triangles()
                 mesh_acc.remove_degenerate_triangles()
