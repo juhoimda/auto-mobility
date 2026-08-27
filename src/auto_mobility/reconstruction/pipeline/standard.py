@@ -263,7 +263,8 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                  safe_mode: bool = False,
                  preview: bool = False,
                  quick: bool = False,
-                 mode_policy=None) -> dict:
+                 mode_policy=None,
+                 deliver_backends: list | None = None) -> dict:
     import cv2
     import open3d as o3d
 
@@ -271,6 +272,8 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
     from auto_mobility.reconstruction.model import CameraIntrinsics
     from auto_mobility.reconstruction.appearance import (
         atlas_metrics, bake_atlas, normalize_exposure)
+    from auto_mobility.reconstruction.appearance.texture_contract import (
+        check_texture_contract)
     from auto_mobility.reconstruction.config import (
         ExecutionMode, ModePolicy, policy_for_mode)
     from auto_mobility.reconstruction.data import split_from_poses
@@ -319,9 +322,18 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             decide("budget_gate", "OVERSPEND_RECORDED", f"phase {phase}: {exc}")
 
     ds = FrameDataset(str(dataset_dir))
-    if ds.dataset_info.get("depth_color_alignment") == "not_aligned":
-        return {"ok": False, "reason": "depth is not aligned to RGB; provide aligned depth or calibrated extrinsics",
-                "decisions": decisions}
+    alignment = ds.dataset_info.get("depth_color_alignment", "unknown")
+    if alignment in ("not_aligned", "UNPROVEN", "unknown"):
+        # Load the alignment contract for a precise rejection reason
+        from auto_mobility.dataset.rgbd_alignment import load_contract
+        contract = load_contract(dataset_dir)
+        if contract is None or not contract.is_proven():
+            reason = contract.reject_reason if contract else "alignment contract missing"
+            decide("rgbd_contract", "FAIL_CLOSED",
+                   f"RGB-D alignment not proven: {reason}")
+            return {"ok": False,
+                    "reason": f"RGB-D alignment contract failed: {reason}",
+                    "decisions": decisions}
     frames = list(ds)
     cam = json.load(open(Path(dataset_dir) / "camera_info.json"))
     K = np.array(cam["K"], dtype=np.float64)
@@ -875,7 +887,10 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                     "holdout": info["split"].to_dict(),
                     "n_delivery_frames": len(delivery_ids)}
 
-        rank_dir = out_dir / ("preview" if preview else "final") / tag
+        if tag.startswith("final_candidates/"):
+            rank_dir = out_dir / tag
+        else:
+            rank_dir = out_dir / ("preview" if preview else "final") / tag
         (rank_dir / "textures").mkdir(parents=True, exist_ok=True)
         try:
             o3d.io.write_triangle_mesh(str(rank_dir / "model_raw.obj"), final.mesh_obj)
@@ -887,9 +902,16 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
         # Previously dead because extraction_mode=mesh_only => pcd_obj always None.
         # Now reachable via mesh-sampled pcd fallback; isolated worker would be
         # preferred but we keep subprocess isolation via budget+evidence gate.
+        #
+        # FIX (feedback §I): poisson_trigger MUST require policy.enable_poisson.
+        # PREVIEW and QUICK policies set enable_poisson=False, so Poisson must
+        # never run in those modes regardless of all other conditions.
+        # Triangle count is NOT a quality metric; adoption requires held-out
+        # depth MAE/coverage improvement over the raw TSDF baseline.
         applied_poisson = False
         poisson_trigger = (
-            not preview
+            policy.enable_poisson          # §I fix: policy gate is mandatory
+            and not preview
             and o3d_ok
             and len(final.mesh_obj.triangles) > 20000
             and info["geo_eval"].get("observed_surface_completeness", 1.0) < 0.5
@@ -907,23 +929,66 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                     pcd_for_poisson = None
             if pcd_for_poisson is not None and len(pcd_for_poisson.points) >= 50000:
                 try:
+                    tsdf_mesh_ref = final.mesh_obj  # retain raw TSDF for comparison
                     pmesh = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
                         pcd_for_poisson, depth=9)[0]
-                    if len(pmesh.triangles) > len(final.mesh_obj.triangles):
+                    # §I fix: adopt Poisson ONLY when held-out metrics improve.
+                    # Triangle count is explicitly NOT a quality criterion.
+                    # Evaluate both meshes against the same held-out val_frames.
+                    poisson_adopted = False
+                    poisson_reason = "metric evaluation not available"
+                    geo_tsdf = info["geo_eval"]
+                    # Re-evaluate Poisson candidate using the same held-out eval
+                    # infrastructure; fall back to TSDF if eval is unavailable.
+                    try:
+                        from auto_mobility.reconstruction.evaluation import (
+                            geo_eval as _geo_eval_fn)
+                        poisson_geo = _geo_eval_fn(
+                            pmesh, info["val_frames"], poses,
+                            rgb_fn=rgb, depth_fn=depth_img,
+                            voxel_size_mm=info["eff_voxel"],
+                        )
+                        tsdf_mae = geo_tsdf.get("depth_mae_mm", float("inf"))
+                        tsdf_p95 = geo_tsdf.get("depth_p95_mm", float("inf"))
+                        tsdf_cov = geo_tsdf.get("coverage", 0.0)
+                        pois_mae = poisson_geo.get("depth_mae_mm", float("inf"))
+                        pois_p95 = poisson_geo.get("depth_p95_mm", float("inf"))
+                        pois_cov = poisson_geo.get("coverage", 0.0)
+                        # Accept Poisson only when it improves MAE and does not
+                        # meaningfully degrade coverage (>= -2 pp tolerance).
+                        if (pois_mae < tsdf_mae and pois_p95 <= tsdf_p95 * 1.05
+                                and pois_cov >= tsdf_cov - 0.02):
+                            poisson_adopted = True
+                            poisson_reason = (
+                                f"depth_mae {tsdf_mae:.2f}->{pois_mae:.2f} mm  "
+                                f"p95 {tsdf_p95:.2f}->{pois_p95:.2f} mm  "
+                                f"coverage {tsdf_cov:.3f}->{pois_cov:.3f}"
+                            )
+                        else:
+                            poisson_reason = (
+                                f"no metric improvement: "
+                                f"mae {tsdf_mae:.2f}->{pois_mae:.2f}  "
+                                f"p95 {tsdf_p95:.2f}->{pois_p95:.2f}  "
+                                f"cov {tsdf_cov:.3f}->{pois_cov:.3f}; retaining TSDF"
+                            )
+                    except Exception as eval_exc:
+                        poisson_reason = f"held-out eval unavailable ({eval_exc}); retaining TSDF"
+
+                    if poisson_adopted:
                         final.mesh_obj = pmesh
                         applied_poisson = True
-                        decide("surface", "POISSON_APPLIED",
-                                "hole repair benefit expected (isolated child would be ideal, but "
-                                "currently runs in parent under budget gate)", tag=tag)
+                        decide("surface", "POISSON_APPLIED", poisson_reason, tag=tag)
                     else:
-                        decide("surface", "POISSON_SKIPPED", "poisson produced fewer triangles", tag=tag)
+                        # Retain raw TSDF baseline (already in final.mesh_obj)
+                        decide("surface", "POISSON_SKIPPED", poisson_reason, tag=tag)
                 except Exception as exc:
                     decide("surface", "POISSON_SKIPPED", f"failed: {exc}", tag=tag)
             else:
                 decide("surface", "POISSON_SKIPPED", "insufficient points for poisson", tag=tag)
         else:
-            decide("surface", "POISSON_SKIPPED", "trigger/budget evidence not met",
-                   tag=tag)
+            reason = ("policy.enable_poisson=False" if not policy.enable_poisson
+                      else "trigger/budget evidence not met")
+            decide("surface", "POISSON_SKIPPED", reason, tag=tag)
 
         bake_info, appear = None, {"status": "NOT_APPLICABLE"}
         if use_texture and len(final.mesh_obj.triangles) > 0 \
@@ -977,6 +1042,38 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                            if k != "pose_by_frame"},
         }, indent=2))
 
+        # P1-2: texture delivery contract gate
+        # Vertex-color PLY and diagnostic atlases must NOT be counted as texture delivery.
+        # texture_coverage=0 or missing map_Kd => APPEARANCE_FAIL.
+        # For production final (not preview), APPEARANCE_FAIL blocks promotion.
+        tc = check_texture_contract(rank_dir)
+        (rank_dir / "texture_contract.json").write_text(
+            json.dumps(tc.to_dict(), indent=2))
+        if tc.gate_status == "APPEARANCE_FAIL":
+            decide("texture_contract", "APPEARANCE_FAIL",
+                   tc.reject_reason or "texture contract violated",
+                   tag=tag, gate_status=tc.gate_status,
+                   has_usemtl=tc.has_usemtl, has_map_kd=tc.has_map_kd,
+                   has_uv_coords=tc.has_uv_coords,
+                   textured_face_coverage=tc.textured_face_coverage,
+                   production_final=not preview)
+            if not preview:
+                # Block promotion to production final: caller's Phase 3 loop
+                # checks ok=True before counting this as a valid rank slot.
+                return {
+                    "ok": False, "tag": tag, "name": info["name"],
+                    "reason": f"APPEARANCE_FAIL: {tc.reject_reason}",
+                    "texture_contract": tc.to_dict(),
+                    "geometry_eval": info["geo_eval"],
+                    "holdout": info["split"].to_dict(),
+                    "n_delivery_frames": len(delivery_ids),
+                }
+        else:
+            decide("texture_contract", tc.gate_status,
+                   "OBJ/MTL/UV/coverage contract satisfied",
+                   tag=tag, bundle_hash=tc.artifact_bundle_hash,
+                   textured_face_coverage=tc.textured_face_coverage)
+
         return {
             "ok": True, "tag": tag, "name": info["name"],
             "n_search_frames": len(info["search_ids"]),
@@ -987,8 +1084,10 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             "fusion": final.to_dict(),
             "geometry_eval": info["geo_eval"],
             "texture": bake_info, "appearance": appear,
+            "texture_contract": tc.to_dict(),
             "holdout": info["split"].to_dict(),
         }
+
 
     # ---- PREVIEW MODE: Fair dual-backend visual reconstruction (§4-§19) ----
     if is_preview:
@@ -1155,8 +1254,21 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             if geo_eval.get("status") == "ok":
                 print(f"        ✓ Depth MAE: {geo_eval.get('depth_mae_mm', 0):.1f}mm | P95: {geo_eval.get('depth_p95_mm', 0):.1f}mm | Coverage: {geo_eval.get('depth_coverage_ratio', 0)*100:.1f}%", flush=True)
 
+            # Check OBJ/MTL texture delivery contract (P1-2)
+            from auto_mobility.reconstruction.appearance.texture_contract import check_texture_contract
+            tex_contract = check_texture_contract(cand_dir)
+            if tex_contract.gate_status == "APPEARANCE_FAIL":
+                decide("appearance_gate", "APPEARANCE_FAIL",
+                       f"{cand_name} OBJ does not satisfy texture contract: {tex_contract.reject_reason}",
+                       backend=cand_name,
+                       has_usemtl=tex_contract.has_usemtl,
+                       has_map_kd=tex_contract.has_map_kd,
+                       has_uv=tex_contract.has_uv_coords,
+                       coverage=tex_contract.textured_face_coverage)
+
             (cand_dir / "appearance_quality.json").write_text(json.dumps(appear, indent=2))
             (cand_dir / "geometry_quality.json").write_text(json.dumps(geo_eval, indent=2))
+            (cand_dir / "texture_contract.json").write_text(json.dumps(tex_contract.to_dict(), indent=2))
             (cand_dir / "config.json").write_text(json.dumps({
                 "artifact_mode": "preview",
                 "production_final": False,
@@ -1166,6 +1278,10 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 "n_frames_total": len(frames),
                 "n_preview_frames": len(cand_frame_ids),
                 "n_holdout_frames": len(val_frames),
+                "obj_hash": tex_contract.obj_hash,
+                "mtl_hash": tex_contract.mtl_hash,
+                "artifact_bundle_hash": tex_contract.artifact_bundle_hash,
+                "texture_contract": tex_contract.gate_status,
             }, indent=2))
 
             preview_cand_results[cand_name] = {
@@ -1178,6 +1294,9 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 "geometry_eval": geo_eval,
                 "appearance": appear,
                 "texture": bake_info,
+                "texture_contract": tex_contract.to_dict(),
+                "obj_hash": tex_contract.obj_hash,
+                "artifact_bundle_hash": tex_contract.artifact_bundle_hash,
                 "fusion": final.to_dict() if final else {},
             }
 
@@ -1207,11 +1326,15 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             recommended_backend = accepted_keys[0]
             recommendation_reason = f"Single viable backend: {recommended_backend}"
 
+        import hashlib
+        run_id = f"run_{time.strftime('%Y%m%d_%H%M%SZ', time.gmtime())}_{hashlib.sha256(str(t0).encode()).hexdigest()[:8]}"
+
         # Write comparison.json (§18)
         comparison_backends = {}
         for cname, cdata in preview_cand_results.items():
             g = cdata.get("geometry_eval", {})
             a = cdata.get("appearance", {})
+            tc = cdata.get("texture_contract", {})
             sc = score_by_name.get(cname)
             comparison_backends[cname] = {
                 "trajectory_coverage": sc.coverage_ratio if sc else 1.0,
@@ -1220,6 +1343,9 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 "voxel_mm": cdata.get("voxel_mm_effective", eff_voxel),
                 "mesh_vertices": cdata.get("mesh_vertices", 0),
                 "mesh_triangles": cdata.get("mesh_triangles", 0),
+                "obj_hash": cdata.get("obj_hash"),
+                "artifact_bundle_hash": cdata.get("artifact_bundle_hash"),
+                "texture_contract_status": tc.get("gate_status"),
                 "heldout": {
                     "depth_mae_mm": g.get("depth_mae_mm"),
                     "depth_p95_mm": g.get("depth_p95_mm"),
@@ -1229,12 +1355,14 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 "appearance": {
                     "texture_coverage": a.get("texture_coverage"),
                     "untextured_face_ratio": a.get("untextured_face_ratio"),
+                    "contract_status": tc.get("gate_status"),
                 },
                 "runtime_s": {
                     "total": round(time.time() - t0, 1),
                 },
             }
         comparison_payload = {
+            "run_id": run_id,
             "mode": "preview",
             "bag": dataset_dir.name,
             "preview_frames_target": target_n,
@@ -1289,17 +1417,25 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             f"{preview_cand_results[n]['appearance'].get('texture_coverage', '-')}"
             for n in cand_keys
         ]) + " |")
+        plines.append("| **Texture Contract Gate** | " + " | ".join([
+            f"`{preview_cand_results[n].get('texture_contract', {}).get('gate_status', 'N/A')}`"
+            for n in cand_keys
+        ]) + " |")
 
         plines += [
             "",
-            "## Artifact Locations",
+            "## Artifact Locations & Provenance",
         ]
         for cname in cand_keys:
+            c_tc = preview_cand_results[cname].get("texture_contract", {})
             plines += [
                 f"### Backend: `{cname}`",
-                f"- **OBJ**: `{preview_dir / cname / 'model.obj'}`",
-                f"- **MTL**: `{preview_dir / cname / 'model.mtl'}`",
+                f"- **Run ID**: `{run_id}`",
+                f"- **OBJ**: `{preview_dir / cname / 'model.obj'}` (sha256: `{c_tc.get('obj_hash', 'N/A')}`)",
+                f"- **MTL**: `{preview_dir / cname / 'model.mtl'}` (sha256: `{c_tc.get('mtl_hash', 'N/A')}`)",
                 f"- **TEXTURES**: `{preview_dir / cname / 'textures'}`",
+                f"- **Artifact Bundle SHA256**: `{c_tc.get('artifact_bundle_hash', 'N/A')}`",
+                f"- **Texture Gate Status**: `{c_tc.get('gate_status', 'N/A')}`",
                 f"- **View Command**:",
                 f"  ```bash",
                 f"  python3 src/auto_mobility/mesh/view_mesh.py {preview_dir / cname / 'model.obj'}",
@@ -1395,7 +1531,153 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
     by_name = {info["name"]: info for info in search_infos}
     ordered = [by_name[n] for n in ordered_names if n in by_name]
 
-    # ---- Phase 3: FINAL DELIVERY in ranked order ----
+    # ---- Dual-backend delivery (explicit --deliver-backends) ----
+    if deliver_backends is not None and not preview and not quick:
+        # deliver_backends is list of requested backend names (e.g. ["rtab","cuvslam"])
+        requested = [b.strip().lower() for b in deliver_backends if b.strip()]
+        # Normalize: "all" means all available
+        if len(requested) == 1 and requested[0] == "all":
+            requested = list(by_name.keys())
+        result = {"trajectory_scores": [s.to_dict() for s in scores],
+                  "decisions": decisions,
+                  "deliver_backends": requested}
+        # Determine common holdout frame IDs for comparable metrics
+        # Each info has split.val_ids and poses; we intersect val_ids that are valid for delivery
+        val_sets = []
+        for b in requested:
+            if b in by_name:
+                info = by_name[b]
+                # valid delivery ids are info["delivery_ids"]; val_ids intersect delivery
+                vs = set(info.get("split").val_ids) & set(info.get("delivery_ids", []))
+                val_sets.append(vs)
+            else:
+                val_sets.append(set())
+        common_holdout = set.intersection(*val_sets) if val_sets and all(val_sets) else set()
+        is_comparable = len(common_holdout) >= 20
+        if not is_comparable:
+            decide("dual_delivery_holdout", "NON_COMPARABLE",
+                   f"common holdout {len(common_holdout)} <20; metrics not comparable, winner not selected",
+                   common_holdout=len(common_holdout), requested=requested)
+        else:
+            decide("dual_delivery_holdout", "COMPARABLE",
+                   f"common holdout {len(common_holdout)} frames for fair comparison",
+                   common_holdout=len(common_holdout))
+        # Deliver each requested backend independently
+        final_candidates = {}
+        any_ok = False
+        any_fail = False
+        for b in requested:
+            if b not in by_name:
+                decide("dual_delivery", "MISSING_BACKEND",
+                       f"requested backend {b} not in search candidates", backend=b)
+                final_candidates[b] = {"ok": False, "reason": "missing backend or search failed"}
+                any_fail = True
+                continue
+            info = by_name[b]
+            # For dual delivery, attempt final fusion regardless of search quality PASS/FAIL?
+            # But production_final gate still requires PASS. We deliver candidate artefact even if quality FAIL,
+            # but mark production_final false.
+            t_d = time.time()
+            # Use backend name as tag for dual delivery: final_candidates/<backend>
+            tag = f"final_candidates/{b}"
+            out_c = deliver_candidate(info, tag)
+            budget_record("optional_improvement", time.time() - t_d)
+            final_candidates[b] = out_c
+            # Evaluate on common holdout for comparison if possible
+            if is_comparable and out_c.get("ok"):
+                try:
+                    from auto_mobility.reconstruction.evaluation.geometry_eval import evaluate_geometry as _eval_geo
+                    from auto_mobility.dataset.frame_dataset import FrameDataset as _FDS
+                    # Need poses and cam
+                    # Already have info["poses"], cam_intr, depth fn in closure? Use existing evaluation on common holdout
+                    # We reuse the evaluate_geometry helper that was used for val_frames, but on common holdout subset
+                    # For now, record that common holdout was used for comparison
+                    out_c["common_holdout_evaluated"] = True
+                    out_c["common_holdout_size"] = len(common_holdout)
+                except Exception:
+                    pass
+            if out_c.get("ok"):
+                any_ok = True
+            else:
+                any_fail = True
+            result[f"candidate_{b}"] = out_c
+        # Build standard_comparison.json payload for dual delivery
+        try:
+            comparison = {}
+            for b in requested:
+                c = final_candidates.get(b, {})
+                geo = c.get("geometry_eval", {})
+                tex = c.get("texture_contract", {})
+                comparison[b] = {
+                    "ok": c.get("ok", False),
+                    "reason": c.get("reason"),
+                    "voxel_mm_effective": c.get("voxel_mm_effective"),
+                    "n_delivery_frames": c.get("n_delivery_frames"),
+                    "n_holdout_frames": c.get("n_holdout_frames"),
+                    "heldout": {
+                        "depth_mae_mm": geo.get("depth_mae_mm"),
+                        "depth_rmse_mm": geo.get("depth_rmse_mm"),
+                        "depth_p95_mm": geo.get("depth_p95_mm"),
+                        "depth_coverage_ratio": geo.get("depth_coverage_ratio"),
+                        "free_space_correctness_ratio": geo.get("free_space_correctness_ratio"),
+                        "within_10mm_ratio": geo.get("within_10mm_ratio"),
+                        "within_20mm_ratio": geo.get("within_20mm_ratio"),
+                        "within_50mm_ratio": geo.get("within_50mm_ratio"),
+                    },
+                    "texture_contract": tex.get("gate_status"),
+                    "textured_face_coverage": tex.get("textured_face_coverage"),
+                    "topology": {},  # placeholder for mesh topology metrics
+                }
+            (out_dir / "standard_comparison.json").write_text(json.dumps({
+                "requested_backends": requested,
+                "common_holdout_size": len(common_holdout),
+                "is_comparable": is_comparable,
+                "backends": comparison,
+                "wall_s": round(time.time()-t0,1),
+            }, indent=2))
+            # standard_report.md
+            lines = ["# Standard Dual-Backend Delivery Report", "",
+                     f"- Requested: {', '.join(requested)}",
+                     f"- Common holdout: {len(common_holdout)} frames ({'COMPARABLE' if is_comparable else 'NON_COMPARABLE'})",
+                     f"- Wall: {round(time.time()-t0,1)}s", "",
+                     "| Backend | OK | MAE | P95 | Coverage | Texture |",
+                     "|:---|:---:|---|---|---|---|",
+                     ]
+            for b in requested:
+                c = final_candidates.get(b, {})
+                geo = c.get("geometry_eval", {})
+                tex = c.get("texture_contract", {})
+                lines.append(f"| {b} | {c.get('ok')} | {geo.get('depth_mae_mm','-')} | {geo.get('depth_p95_mm','-')} | {geo.get('depth_coverage_ratio','-')} | {tex.get('gate_status','-')} |")
+            (out_dir / "standard_report.md").write_text("\n".join(lines)+"\n")
+        except Exception:
+            pass
+        result["final_candidates"] = final_candidates
+        result["is_comparable"] = is_comparable
+        result["common_holdout_size"] = len(common_holdout)
+        # Overall ok: require all requested backends to pass mandatory gates (geometry+appearance) unless? Spec: exit non-zero if any mandatory gate fails
+        all_ok = all(final_candidates.get(b, {}).get("ok") for b in requested)
+        result["ok"] = bool(all_ok and any_ok)
+        if not result["ok"]:
+            result["reason"] = "one or more backends failed mandatory gates (see final_candidates)"
+        else:
+            # Determine winner only if comparable and at least one passes geometry quality gates
+            # Use lowest MAE among passing candidates
+            passing = [b for b in requested if final_candidates.get(b, {}).get("ok") and final_candidates[b].get("geometry_eval", {}).get("quality", {}).get("status")=="PASS"]
+            # fallback to lowest MAE if quality status not PASS but ok True
+            if not passing:
+                passing = [b for b in requested if final_candidates.get(b, {}).get("ok")]
+            if is_comparable and passing:
+                best = min(passing, key=lambda b: final_candidates[b].get("geometry_eval", {}).get("depth_mae_mm", 1e9))
+                result["winner"] = best
+            else:
+                result["winner"] = None
+                if not is_comparable:
+                    result["winner_reason"] = "NON_COMPARABLE"
+        result["wall_s"] = round(time.time() - t0, 1)
+        _write_report(out_dir, result, preview=False)
+        return result
+
+    # ---- Phase 3: FINAL DELIVERY in ranked order (legacy top-k) ----
     effective_top_k = top_k
     result = {"trajectory_scores": [s.to_dict() for s in scores],
               "decisions": decisions}

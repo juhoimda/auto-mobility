@@ -32,6 +32,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--full", action="store_true", help="exhaustive search and validation mode")
     p.add_argument("--phase", default="all", help="compat: accepted (single-phase search removed in V2)")
     p.add_argument("--top-k", type=int, default=2, help="finalists to deliver (cap 2)")
+    p.add_argument("--deliver-backends", type=str, default=None,
+                   help="standard dual-backend delivery: comma-separated backend list (e.g. rtab,cuvslam) or 'all'")
+    p.add_argument("--compare-backends", action="store_true",
+                   help="alias for --deliver-backends rtab,cuvslam (dual delivery with comparison)")
+    p.add_argument("--allow-single-backend", action="store_true",
+                   help="allow single backend delivery when only one trajectory cache is valid (default dual requires both)")
     p.add_argument("--dataset-dir", type=Path, default=None,
                    help="frames dataset dir (default ros2_data/frames/<bag>)")
     p.add_argument("--trajectory", type=Path, default=None, action="append",
@@ -41,7 +47,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="wall-time budget in minutes (default 30; quick 12; preview 15; full 45)")
     p.add_argument("--run-slam", action="store_true",
                    help="generate missing trajectories via run_slam.sh / cuvslam worker")
-    p.add_argument("--no-cache", action="store_true", help="compat: accepted (cache is content-verified)")
+    p.add_argument("--no-cache", action="store_true",
+                   help="force regeneration of ALL caches including trajectory, fusion, and frame "
+                        "caches (does not just affect frame extraction)")
     p.add_argument("--no-resume", action="store_true", help="compat: accepted")
     return p
 
@@ -111,16 +119,23 @@ def _dataset_fingerprint(dataset_dir: Path | None) -> str | None:
 
 
 def _verify_trajectory_cache(tp: Path, dataset_dir: Path | None = None) -> bool:
-    """Content-verified reuse (#50): TUM format + sidecar integrity.
+    """Strict provenance reuse (recon-v4/sidecar-1): TUM format + full provenance.
 
     A cached trajectory is reusable only when ALL hold:
       - valid TUM format;
-      - sidecar <tp>.meta.json exists and its trajectory_sha256 matches the
-        file bytes (catches truncation/corruption/overwrites);
-      - sidecar dataset_fingerprint matches the current frames.csv+intrinsics
-        hash when a dataset is known (catches re-extracted frames, changed
-        sync/intrinsics -> stale pose timestamps).
-    Missing sidecar or fingerprint mismatch => regenerate (fail-closed).
+      - sidecar schema is recon-v4/sidecar-1 (sidecar-3 and incomplete sidecar-4 rejected);
+      - required fields present: trajectory_sha256, dataset_fingerprint,
+        alignment_contract_fingerprint, aligned_depth_artifact_fingerprint,
+        backend_config_hash, worker_source_hash/git_sha, version fields,
+        CUDA/GPU/Open3D, pose convention/frame, profile, command_line, created_at_utc,
+        seed/deterministic declarations;
+      - trajectory_sha256 matches file bytes;
+      - dataset_fingerprint matches current frames.csv+intrinsics hash;
+      - alignment_contract_fingerprint matches current rgbd_alignment_contract.json fingerprint
+        when dataset_dir is known (catches re-extracted frames or reproved alignment);
+      - pose convention/frame are T_world_camera / camera_color_optical_frame.
+    Missing field or mismatch => CACHE_MISS with reason.
+    Only when all checks succeed print 'provenance verified' HIT log.
     """
     if not _check_trajectory_cache(tp):
         return False
@@ -134,35 +149,70 @@ def _verify_trajectory_cache(tp: Path, dataset_dir: Path | None = None) -> bool:
         import hashlib
 
         meta = json.loads(meta_path.read_text())
-        # Pose export semantics changed: CUVSLAM now uses retrospective SLAM
-        # poses and RTAB uses graph-corrected dense poses. Never reuse a
-        # sidecar produced by the old raw-odometry exporters.
-        if meta.get("schema_version") != "recon-v3/sidecar-3":
-            print(f"[v3] trajectory cache rejected (old export schema {meta.get('schema_version')}): {tp}")
+        # Strict schema: only recon-v4/sidecar-1 accepted for standard reuse
+        if meta.get("schema_version") != "recon-v4/sidecar-1":
+            print(f"[P0-1] trajectory cache MISS ({tp.name}): schema {meta.get('schema_version')} not strict (require recon-v4/sidecar-1) -> CACHE_MISS")
             return False
+        # Required fields (all must be present, not None for mandatory)
+        required = [
+            "trajectory_sha256", "dataset_fingerprint",
+            "alignment_contract_fingerprint", "aligned_depth_artifact_fingerprint",
+            "backend_config_hash", "pose_convention", "pose_frame",
+            "profile", "command_line", "created_at_utc",
+        ]
+        # version fields: either cuvslam_version or rtab_version/binary hash
+        has_version = ("cuvslam_version" in meta and meta["cuvslam_version"] not in (None, "", "unknown")) or \
+                      ("rtab_version" in meta and meta["rtab_version"] not in (None, "", "unknown"))
+        if not has_version:
+            print(f"[P0-1] trajectory cache MISS ({tp.name}): missing version field (cuvslam_version/rtab_version) -> CACHE_MISS")
+            return False
+        # worker/source hash
+        has_worker = ("worker_source_hash" in meta and meta["worker_source_hash"] not in (None, "", "unknown")) or \
+                     ("git_sha" in meta and meta["git_sha"] not in (None, "", "unknown"))
+        if not has_worker:
+            print(f"[P0-1] trajectory cache MISS ({tp.name}): missing worker_source_hash/git_sha -> CACHE_MISS")
+            return False
+        # CUDA/GPU/Open3D fields
+        for fld in ["gpu_model", "open3d_version"]:
+            if fld not in meta or meta[fld] in (None, "", "unknown"):
+                print(f"[P0-1] trajectory cache MISS ({tp.name}): missing required field {fld} -> CACHE_MISS")
+                return False
+        for fld in required:
+            if fld not in meta or meta[fld] is None or str(meta[fld]).strip() == "":
+                print(f"[P0-1] trajectory cache MISS ({tp.name}): missing required field {fld} -> CACHE_MISS")
+                return False
         if meta.get("pose_convention") != "T_world_camera":
-            print(f"[v3] trajectory cache rejected (invalid pose_convention {meta.get('pose_convention')}): {tp}")
+            print(f"[P0-1] trajectory cache MISS ({tp.name}): invalid pose_convention {meta.get('pose_convention')} -> CACHE_MISS")
             return False
         if meta.get("pose_frame") != "camera_color_optical_frame":
-            print(f"[v3] trajectory cache rejected (invalid pose_frame {meta.get('pose_frame')}): {tp}")
+            print(f"[P0-1] trajectory cache MISS ({tp.name}): invalid pose_frame {meta.get('pose_frame')} -> CACHE_MISS")
             return False
         sha = hashlib.sha256(Path(tp).read_bytes()).hexdigest()
         if str(meta.get("trajectory_sha256", "")) != sha:
-            print(f"[v3] trajectory cache rejected (sha mismatch): {tp}")
+            print(f"[P0-1] trajectory cache MISS ({tp.name}): sha mismatch -> CACHE_MISS")
             return False
         fp = _dataset_fingerprint(dataset_dir)
         want_fp = meta.get("dataset_fingerprint")
         if fp is not None and want_fp is not None and want_fp != fp:
-            print(f"[v3] trajectory cache rejected (dataset changed): {tp}")
+            print(f"[P0-1] trajectory cache MISS ({tp.name}): dataset changed {want_fp} != {fp} -> CACHE_MISS")
             return False
-        if fp is not None and want_fp is None:
-            # legacy sidecar without provenance: fail-closed
-            print(f"[v3] trajectory cache rejected (sidecar lacks dataset "
-                  f"fingerprint): {tp}")
-            return False
+        # alignment contract fingerprint check
+        if dataset_dir is not None:
+            try:
+                from auto_mobility.dataset.rgbd_alignment import load_contract
+                c = load_contract(Path(dataset_dir))
+                if c is not None and c.is_proven():
+                    want_align = meta.get("alignment_contract_fingerprint")
+                    if want_align is not None and want_align != c.contract_fingerprint:
+                        print(f"[P0-1] trajectory cache MISS ({tp.name}): alignment contract mismatch {want_align} != {c.contract_fingerprint} -> CACHE_MISS")
+                        return False
+            except Exception:
+                pass
+        # All checks passed
+        print(f"[P0-1] trajectory cache HIT ({tp.name}): {tp} (reason: provenance verified)")
         return True
     except Exception as exc:
-        print(f"[v2] trajectory cache rejected ({exc}): {tp}")
+        print(f"[P0-1] trajectory cache MISS ({tp.name}): exception {exc} -> CACHE_MISS")
         return False
 
 
@@ -218,31 +268,39 @@ def _canonical_cuvslam_path(bag: str, project_dir: Path) -> Path:
 
 
 def _run_slam_subprocess(bag: str, project_dir: Path, backend: str,
-                         dataset_dir: Path | None = None) -> Path | None:
+                         dataset_dir: Path | None = None,
+                         force_regen: bool = False) -> Path | None:
     """Run one SLAM backend in isolated subprocess (§4 sequential).
 
     - RTAB: via run_slam.sh (ROS-isolated)
     - cuVSLAM: via python -m auto_mobility.reconstruction.pose.backends.cuvslam_worker
       (CUDA context stays in child; parent VRAM recovers after exit).
     Returns trajectory path if cache-valid (P0 #8 deterministic canonical path).
+    When force_regen=True the cache check is skipped entirely and the worker is
+    unconditionally re-run (--no-cache semantics, P0-1).
     """
     traj_dir = project_dir / "ros2_data" / "trajectories"
     traj_dir.mkdir(parents=True, exist_ok=True)
     if backend == "rtab":
         script = project_dir / "scripts" / "pipeline" / "run_slam.sh"
         canonical = _canonical_rtab_path(bag, project_dir)
-        # content-verified reuse (#50) — canonical first, then legacy glob fallback
-        if _verify_trajectory_cache(canonical, dataset_dir):
-            print(f"[v2] reusing cached RTAB trajectory: {canonical}")
-            return canonical
-        # legacy glob for backward compat: match any rtab * bag * trajectory
-        # also consider pattern where bag appears before/after rtab
-        for pat in (f"*{bag}*rtab*trajectory*.txt", f"*rtab*{bag}*trajectory*.txt",
-                    f"*rtab*trajectory*.txt"):
-            for c in sorted(traj_dir.glob(pat)):
-                if bag in c.name and _verify_trajectory_cache(c, dataset_dir):
-                    print(f"[v2] reusing cached RTAB trajectory (legacy): {c}")
-                    return c
+        if force_regen:
+            print(f"[P0-1] trajectory cache BYPASS ({backend}): force_regen=True")
+        else:
+            # content-verified reuse (#50) — canonical first, then legacy glob fallback
+            if _verify_trajectory_cache(canonical, dataset_dir):
+                print(f"[P0-1] trajectory cache HIT ({backend}): {canonical} (reason: provenance verified)")
+                return canonical
+            else:
+                print(f"[P0-1] trajectory cache MISS ({backend}): {canonical} (reason: canonical not valid, trying legacy)")
+            # legacy glob for backward compat: match any rtab * bag * trajectory
+            # also consider pattern where bag appears before/after rtab
+            for pat in (f"*{bag}*rtab*trajectory*.txt", f"*rtab*{bag}*trajectory*.txt",
+                        f"*rtab*trajectory*.txt"):
+                for c in sorted(traj_dir.glob(pat)):
+                    if bag in c.name and _verify_trajectory_cache(c, dataset_dir):
+                        print(f"[P0-1] trajectory cache HIT ({backend}): {c} (reason: provenance verified)")
+                        return c
         if not script.is_file():
             print(f"[v2] run_slam.sh not found: {script}")
             return None
@@ -273,9 +331,14 @@ def _run_slam_subprocess(bag: str, project_dir: Path, backend: str,
             print(f"[v2] cuvslam: dataset not found {ds}")
             return None
         out_traj = traj_dir / f"cuvslam_{bag}_trajectory.txt"
-        if _verify_trajectory_cache(out_traj, dataset_dir):
-            print(f"[v2] reusing cached cuVSLAM trajectory: {out_traj}")
-            return out_traj
+        if force_regen:
+            print(f"[P0-1] trajectory cache BYPASS ({backend}): force_regen=True")
+        else:
+            if _verify_trajectory_cache(out_traj, dataset_dir):
+                print(f"[P0-1] trajectory cache HIT ({backend}): {out_traj} (reason: provenance verified)")
+                return out_traj
+            else:
+                print(f"[P0-1] trajectory cache MISS ({backend}): {out_traj} (reason: sidecar invalid or missing)")
         # run worker subprocess with GPU-bound thread cap 2-4 (§7)
         cmd = [sys.executable, "-m",
                "auto_mobility.reconstruction.pose.backends.cuvslam_worker",
@@ -305,12 +368,18 @@ def _run_slam_subprocess(bag: str, project_dir: Path, backend: str,
 
 
 def _generate_trajectories(bag: str, project_dir: Path,
-                           dataset_dir: Path | None = None) -> list:
-    """Generate both RTAB and cuVSLAM trajectories sequentially (§5)."""
+                           dataset_dir: Path | None = None,
+                           force_regen: bool = False) -> list:
+    """Generate both RTAB and cuVSLAM trajectories sequentially (§5).
+
+    When force_regen=True (--no-cache), trajectory caches are bypassed for
+    both backends and workers are unconditionally re-run (P0-1).
+    """
     out = []
     # §5 sequential default: cuVSLAM (GPU) then RTAB (CPU) to avoid combined overload
     for backend in ("cuvslam", "rtab"):
-        tp = _run_slam_subprocess(bag, project_dir, backend, dataset_dir)
+        tp = _run_slam_subprocess(bag, project_dir, backend, dataset_dir,
+                                  force_regen=force_regen)
         if tp is not None:
             out.append(tp)
         # small cooldown between GPU-heavy and CPU-heavy stages
@@ -462,7 +531,8 @@ def run(args: argparse.Namespace) -> int:
                 traj_files = raw
         if args.run_slam:
             generated = _generate_trajectories(
-                args.bag, Path(__file__).resolve().parents[3], dataset_dir)
+                args.bag, Path(__file__).resolve().parents[3], dataset_dir,
+                force_regen=bool(getattr(args, "no_cache", False)))
             existing = {str(Path(t).resolve()) for t in traj_files}
 
             for g in generated:
@@ -470,15 +540,56 @@ def run(args: argparse.Namespace) -> int:
                     traj_files.append(g)
             print(f"[v2] available/generated {len(traj_files)} "
                   f"trajectory file(s) after sequential isolation")
+        # Track per-backend cache status for standard dual delivery
+        cache_status = {}  # backend -> (HIT/MISS, reason, path)
+        # Map traj_files to backend first for status tracking
+        tmp_backend_map = {}
+        for tp in traj_files:
+            tp = Path(tp)
+            if not tp.is_file():
+                continue
+            # need backend name from sidecar or filename
+            meta_path = Path(str(tp) + ".meta.json")
+            if not meta_path.is_file() and tp.suffix and tp.with_suffix(".meta.json").is_file():
+                meta_path = tp.with_suffix(".meta.json")
+            be = None
+            if meta_path.is_file():
+                try:
+                    be = str(json.loads(meta_path.read_text()).get("backend","")).strip()
+                except: be=None
+            if not be:
+                stem = tp.stem.replace(f"_{args.bag}","")
+                if "rtab" in stem.lower(): be="rtab"
+                elif "cuvslam" in stem.lower(): be="cuvslam"
+                else: be=stem
+            tmp_backend_map[be] = tp
+
         verified_traj_files = []
         for tp in traj_files:
             tp = Path(tp)
             if not tp.is_file():
                 continue
-            if not _verify_trajectory_cache(tp, dataset_dir):
+            ok = _verify_trajectory_cache(tp, dataset_dir)
+            # derive backend for status
+            meta_path = Path(str(tp) + ".meta.json")
+            if not meta_path.is_file() and tp.suffix and tp.with_suffix(".meta.json").is_file():
+                meta_path = tp.with_suffix(".meta.json")
+            be = None
+            if meta_path.is_file():
+                try:
+                    be = str(json.loads(meta_path.read_text()).get("backend","")).strip()
+                except: be=None
+            if not be:
+                stem = tp.stem.replace(f"_{args.bag}","")
+                if "rtab" in stem.lower(): be="rtab"
+                elif "cuvslam" in stem.lower(): be="cuvslam"
+                else: be=stem
+            if not ok:
                 print(f"[v2] REJECTED_STALE_CACHE (auto-discovered not verified): {tp}")
+                cache_status[be] = ("CACHE_MISS", "strict provenance failed", str(tp))
                 continue
             verified_traj_files.append(tp)
+            cache_status[be] = ("CACHE_HIT", "provenance verified", str(tp))
         if verified_traj_files:
             by_backend_path = {}
             for tp in sorted(verified_traj_files, key=lambda p: p.stat().st_mtime):
@@ -506,8 +617,66 @@ def run(args: argparse.Namespace) -> int:
                     print(f"[v2] verified trajectory {be}: {tp}")
                 except Exception as exc:
                     print(f"[v2] skip trajectory {tp}: {exc}")
+        # Standard dual delivery cache reuse policy (Task 2-B, 3)
+        # If --standard without --run-slam and requested backends have CACHE_MISS, fail closed
+        deliver_backends = None
+        if getattr(args, "compare_backends", False):
+            deliver_backends = ["rtab", "cuvslam"]
+        elif getattr(args, "deliver_backends", None):
+            raw = str(args.deliver_backends).strip()
+            if raw.lower() in ("all", "*"):
+                deliver_backends = ["rtab", "cuvslam"]
+            else:
+                deliver_backends = [s.strip().lower() for s in raw.split(",") if s.strip()]
+        # Record cache status in manifest later
+        manifest["trajectory_cache_status"] = cache_status
+        if resolved_mode == __import__("auto_mobility.reconstruction.config", fromlist=["ExecutionMode"]).ExecutionMode.STANDARD and deliver_backends:
+            # Dual delivery requires both backends unless --allow-single-backend
+            missing = [b for b in deliver_backends if b not in trajs]
+            # Also consider those with CACHE_MISS in tmp_backend_map but not in trajs
+            for b in deliver_backends:
+                if b not in trajs and b in tmp_backend_map:
+                    # was present but failed verification => already CACHE_MISS
+                    pass
+            if missing:
+                if not getattr(args, "allow_single_backend", False):
+                    msg = f"PRECONDITION_FAILED: dual delivery requires backends {deliver_backends} but missing/invalid: {missing}. Cache status: {cache_status}. Hint: run with --run-slam to regenerate or --allow-single-backend to permit single."
+                    print(f"[P0-1] {msg}")
+                    manifest["preflight_failure"] = msg
+                    manifest["standard_result"] = {"ok": False, "reason": msg, "cache_status": cache_status}
+                    scheduler.shutdown()
+                    (out_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
+                    return 1
+                else:
+                    print(f"[P0-1] WARNING: dual delivery missing backends {missing} but --allow-single-backend permits single")
+
         if trajs:
             print(f"[v2] running pipeline ({resolved_mode.value}) with {len(trajs)} trajectory candidate(s)")
+
+            # GPU preflight check for CUDA-only fusion (P0-3)
+            if not is_quick:
+                from auto_mobility.reconstruction.runtime.machine_profile import _probe_gpu
+                gpu = _probe_gpu()
+                if not gpu.present or int(gpu.vram_total_mb or 0) == 0:
+                    msg = (f"PRECONDITION_FAILED: GPU not available or VRAM=0. "
+                           f"CUDA fusion requires a GPU. present={gpu.present} "
+                           f"vram_total_mb={getattr(gpu, 'vram_total_mb', 0)}")
+                    print(f"[P0-3] {msg}")
+                    manifest["preflight_failure"] = msg
+                    manifest["standard_result"] = {"ok": False, "reason": msg}
+                    scheduler.shutdown()
+                    (out_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
+                    return 1
+                elif int(budgets.vram_budget_mb) == 0:
+                    msg = (f"PRECONDITION_FAILED: vram_budget_mb=0 does not satisfy CUDA fusion. "
+                           f"GPU present but budget calculation resulted in 0.")
+                    print(f"[P0-3] {msg}")
+                    manifest["preflight_failure"] = msg
+                    manifest["standard_result"] = {"ok": False, "reason": msg}
+                    scheduler.shutdown()
+                    (out_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
+                    return 1
+
             from auto_mobility.reconstruction.pipeline.standard import run_standard
             hard_ceiling = None
             if profile.gpu.present and profile.gpu.vram_total_mb:
@@ -515,6 +684,8 @@ def run(args: argparse.Namespace) -> int:
             effective_top_k = 1 if safe_mode and not is_preview else min(2, max(1, args.top_k))
             if safe_mode and effective_top_k != args.top_k and not is_preview:
                 print(f"[v2] SAFE MODE: top_k clamped {args.top_k} -> {effective_top_k}")
+            # Pass deliver_backends only for standard mode; preview already dual
+            _deliver = deliver_backends if (resolved_mode.value == "standard" and deliver_backends) else None
             std_result = run_standard(
                 dataset_dir, trajs, out_dir,
                 vram_budget_mb=float(budgets.vram_budget_mb),
@@ -527,6 +698,7 @@ def run(args: argparse.Namespace) -> int:
                 preview=is_preview,
                 quick=is_quick,
                 mode_policy=policy,
+                deliver_backends=_deliver,
             )
             manifest["standard_result"] = {
                 k: v for k, v in std_result.items()
@@ -552,8 +724,12 @@ def run(args: argparse.Namespace) -> int:
                                 {"stage": a[0], "decision": a[1], "reason": a[2],
                                  "evidence": k}),
                         )
+                # P0-3: ok/ready must reflect current run, not stale OBJ from a prior run.
+                # Require both: std_result.ok=True AND mesh file exists with triangles.
+                _run_ok = bool(std_result.get("ok", False))
                 ready = [bname for bname, binfo in preview_backends.items()
-                         if int(binfo.get("mesh_triangles", 0) or 0) > 0
+                         if _run_ok
+                         and int(binfo.get("mesh_triangles", 0) or 0) > 0
                          and (out_dir / "preview" / bname / "model.obj").is_file()]
                 print("\n" + "=" * 60)
                 if ready:
@@ -622,6 +798,20 @@ def run(args: argparse.Namespace) -> int:
     except Exception:
         pass
     print(f"[v2] manifest written: {out_dir}/run_manifest.json ({elapsed:.1f}s)")
+    # P0-3: Correct exit code — all failure cases must return non-zero.
+    # Priority order: preflight_failure > standard_result.ok > audit_ok
+    if manifest.get("preflight_failure"):
+        return 1
+    standard_result = manifest.get("standard_result", None)
+    if standard_result is not None:
+        if not standard_result.get("ok", False):
+            return 1
+        # standard_result exists and ok=True: return 0 only if audit also ok
+        return 0 if audit_ok else 1
+    # No standard_result: pipeline was not run (no trajectories or no dataset).
+    # If trajectories were expected (dataset found) but none ran, that is a failure.
+    if ds is not None and not trajs:
+        return 1
     return 0 if audit_ok else 1
 
 

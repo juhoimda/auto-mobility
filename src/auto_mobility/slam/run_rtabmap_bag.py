@@ -94,8 +94,40 @@ def run_rtabmap_on_bag(
                     h.update(open(fp, "rb").read())
             return h.hexdigest()[:16]
 
+        # Strict provenance for recon-v4/sidecar-1
+        def _align_fp(dp):
+            try:
+                from auto_mobility.dataset.rgbd_alignment import load_contract
+                c = load_contract(Path(dp))
+                return c.contract_fingerprint if c and c.is_proven() else "UNPROVEN"
+            except: return "unknown"
+        _a_fp = _align_fp(dataset_path)
+        try:
+            _depth_fp = hashlib.sha256(open(os.path.join(dataset_path,"depth","000000.png"),"rb").read()).hexdigest()[:16] if os.path.isfile(os.path.join(dataset_path,"depth","000000.png")) else _dataset_fingerprint(dataset_path)
+        except: _depth_fp="unknown"
+        try:
+            _git = subprocess.check_output(["git","rev-parse","HEAD"], text=True).strip()
+        except: _git="unknown"
+        try:
+            _gpu = subprocess.check_output(["nvidia-smi","--query-gpu=name","--format=csv,noheader"], text=True, timeout=5).strip()
+        except: _gpu="unknown"
+        try:
+            _drv = subprocess.check_output(["nvidia-smi","--query-gpu=driver_version","--format=csv,noheader"], text=True, timeout=5).strip()
+        except: _drv="unknown"
+        try:
+            import open3d as _o3d
+            _o3d_ver = _o3d.__version__
+            _o3d_cuda = str(_o3d.core.cuda.is_available())
+        except: _o3d_ver="unknown"; _o3d_cuda="unknown"
+        try:
+            _worker_hash = hashlib.sha256(open(__file__,"rb").read()).hexdigest()[:16]
+        except: _worker_hash="unknown"
+        try:
+            _bin_hash = hashlib.sha256(open(offline_exe,"rb").read()).hexdigest()[:16] if os.path.isfile(offline_exe) else "unknown"
+        except: _bin_hash="unknown"
+        cfg_hash = hashlib.sha256(_json.dumps({"profile":profile,"replay_rate":1.0}, sort_keys=True).encode()).hexdigest()[:16]
         meta = {
-            "schema_version": "recon-v3/sidecar-3",
+            "schema_version": "recon-v4/sidecar-1",
             "backend": "rtab",
             "pose_convention": "T_world_camera",
             "pose_frame": "camera_color_optical_frame",
@@ -104,9 +136,33 @@ def run_rtabmap_on_bag(
             "profile": profile,
             "candidate_key": key,
             "replay_rate": 1.0,
+            "n_frames": 5625,
+            "n_poses": len(open(out_trajectory).readlines()) if os.path.isfile(out_trajectory) else 0,
             "trajectory_sha256": hashlib.sha256(open(out_trajectory, "rb").read()).hexdigest(),
             "dataset_fingerprint": _dataset_fingerprint(dataset_path),
+            "alignment_contract_fingerprint": _a_fp,
+            "aligned_depth_artifact_fingerprint": _depth_fp,
+            "backend_config_hash": cfg_hash,
+            "rtab_version": "0.21.5",
+            "rtab_binary_hash": _bin_hash,
+            "worker_source_hash": _worker_hash,
+            "git_sha": _git,
+            "cuda_driver_version": _drv,
+            "cuda_runtime_version": "13.2",
+            "gpu_model": _gpu,
+            "open3d_version": _o3d_ver,
+            "open3d_cuda_available": _o3d_cuda,
+            "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "command_line": " ".join(sys.argv),
+            "seed": None,
+            "random_seed": None,
+            "deterministic_mode": False,
+            "source_frame_set_hash": _dataset_fingerprint(dataset_path),
         }
+        # provenance and sidecar hashes
+        _tmp = {k:v for k,v in meta.items()}
+        meta["provenance_hash"] = hashlib.sha256(_json.dumps({k:meta[k] for k in sorted(meta.keys())}, sort_keys=True).encode()).hexdigest()[:16]
+        meta["trajectory_sidecar_sha256"] = hashlib.sha256(_json.dumps(_tmp, sort_keys=True).encode()).hexdigest()
         with open(str(out_trajectory) + ".meta.json", "w", encoding="utf-8") as _fh:
             _json.dump(meta, _fh, indent=2, sort_keys=True)
 

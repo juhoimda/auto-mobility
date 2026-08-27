@@ -6,6 +6,19 @@ view_pointcloud.py — 3D Point Cloud (.ply, .pcd, .pts) 전용 인터랙티브 
 import sys
 import os
 import argparse
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# WSLg GPU 활성화 및 Wayland 비활성화 (Open3D GLEW/GLFW는 Wayland 네이티브에서 실패하므로 X11 강제)
+for _k in ["MESA_LOADER_DRIVER_OVERRIDE", "LIBGL_ALWAYS_SOFTWARE", "GALLIUM_DRIVER"]:
+    os.environ.pop(_k, None)
+os.environ.pop("WAYLAND_DISPLAY", None)
+os.environ["XDG_SESSION_TYPE"] = "x11"
+os.environ["GDK_BACKEND"] = "x11"
+os.environ["QT_QPA_PLATFORM"] = "xcb"
+if "DISPLAY" not in os.environ:
+    os.environ["DISPLAY"] = ":0"
 
 try:
     import open3d as o3d

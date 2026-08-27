@@ -46,14 +46,14 @@ def load_mesh_preserve(path: str, no_cache: bool = False):
     if not no_cache:
         for c_ext in [".ply", ".glb"]:
             cached = base + c_ext
-            if os.path.exists(cached) and os.path.getmtime(cached) >= os.path.getmtime(path):
+            if cached != path and os.path.exists(cached) and os.path.getmtime(cached) >= os.path.getmtime(path):
                 # Ensure related files (.mtl, textures) are not newer than cached PLY
                 mtl_path = base + ".mtl"
                 is_stale = os.path.exists(mtl_path) and os.path.getmtime(mtl_path) > os.path.getmtime(cached)
                 if not is_stale:
                     try:
                         m = o3d.io.read_triangle_mesh(cached)
-                        if not m.is_empty() and len(m.vertices) > 0:
+                        if not m.is_empty() and len(m.vertices) > 0 and len(m.triangles) > 0:
                             print(f"  ⚡ 바이너리 캐시 사용: {os.path.basename(cached)}")
                             return m, "mesh"
                     except Exception:
@@ -63,8 +63,8 @@ def load_mesh_preserve(path: str, no_cache: bool = False):
     try:
         m = o3d.io.read_triangle_mesh(path)
         if not m.is_empty() and len(m.vertices) > 0:
-            if len(m.triangles) == 0 and path.lower().endswith(".obj"):
-                raise ValueError("no triangles - fallback to manual")
+            if len(m.triangles) == 0:
+                raise ValueError("no triangles - fallback to point cloud or manual obj")
             if not no_cache:
                 try:
                     cache_path = base + ".ply"

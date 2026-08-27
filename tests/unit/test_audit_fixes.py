@@ -141,16 +141,48 @@ def _write_traj(path: Path):
 
 
 def _sidecar(path: Path, dataset_dir, *, sha=None, fp=True):
+    # Strict provenance sidecar-1 for Task2
+    import time as _time
+    backend = "cuvslam" if "cuvslam" in path.name else "rtab"
     meta = {
-        "schema_version": "recon-v3/sidecar-3",
-        "backend": "cuvslam",
+        "schema_version": "recon-v4/sidecar-1",
+        "backend": backend,
         "pose_convention": "T_world_camera",
         "pose_frame": "camera_color_optical_frame",
+        "profile": "standard",
+        "command_line": "pytest",
+        "created_at_utc": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+        "seed": None,
+        "deterministic_mode": False,
+        "gpu_model": "test_gpu",
+        "open3d_version": "0.19.0",
+        "open3d_cuda_available": "True",
+        "backend_config_hash": "abc123",
+        "worker_source_hash": "abc123",
+        "git_sha": "abc123",
+        "cuda_driver_version": "596.58",
+        "cuda_runtime_version": "13.2",
     }
+    if backend == "cuvslam":
+        meta["cuvslam_version"] = "17.0.0"
+    else:
+        meta["rtab_version"] = "0.21.5"
+        meta["rtab_binary_hash"] = "abc123"
     meta["trajectory_sha256"] = sha or hashlib.sha256(
         path.read_bytes()).hexdigest()
     meta["dataset_fingerprint"] = (
         _fp_of(dataset_dir) if fp else "stale-fingerprint")
+    # alignment fingerprint: use dummy proven value matching dataset's contract if exists
+    try:
+        from auto_mobility.dataset.rgbd_alignment import load_contract
+        c = load_contract(dataset_dir)
+        meta["alignment_contract_fingerprint"] = c.contract_fingerprint if c and c.is_proven() else "dummy_align_fp"
+    except Exception:
+        meta["alignment_contract_fingerprint"] = "dummy_align_fp"
+    meta["aligned_depth_artifact_fingerprint"] = "dummy_depth_fp"
+    meta["source_frame_set_hash"] = meta["dataset_fingerprint"]
+    meta["provenance_hash"] = hashlib.sha256(json.dumps({k:meta[k] for k in sorted(meta.keys())}, sort_keys=True).encode()).hexdigest()[:16]
+    meta["trajectory_sidecar_sha256"] = hashlib.sha256(json.dumps({k:meta[k] for k in sorted(meta.keys()) if k!="trajectory_sidecar_sha256"}, sort_keys=True).encode()).hexdigest()
     Path(str(path) + ".meta.json").write_text(json.dumps(meta))
 
 
