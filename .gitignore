@@ -39,6 +39,7 @@ log/
 .colcon/
 ros2_data/
 output_preview/
+output_standard/
 
 # Point Cloud / 3D Asset / Dataset files (large files)
 *.ply

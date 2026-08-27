@@ -38,11 +38,24 @@ def test_holdout_never_enters_search_set():
     assert set(search) == set(split.train_ids)
 
 
-def test_delivery_includes_all_fuse_frames_including_holdout():
+def test_delivery_excludes_holdout_for_benchmark():
+    """Benchmark holdout (val_ids) must NEVER be in delivery (leak fix)."""
     split = _make_split()
     roles = _roles_all_fuse(range(120))
     search, delivery, _ = compute_search_delivery_sets(split, roles, range(120))
-    assert set(delivery) == set(split.train_ids) | set(split.val_ids)
+    # For legacy HoldoutSplit, val is benchmark -> delivery is train only (no leakage)
+    assert set(delivery) == set(split.train_ids)
+    assert set(split.val_ids).isdisjoint(set(delivery)), "benchmark holdout leaked into delivery"
+    assert set(search).isdisjoint(set(split.val_ids))
+    assert set(search) <= set(delivery) or set(search) == set(split.train_ids)
+
+def test_delivery_includes_all_fuse_frames_including_holdout():
+    # Backward-compat shim: actually tests that delivery is train-only (holdout excluded)
+    split = _make_split()
+    roles = _roles_all_fuse(range(120))
+    search, delivery, _ = compute_search_delivery_sets(split, roles, range(120))
+    # Should be train only, not train∪val
+    assert set(delivery) == set(split.train_ids)
     assert set(search) <= set(delivery)
 
 

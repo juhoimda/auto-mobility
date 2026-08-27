@@ -106,10 +106,12 @@ def _compute_frame_roles(frames, rgb, depth):
 
 def compute_search_delivery_sets(split, roles, valid_ids,
                                  min_fuse_frames: int = 20):
-    """Search/delivery separation invariant (#20/#56/#57).
+    """Search/delivery separation invariant (#20/#56/#57) — leak-free.
 
     SEARCH uses train-only FUSE frames (holdout excluded -> no leakage).
-    DELIVERY uses ALL valid FUSE frames including holdout.
+    DELIVERY uses train (+ tuning) FUSE frames but NEVER benchmark holdout.
+    For legacy HoldoutSplit (2-way), val_ids is benchmark -> delivery = train only.
+    For BenchmarkSplit (3-way), tuning_val_ids may be used for tuning, benchmark excluded.
     Falls back to all non-REJECT frames when too few FUSE frames exist.
     """
     from auto_mobility.reconstruction.data.frame_selector import FrameRole
@@ -120,11 +122,51 @@ def compute_search_delivery_sets(split, roles, valid_ids,
     if len(fuse) < min_fuse_frames:
         fuse = {fid for fid, r in role_items if r != FrameRole.REJECT}
         relaxed = True
-    train_set, val_set = set(split.train_ids), set(split.val_ids)
     allowed = set(valid_ids)
-    search_ids = sorted(train_set & fuse & allowed)
-    delivery_ids = sorted((train_set | val_set) & fuse & allowed)
+    # Detect split type
+    if hasattr(split, "benchmark_holdout_ids"):
+        train_set = set(split.train_ids)
+        tuning_set = set(getattr(split, "tuning_val_ids", ()))
+        # benchmark strictly excluded from both search and delivery
+        search_ids = sorted(train_set & fuse & allowed)
+        delivery_ids = sorted((train_set | tuning_set) & fuse & allowed)
+        # Assert no benchmark leakage (defensive)
+        bench = set(split.benchmark_holdout_ids)
+        assert bench.isdisjoint(set(search_ids)), "benchmark leaked into search"
+        assert bench.isdisjoint(set(delivery_ids)), "benchmark leaked into delivery"
+    else:
+        train_set, val_set = set(split.train_ids), set(split.val_ids)
+        # HoldoutSplit: val is benchmark -> never in delivery (fix leakage)
+        search_ids = sorted(train_set & fuse & allowed)
+        delivery_ids = sorted(train_set & fuse & allowed)
+        # Leak check: val must not be in delivery
+        assert set(val_set).isdisjoint(set(search_ids))
+        assert set(val_set).isdisjoint(set(delivery_ids))
     return search_ids, delivery_ids, relaxed
+
+
+def compute_benchmark_sets(benchmark_split, roles, valid_ids, min_fuse_frames: int = 20):
+    """Helper for benchmark pipeline: returns train/tuning/benchmark separation."""
+    from auto_mobility.reconstruction.data.frame_selector import FrameRole
+
+    role_items = list(roles.items())
+    fuse = {fid for fid, r in role_items if r == FrameRole.FUSE}
+    relaxed = False
+    if len(fuse) < min_fuse_frames:
+        fuse = {fid for fid, r in role_items if r != FrameRole.REJECT}
+        relaxed = True
+    allowed = set(valid_ids)
+    train_set = set(benchmark_split.train_ids)
+    tuning_set = set(benchmark_split.tuning_val_ids)
+    bench_set = set(benchmark_split.benchmark_holdout_ids)
+    search_ids = sorted(train_set & fuse & allowed)
+    tuning_ids = sorted(tuning_set & fuse & allowed)
+    delivery_ids = sorted((train_set | tuning_set) & fuse & allowed)
+    benchmark_ids = sorted(bench_set & fuse & allowed)
+    # Benchmark never in search/delivery
+    assert bench_set.isdisjoint(set(search_ids))
+    assert bench_set.isdisjoint(set(delivery_ids))
+    return search_ids, tuning_ids, delivery_ids, benchmark_ids, relaxed
 
 
 def select_pose_coverage_frames(frame_ids: list, poses: dict,
@@ -396,6 +438,72 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 "decisions": decisions}
     top = top[:max(1, min(top_k, 2))]
     score_by_name = {s.backend: s for s in scores}
+
+    # --- Benchmark holdout: common pose set + deterministic 3-way split (locked) ---
+    # Build per-backend pose maps (authoritative association) for common intersection
+    poses_by_backend_for_split = {}
+    assoc_summary_for_split = {}
+    for name, traj in trajectories.items():
+        # Use same association as preview: 50ms gap guard + SLERP
+        from auto_mobility.trajectory.association import associate_trajectory_to_frames as _assoc
+        frame_stamps = np.array([f.rgb_timestamp for f in frames], dtype=np.float64)
+        _, results, summary = _assoc(frame_stamps, traj, max_pose_gap_ms=50.0, enable_interpolation=True)
+        pmap = {frames[r.frame_id].frame_id: r.T_world_camera for r in results if r.valid and r.T_world_camera is not None}
+        poses_by_backend_for_split[name] = pmap
+        assoc_summary_for_split[name] = summary
+
+    fuse_ids_initial = {f.frame_id for f in frames if roles.get(f.frame_id) == __import__("auto_mobility.reconstruction.data.frame_selector", fromlist=["FrameRole"]).FrameRole.FUSE}
+    if len(fuse_ids_initial) < 20:
+        fuse_ids_initial = {f.frame_id for f in frames if roles.get(f.frame_id) != __import__("auto_mobility.reconstruction.data.frame_selector", fromlist=["FrameRole"]).FrameRole.REJECT}
+    # Common pose set across all available backends that passed judge (at least those in top)
+    # For benchmark fairness, intersect across backends that are candidates for delivery
+    candidate_backends_for_common = [c.backend for c in scores if c.ok] or [c.backend for c in top]
+    valid_sets_common = [set(poses_by_backend_for_split.get(b, {}).keys()) for b in candidate_backends_for_common if b in poses_by_backend_for_split]
+    if valid_sets_common:
+        common_ids_raw = sorted(fuse_ids_initial & set.intersection(*valid_sets_common)) if valid_sets_common else []
+    else:
+        common_ids_raw = []
+    # Dataset fingerprint for deterministic seed (frames.csv + camera_info + alignment contract)
+    try:
+        import hashlib as _hlib
+        fp_path = Path(dataset_dir) / "frames.csv"
+        cam_path = Path(dataset_dir) / "camera_info.json"
+        _h = _hlib.sha256()
+        if fp_path.is_file():
+            _h.update(fp_path.read_bytes())
+        if cam_path.is_file():
+            _h.update(cam_path.read_bytes())
+        # alignment contract fingerprint if present
+        align_path = Path(dataset_dir) / "rgbd_alignment_contract.json"
+        if align_path.is_file():
+            _h.update(align_path.read_bytes())
+        dataset_fp_for_split = _h.hexdigest()[:16]
+    except Exception:
+        dataset_fp_for_split = ""
+    benchmark_split = None
+    benchmark_split_error = None
+    if len(candidate_backends_for_common) < 2:
+        benchmark_split_error = f"NON_COMPARABLE: only {len(candidate_backends_for_common)} backend(s) available, need 2 for benchmark"
+        decide("benchmark_split", "NON_COMPARABLE", benchmark_split_error, common_pool=len(common_ids_raw), backends=candidate_backends_for_common)
+    elif len(common_ids_raw) < 20:
+        benchmark_split_error = f"NON_COMPARABLE: common pose count {len(common_ids_raw)} <20"
+        decide("benchmark_split", "NON_COMPARABLE", benchmark_split_error, common_pool=len(common_ids_raw))
+    else:
+        try:
+            from auto_mobility.reconstruction.data.split import split_from_common_poses as _split_common
+            # need poses for common ids: use first backend's poses as reference for motion
+            ref_backend = candidate_backends_for_common[0]
+            ref_poses = poses_by_backend_for_split[ref_backend]
+            common_poses_for_split = [ref_poses[fid] for fid in common_ids_raw if fid in ref_poses]
+            common_fids_for_split = [fid for fid in common_ids_raw if fid in ref_poses]
+            benchmark_split = _split_common(common_fids_for_split, common_poses_for_split, dataset_fingerprint=dataset_fp_for_split, seed=None)
+            decide("benchmark_split", "LOCKED", f"common {len(common_ids_raw)} frames -> train {len(benchmark_split.train_ids)} tuning {len(benchmark_split.tuning_val_ids)} benchmark {len(benchmark_split.benchmark_holdout_ids)}",
+                   common_pose_count=len(common_ids_raw), dataset_fingerprint=dataset_fp_for_split,
+                   train_sha=benchmark_split.train_ids_sha256, tuning_sha=benchmark_split.tuning_val_ids_sha256,
+                   benchmark_sha=benchmark_split.benchmark_holdout_ids_sha256, generation_rule=benchmark_split.generation_rule)
+        except Exception as exc:
+            benchmark_split_error = f"benchmark split failed: {exc}"
+            decide("benchmark_split", "FAILED", benchmark_split_error)
 
 
     bbox_holder = {"diag_m": 8.0}
@@ -697,13 +805,26 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                    "frames beyond max_pose_gap_ms dropped instead of bridged "
                    "by stale poses",
                    candidate=cand.backend, n_dropped=len(dropped))
-        ids_all = [f.frame_id for f in frames if f.frame_id in poses0]
-        split = split_from_poses(ids_all, [poses0[i] for i in ids_all])
-        train_set, val_set = set(split.train_ids), set(split.val_ids)
+        # Use locked benchmark split (no per-candidate split) — fail-closed if missing
+        if benchmark_split is None or benchmark_split_error is not None:
+            decide("search_phase", "FAILED", f"benchmark split unavailable: {benchmark_split_error}", candidate=cand.backend)
+            return {
+                "name": cand.backend,
+                "poses": poses0, "split": None, "search_ids": [],
+                "delivery_ids": [], "val_frames": [],
+                "masks": {}, "eff_voxel": 10.0,
+                "fused_search": None, "geo_eval": {"status": "NOT_APPLICABLE", "reason": "no benchmark split"},
+                "refinement": {"accepted": False, "reason": "no benchmark split"}, "wall_s": time.time() - t_cand,
+                "trajectory_failed": True,
+                "search_plan": None,
+                "coarse_plan": None,
+            }
+        split = benchmark_split
         id_set = set(id_to_frame)
 
-        search_ids, delivery_ids, relaxed = compute_search_delivery_sets(
+        search_ids, tuning_ids, delivery_ids, benchmark_ids, relaxed = compute_benchmark_sets(
             split, roles, id_set)
+        # For search phase, search_ids is train only; tuning pool is separate for selection
         if relaxed:
             decide("frame_roles", "RELAX_TO_NON_REJECT",
                    "too few FUSE frames; fusing all non-REJECT frames",
@@ -717,7 +838,11 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             decide("frame_roles", "BOUNDED_SEARCH_SUBSET",
                    "train search limited to 300-500 representative frames; final will use ALL",
                    n_search_bounded=len(search_ids), n_delivery=len(delivery_ids))
-        val_frames = [id_to_frame[i] for i in sorted(val_set & id_set)]
+        # Benchmark holdout strictly for evaluation (never for fusion)
+        val_frames = [id_to_frame[i] for i in sorted(set(benchmark_ids) & id_set) if i in poses0]
+        # Ensure benchmark not in search/delivery
+        assert set(benchmark_ids).isdisjoint(set(search_ids))
+        assert set(benchmark_ids).isdisjoint(set(delivery_ids))
 
         poses = poses0
         refinement = {"accepted": False, "reason": "disabled"}
@@ -781,14 +906,21 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             decide("depth_consistency", "SKIPPED", "no coarse mesh available",
                    candidate=cand.backend)
 
+        # For tuning decisions, use tuning frames (not benchmark) to avoid leakage into benchmark.
+        tuning_frames = [id_to_frame[i] for i in sorted(set(tuning_ids) & id_set) if i in poses]
         fused_search = submit_fusion(search_ids, poses, eff_voxel / 1000.0,
                                      masks or None, f"c{idx}_search",
                                      active_plan=search_plan)
         geo_eval = {"status": "NOT_APPLICABLE", "reason": "no mesh"}
-        if fused_search is not None and val_frames:
-            geo_eval = evaluate_geometry(fused_search.mesh_obj, val_frames, poses,
+        geo_eval_benchmark = {"status": "NOT_APPLICABLE", "reason": "no mesh"}
+        if fused_search is not None and tuning_frames:
+            geo_eval = evaluate_geometry(fused_search.mesh_obj, tuning_frames, poses,
                                          cam_intr, depth)
-            geo_eval["eval_mesh_provenance"] = "train_only"
+            geo_eval["eval_mesh_provenance"] = "train_only_tuning"
+        if fused_search is not None and val_frames:
+            geo_eval_benchmark = evaluate_geometry(fused_search.mesh_obj, val_frames, poses,
+                                         cam_intr, depth)
+            geo_eval_benchmark["eval_mesh_provenance"] = "train_only_benchmark"
 
         eff_voxel_final = eff_voxel
         # P0 #15/21: SAFE MODE and PREVIEW disable fine voxel entirely
@@ -848,13 +980,16 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
 
         budget_record("geometry_exploration", time.time() - t_g)
         sc = score_by_name.get(cand.backend)
-        # keep last plans for telemetry
+        # keep last plans for telemetry — include both tuning and benchmark evals
         return {
             "name": cand.backend,
             "poses": poses, "split": split, "search_ids": search_ids,
             "delivery_ids": delivery_ids, "val_frames": val_frames,
+            "tuning_frames": tuning_frames, "tuning_ids": tuning_ids,
+            "benchmark_ids": benchmark_ids,
             "masks": masks, "eff_voxel": eff_voxel_final,
             "fused_search": fused_search, "geo_eval": geo_eval,
+            "geo_eval_benchmark": geo_eval_benchmark,
             "refinement": refinement, "wall_s": time.time() - t_cand,
             "trajectory_failed": (not sc.ok) if sc is not None else False,
             "search_plan": search_plan,
@@ -1024,9 +1159,61 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                                        total_faces=len(final.mesh_obj.triangles),
                                        textured_faces=bake.textured_faces,
                                        appearance_mode=bake.appearance_mode)
+        # --- Benchmark evaluation of the DELIVERY mesh (must be real, not proxy) ---
+        # Use locked benchmark_holdout_ids filtered to this backend's valid poses
+        benchmark_ids_for_eval = []
+        benchmark_frames_for_eval = []
+        # info["split"] is BenchmarkSplit; get benchmark holdout
+        bench_split = info.get("split")
+        if bench_split is not None and hasattr(bench_split, "benchmark_holdout_ids"):
+            raw_bench = list(bench_split.benchmark_holdout_ids)
+            # Filter to those where this backend has pose and frame exists, and is not REJECT
+            for fid in raw_bench:
+                if fid in poses and fid in id_to_frame:
+                    # Also ensure not in delivery (leak check)
+                    if fid not in delivery_ids:
+                        benchmark_frames_for_eval.append(id_to_frame[fid])
+                        benchmark_ids_for_eval.append(fid)
+        # Also ensure texture views did not use benchmark (already via delivery_ids)
+        # Evaluate delivery mesh on benchmark holdout via real evaluate_geometry
+        delivery_geo_eval = {"status": "NOT_EVALUATED", "reason": "no benchmark frames or mesh"}
+        if final is not None and final.mesh_obj is not None and len(final.mesh_obj.triangles) > 0 and benchmark_frames_for_eval:
+            try:
+                delivery_geo_eval = evaluate_geometry(final.mesh_obj, benchmark_frames_for_eval, poses, cam_intr, depth)
+                # Add provenance
+                delivery_geo_eval["eval_mesh_provenance"] = "delivery_benchmark"
+                delivery_geo_eval["n_benchmark_frames"] = len(benchmark_frames_for_eval)
+            except Exception as exc:
+                delivery_geo_eval = {"status": "EVALUATION_FAILED", "reason": str(exc)}
+        # NOT_EVALUATED handling: if 0 frames or missing mesh hash, block promotion
+        if delivery_geo_eval.get("status") != "ok":
+            delivery_geo_eval["quality"] = {"status": "FAIL", "reasons": ["not_evaluated"]}
+        else:
+            # Assess quality via geometry_eval.assess_geometry_quality (thresholds)
+            from auto_mobility.reconstruction.evaluation.geometry_eval import assess_geometry_quality
+            delivery_geo_eval["quality"] = assess_geometry_quality(delivery_geo_eval)
+
+        # Compute SHAs for provenance
+        import hashlib as _h3
+        fusion_frame_hash = _h3.sha256(",".join(map(str, sorted(delivery_ids))).encode()).hexdigest()[:16] if delivery_ids else "empty"
+        eval_frame_hash = _h3.sha256(",".join(map(str, sorted(benchmark_ids_for_eval))).encode()).hexdigest()[:16] if benchmark_ids_for_eval else "empty"
+        # Mesh SHA is from texture contract (OBJ hash) or compute directly if missing
+        # Will be filled after texture contract, but precompute placeholder
+        mesh_sha_placeholder = None
+
         (rank_dir / "appearance_quality.json").write_text(json.dumps(appear, indent=2))
         (rank_dir / "geometry_quality.json").write_text(
-            json.dumps(info["geo_eval"], indent=2))
+            json.dumps(delivery_geo_eval, indent=2))
+        # Also keep search tuning eval for diagnostics
+        (rank_dir / "geometry_quality_search_tuning.json").write_text(json.dumps(info.get("geo_eval", {}), indent=2))
+
+        # Fresh texture contract parsing (must parse freshly baked OBJ/MTL/PNG)
+        tc = check_texture_contract(rank_dir)
+        (rank_dir / "texture_contract.json").write_text(
+            json.dumps(tc.to_dict(), indent=2))
+        # Compute final artifact SHAs after contract (OBJ/MTL hashes)
+        mesh_sha = tc.obj_hash or "no_obj"
+        # Update config with full provenance
         (rank_dir / "config.json").write_text(json.dumps({
             "artifact_mode": "preview" if preview else "final",
             "production_final": not preview,
@@ -1037,18 +1224,24 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             "n_frames_total": len(frames),
             "frames_search_train_fuse": len(info["search_ids"]),
             "frames_delivered_all_fuse": len(delivery_ids),
-            "n_holdout_frames": len(info["val_frames"]),
+            "n_holdout_frames": len(benchmark_frames_for_eval),
+            "n_tuning_frames": len(info.get("tuning_frames", [])),
+            "benchmark_holdout_ids": benchmark_ids_for_eval,
+            "benchmark_holdout_sha256": bench_split.benchmark_holdout_ids_sha256 if bench_split and hasattr(bench_split, 'benchmark_holdout_ids_sha256') else None,
+            "fusion_frame_ids_sha256": fusion_frame_hash,
+            "evaluation_frame_ids_sha256": eval_frame_hash,
+            "evaluation_mesh_sha256": mesh_sha,
+            "fusion_frames_sha256": fusion_frame_hash,
+            "artifact_origin": "freshly_fused",
+            "fusion_worker_tag": f"{tag}_final",
+            "backend": info["name"],
+            "voxel_mm_effective_tag": info["eff_voxel"],
             "refinement": {k: v for k, v in info["refinement"].items()
                            if k != "pose_by_frame"},
+            "benchmark_split": bench_split.to_dict() if bench_split and hasattr(bench_split, 'to_dict') else None,
         }, indent=2))
 
-        # P1-2: texture delivery contract gate
-        # Vertex-color PLY and diagnostic atlases must NOT be counted as texture delivery.
-        # texture_coverage=0 or missing map_Kd => APPEARANCE_FAIL.
-        # For production final (not preview), APPEARANCE_FAIL blocks promotion.
-        tc = check_texture_contract(rank_dir)
-        (rank_dir / "texture_contract.json").write_text(
-            json.dumps(tc.to_dict(), indent=2))
+        # P1-2: texture delivery contract gate — strict after fresh parse
         if tc.gate_status == "APPEARANCE_FAIL":
             decide("texture_contract", "APPEARANCE_FAIL",
                    tc.reject_reason or "texture contract violated",
@@ -1064,71 +1257,115 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                     "ok": False, "tag": tag, "name": info["name"],
                     "reason": f"APPEARANCE_FAIL: {tc.reject_reason}",
                     "texture_contract": tc.to_dict(),
-                    "geometry_eval": info["geo_eval"],
-                    "holdout": info["split"].to_dict(),
+                    "geometry_eval": delivery_geo_eval,
+                    "holdout": bench_split.to_dict() if bench_split and hasattr(bench_split, 'to_dict') else {},
                     "n_delivery_frames": len(delivery_ids),
+                    "n_benchmark_frames": len(benchmark_frames_for_eval),
+                    "fusion_frame_ids_sha256": fusion_frame_hash,
+                    "evaluation_frame_ids_sha256": eval_frame_hash,
+                    "evaluation_mesh_sha256": mesh_sha,
+                    "artifact_origin": "freshly_fused",
                 }
         else:
             decide("texture_contract", tc.gate_status,
                    "OBJ/MTL/UV/coverage contract satisfied",
                    tag=tag, bundle_hash=tc.artifact_bundle_hash,
                    textured_face_coverage=tc.textured_face_coverage)
+        # If benchmark not evaluated, block promotion (NOT_EVALUATED)
+        if delivery_geo_eval.get("status") != "ok":
+            decide("geometry_gate", "NOT_EVALUATED", f"benchmark evaluation failed: {delivery_geo_eval.get('reason') or delivery_geo_eval.get('status')}", tag=tag)
+            if not preview:
+                return {
+                    "ok": False, "tag": tag, "name": info["name"],
+                    "reason": f"NOT_EVALUATED: {delivery_geo_eval.get('reason') or delivery_geo_eval.get('status')}",
+                    "texture_contract": tc.to_dict(),
+                    "geometry_eval": delivery_geo_eval,
+                    "holdout": bench_split.to_dict() if bench_split and hasattr(bench_split, 'to_dict') else {},
+                    "n_delivery_frames": len(delivery_ids),
+                    "n_benchmark_frames": len(benchmark_frames_for_eval),
+                    "fusion_frame_ids_sha256": fusion_frame_hash,
+                    "evaluation_frame_ids_sha256": eval_frame_hash,
+                    "evaluation_mesh_sha256": mesh_sha,
+                    "artifact_origin": "freshly_fused",
+                }
 
         return {
             "ok": True, "tag": tag, "name": info["name"],
             "n_search_frames": len(info["search_ids"]),
             "n_delivery_frames": len(delivery_ids),
-            "n_holdout_frames": len(info["val_frames"]),
+            "n_holdout_frames": len(benchmark_frames_for_eval),
+            "n_tuning_frames": len(info.get("tuning_frames", [])),
             "voxel_mm_effective": info["eff_voxel"],
             "poisson_applied": applied_poisson,
             "fusion": final.to_dict(),
-            "geometry_eval": info["geo_eval"],
+            "geometry_eval": delivery_geo_eval,
+            "geometry_eval_search_tuning": info.get("geo_eval"),
             "texture": bake_info, "appearance": appear,
             "texture_contract": tc.to_dict(),
-            "holdout": info["split"].to_dict(),
+            "holdout": bench_split.to_dict() if bench_split and hasattr(bench_split, 'to_dict') else {},
+            "fusion_frame_ids_sha256": fusion_frame_hash,
+            "evaluation_frame_ids_sha256": eval_frame_hash,
+            "evaluation_mesh_sha256": mesh_sha,
+            "fusion_frames_sha256": fusion_frame_hash,
+            "artifact_origin": "freshly_fused",
+            "benchmark_holdout_ids": benchmark_ids_for_eval,
         }
 
 
     # ---- PREVIEW MODE: Fair dual-backend visual reconstruction (§4-§19) ----
     if is_preview:
+        # Fail-closed if benchmark split not available (spec §5: <20 or missing backend => NON_COMPARABLE / fail)
+        if benchmark_split_error is not None or benchmark_split is None:
+            err = benchmark_split_error or "benchmark split unavailable"
+            decide("preview_benchmark", "NON_COMPARABLE", err)
+            result = {"ok": False, "mode": "preview", "reason": err, "decisions": decisions, "wall_s": round(time.time() - t0, 1)}
+            _write_report(out_dir, result, preview=True)
+            return result
         preview_cands = [c for c in scores if c.ok]
         if not preview_cands:
             preview_cands = top
-        poses_by_cand = {}
+        # Reuse poses computed for split to avoid double association (ensure same)
+        poses_by_cand = poses_by_backend_for_split
+        # Build assoc reports for preview candidates from already computed summary
         assoc_by_cand = {}
         for c in preview_cands:
             if c.backend in trajectories:
+                # Re-associate for detailed report (same as before) to fill pose_association_report.json
                 traj = trajectories[c.backend]
                 from auto_mobility.trajectory.association import associate_trajectory_to_frames
                 frame_stamps = np.array([f.rgb_timestamp for f in frames], dtype=np.float64)
                 _, results, summary = associate_trajectory_to_frames(
                     frame_stamps, traj, max_pose_gap_ms=50.0, enable_interpolation=True
                 )
-                p_map = {frames[r.frame_id].frame_id: r.T_world_camera for r in results if r.valid and r.T_world_camera is not None}
-                poses_by_cand[c.backend] = p_map
+                # Use the previously computed pose map for consistency, but store report
                 assoc_by_cand[c.backend] = (summary, results)
 
-        fuse_ids = {f.frame_id for f in frames if roles.get(f.frame_id) == FrameRole.FUSE}
-        if len(fuse_ids) < 20:
-            fuse_ids = {f.frame_id for f in frames if roles.get(f.frame_id) != FrameRole.REJECT}
-        valid_sets = [set(poses_by_cand[c.backend].keys()) for c in preview_cands if c.backend in poses_by_cand]
-        common_ids = sorted(fuse_ids & set.intersection(*valid_sets)) if valid_sets else []
-        is_comparable = True
-        if len(common_ids) < 20 and preview_cands:
-            is_comparable = False
-            decide("preview_frame_selection", "NON_COMPARABLE_SPARSE_INTERSECTION",
-                   "common frame intersection between backends is sparse (<20); previews marked non-comparable",
-                   common_pool=len(common_ids))
-            first_name = preview_cands[0].backend
-            common_ids = sorted(fuse_ids & set(poses_by_cand.get(first_name, {}).keys()))
-
+        # Locked non-holdout pool: (train ∪ tuning) intersect FUSE ∩ common poses
+        non_holdout_pool = sorted(set(benchmark_split.train_ids) | set(benchmark_split.tuning_val_ids))
+        # Further restrict to FUSE and valid poses (common)
+        fuse_set = {f.frame_id for f in frames if roles.get(f.frame_id) == FrameRole.FUSE}
+        if len(fuse_set) < 20:
+            fuse_set = {f.frame_id for f in frames if roles.get(f.frame_id) != FrameRole.REJECT}
+        non_holdout_fuse = [fid for fid in non_holdout_pool if fid in fuse_set]
+        # Intersect with common pose availability (all backends have pose)
+        # common raw already is fuse ∩ common poses; non_holdout should be subset
+        # For safety, filter to those present in all pose maps
+        for b in [c.backend for c in preview_cands if c.backend in poses_by_cand]:
+            non_holdout_fuse = [fid for fid in non_holdout_fuse if fid in poses_by_cand[b]]
+        # Now pose-space coverage selection to exactly 800 or less
         target_n = policy.geometry_frame_target or 800
         ref_poses = poses_by_cand.get(preview_cands[0].backend, {}) if preview_cands else {}
-        preview_frame_ids = select_pose_coverage_frames(common_ids, ref_poses, target_count=target_n)
+        preview_frame_ids = select_pose_coverage_frames(non_holdout_fuse, ref_poses, target_count=target_n)
+        # Benchmark holdout is strictly excluded from preview fusion/mask/texture
+        benchmark_holdout_ids = list(benchmark_split.benchmark_holdout_ids)
+        assert set(benchmark_holdout_ids).isdisjoint(set(preview_frame_ids)), "benchmark leaked into preview fusion"
         decide("preview_frame_selection", "SELECTED",
-               f"selected {len(preview_frame_ids)} representative FUSE frames via pose-space coverage for dual preview",
-               n_preview_frames=len(preview_frame_ids), target=target_n, common_pool=len(common_ids),
-               is_comparable=is_comparable)
+               f"selected {len(preview_frame_ids)} representative FUSE frames via pose-space coverage for dual preview (locked benchmark {len(benchmark_holdout_ids)} excluded)",
+               n_preview_frames=len(preview_frame_ids), target=target_n, common_pool=len(common_ids_raw),
+               non_holdout_pool=len(non_holdout_fuse),
+               benchmark_holdout=len(benchmark_holdout_ids),
+               is_comparable=True,
+               benchmark_split=benchmark_split.to_dict())
 
         all_pts = []
         for c in preview_cands:
@@ -1199,12 +1436,17 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                         })
 
             print(f"\n▶ [{c_idx}/{len(preview_cands)}] Processing Backend: {cand_name.upper()}", flush=True)
-            split = split_from_poses(cand_frame_ids, [poses[fid] for fid in cand_frame_ids])
-            val_frames = [id_to_frame[i] for i in split.val_ids if i in id_to_frame]
-
-            # Step 1: Coarse TSDF & consistency mask
-            print(f"  [1/4] Coarse TSDF & Consistency Mask (sampling {min(80, len(cand_frame_ids))} frames)...", flush=True)
+            # Use locked benchmark holdout exclusively for evaluation (never for fusion/mask/texture)
+            # Filter benchmark frames to those where this backend has a valid pose
+            benchmark_frame_ids = [fid for fid in benchmark_split.benchmark_holdout_ids if fid in poses and fid in id_to_frame]
+            val_frames = [id_to_frame[fid] for fid in benchmark_frame_ids]
+            # For coarse/mask, only use non-holdout frames (already guaranteed by preview_frame_ids)
+            assert set(benchmark_frame_ids).isdisjoint(set(cand_frame_ids)), "benchmark leaked into preview fusion"
+            # Step 1: Coarse TSDF & consistency mask — strictly non-holdout
+            print(f"  [1/4] Coarse TSDF & Consistency Mask (sampling {min(80, len(cand_frame_ids))} frames, benchmark excluded)...", flush=True)
             coarse_ids = cand_frame_ids[:: max(1, len(cand_frame_ids) // 80)] or cand_frame_ids
+            # Ensure coarse never contains benchmark
+            assert set(benchmark_split.benchmark_holdout_ids).isdisjoint(set(coarse_ids))
             coarse_plan = _plan_active_blocks_safe(coarse_ids, poses, eff_voxel, tag=f"{cand_name}_preview_coarse")
             coarse = submit_fusion(coarse_ids, poses, eff_voxel / 1000.0, None, f"{cand_name}_preview_coarse", active_plan=coarse_plan)
             masks = {}
@@ -1212,10 +1454,12 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 scene = build_scene(coarse.mesh_obj)
                 mask_sample = cand_frame_ids[:: max(1, len(cand_frame_ids) // 40)]
                 masks = compute_masks(scene, mask_sample, poses)
+                # Mask provenance: masks must not include benchmark frames
+                assert set(benchmark_split.benchmark_holdout_ids).isdisjoint(set(masks.keys())), "benchmark leaked into mask"
                 print(f"        ✓ Consistency mask computed on {len(masks)} keyframes", flush=True)
 
-            # Step 2: Full preview TSDF fusion
-            print(f"  [2/4] GPU TSDF Fusion ({len(cand_frame_ids)} frames @ {eff_voxel:.1f}mm)...", flush=True)
+            # Step 2: Full preview TSDF fusion — strictly non-holdout
+            print(f"  [2/4] GPU TSDF Fusion ({len(cand_frame_ids)} frames @ {eff_voxel:.1f}mm, benchmark excluded)...", flush=True)
             preview_plan = _plan_active_blocks_safe(cand_frame_ids, poses, eff_voxel, tag=f"{cand_name}_preview_delivery")
             final = submit_fusion(cand_frame_ids, poses, eff_voxel / 1000.0, masks or None, f"{cand_name}_preview_delivery", active_plan=preview_plan)
 
@@ -1269,6 +1513,10 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             (cand_dir / "appearance_quality.json").write_text(json.dumps(appear, indent=2))
             (cand_dir / "geometry_quality.json").write_text(json.dumps(geo_eval, indent=2))
             (cand_dir / "texture_contract.json").write_text(json.dumps(tex_contract.to_dict(), indent=2))
+            # Provenance: freshly_fused + hashes + benchmark isolation
+            import hashlib as _h2
+            fusion_frame_hash = _h2.sha256(",".join(map(str, sorted(cand_frame_ids))).encode()).hexdigest()[:16] if cand_frame_ids else "empty"
+            eval_frame_hash = _h2.sha256(",".join(map(str, sorted(benchmark_frame_ids))).encode()).hexdigest()[:16] if benchmark_frame_ids else "empty"
             (cand_dir / "config.json").write_text(json.dumps({
                 "artifact_mode": "preview",
                 "production_final": False,
@@ -1278,10 +1526,19 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 "n_frames_total": len(frames),
                 "n_preview_frames": len(cand_frame_ids),
                 "n_holdout_frames": len(val_frames),
+                "benchmark_holdout_ids": benchmark_frame_ids,
+                "benchmark_holdout_sha256": benchmark_split.benchmark_holdout_ids_sha256,
+                "fusion_frame_ids_sha256": fusion_frame_hash,
+                "evaluation_frame_ids_sha256": eval_frame_hash,
+                "fusion_frames_sha256": fusion_frame_hash,
+                "evaluation_mesh_sha256": tex_contract.obj_hash,
+                "artifact_origin": "freshly_fused",
+                "fusion_worker_tag": f"{cand_name}_preview_delivery",
                 "obj_hash": tex_contract.obj_hash,
                 "mtl_hash": tex_contract.mtl_hash,
                 "artifact_bundle_hash": tex_contract.artifact_bundle_hash,
                 "texture_contract": tex_contract.gate_status,
+                "benchmark_split": benchmark_split.to_dict(),
             }, indent=2))
 
             preview_cand_results[cand_name] = {
@@ -1298,6 +1555,11 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 "obj_hash": tex_contract.obj_hash,
                 "artifact_bundle_hash": tex_contract.artifact_bundle_hash,
                 "fusion": final.to_dict() if final else {},
+                "benchmark_holdout_ids": benchmark_frame_ids,
+                "fusion_frame_ids_sha256": fusion_frame_hash,
+                "evaluation_frame_ids_sha256": eval_frame_hash,
+                "benchmark_split": benchmark_split.to_dict(),
+                "artifact_origin": "freshly_fused",
             }
 
 
@@ -1531,77 +1793,95 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
     by_name = {info["name"]: info for info in search_infos}
     ordered = [by_name[n] for n in ordered_names if n in by_name]
 
-    # ---- Dual-backend delivery (explicit --deliver-backends) ----
+    # ---- Dual-backend delivery (explicit --deliver-backends) — benchmark-exclusive ----
     if deliver_backends is not None and not preview and not quick:
-        # deliver_backends is list of requested backend names (e.g. ["rtab","cuvslam"])
+        # Fail-closed if benchmark split not available
+        if benchmark_split is None or benchmark_split_error is not None:
+            err = benchmark_split_error or "benchmark split unavailable"
+            decide("dual_delivery_holdout", "NON_COMPARABLE", err)
+            result = {"ok": False, "reason": err, "trajectory_scores": [s.to_dict() for s in scores],
+                      "decisions": decisions, "wall_s": round(time.time()-t0,1), "benchmark_split_error": err}
+            _write_report(out_dir, result, preview=False)
+            return result
         requested = [b.strip().lower() for b in deliver_backends if b.strip()]
-        # Normalize: "all" means all available
         if len(requested) == 1 and requested[0] == "all":
             requested = list(by_name.keys())
         result = {"trajectory_scores": [s.to_dict() for s in scores],
                   "decisions": decisions,
-                  "deliver_backends": requested}
-        # Determine common holdout frame IDs for comparable metrics
-        # Each info has split.val_ids and poses; we intersect val_ids that are valid for delivery
-        val_sets = []
-        for b in requested:
-            if b in by_name:
-                info = by_name[b]
-                # valid delivery ids are info["delivery_ids"]; val_ids intersect delivery
-                vs = set(info.get("split").val_ids) & set(info.get("delivery_ids", []))
-                val_sets.append(vs)
-            else:
-                val_sets.append(set())
-        common_holdout = set.intersection(*val_sets) if val_sets and all(val_sets) else set()
+                  "deliver_backends": requested,
+                  "benchmark_split": benchmark_split.to_dict()}
+        # Common holdout is the locked benchmark_holdout_ids (identical for all backends)
+        common_holdout = set(benchmark_split.benchmark_holdout_ids)
+        # Ensure common holdout is at least 20 and pose-valid for every requested backend
+        # Filter to those where each backend has pose (intersection already ensures, but re-check)
+        common_holdout_valid = set()
+        for fid in common_holdout:
+            if all(fid in by_name.get(b, {}).get("poses", {}) for b in requested if b in by_name):
+                # also ensure frame not REJECT if possible (but benchmark already fuse-filtered)
+                if fid in id_to_frame:
+                    common_holdout_valid.add(fid)
+        # For reporting, use full benchmark set
         is_comparable = len(common_holdout) >= 20
         if not is_comparable:
             decide("dual_delivery_holdout", "NON_COMPARABLE",
-                   f"common holdout {len(common_holdout)} <20; metrics not comparable, winner not selected",
-                   common_holdout=len(common_holdout), requested=requested)
+                   f"benchmark holdout {len(common_holdout)} <20; metrics not comparable, winner not selected",
+                   benchmark_holdout=len(common_holdout), requested=requested)
         else:
             decide("dual_delivery_holdout", "COMPARABLE",
-                   f"common holdout {len(common_holdout)} frames for fair comparison",
-                   common_holdout=len(common_holdout))
-        # Deliver each requested backend independently
+                   f"benchmark holdout {len(common_holdout)} frames for fair comparison (locked)",
+                   benchmark_holdout=len(common_holdout), benchmark_sha=benchmark_split.benchmark_holdout_ids_sha256)
+
+        # Detect SUSPECT_ARTIFACT_REUSE placeholder: will check after delivery if OBJ hashes identical with different frame identities
         final_candidates = {}
         any_ok = False
-        any_fail = False
         for b in requested:
             if b not in by_name:
                 decide("dual_delivery", "MISSING_BACKEND",
                        f"requested backend {b} not in search candidates", backend=b)
-                final_candidates[b] = {"ok": False, "reason": "missing backend or search failed"}
-                any_fail = True
+                final_candidates[b] = {"ok": False, "reason": "missing backend or search failed", "evaluation_status": "NOT_EVALUATED"}
                 continue
             info = by_name[b]
-            # For dual delivery, attempt final fusion regardless of search quality PASS/FAIL?
-            # But production_final gate still requires PASS. We deliver candidate artefact even if quality FAIL,
-            # but mark production_final false.
             t_d = time.time()
-            # Use backend name as tag for dual delivery: final_candidates/<backend>
             tag = f"final_candidates/{b}"
             out_c = deliver_candidate(info, tag)
             budget_record("optional_improvement", time.time() - t_d)
             final_candidates[b] = out_c
-            # Evaluate on common holdout for comparison if possible
-            if is_comparable and out_c.get("ok"):
-                try:
-                    from auto_mobility.reconstruction.evaluation.geometry_eval import evaluate_geometry as _eval_geo
-                    from auto_mobility.dataset.frame_dataset import FrameDataset as _FDS
-                    # Need poses and cam
-                    # Already have info["poses"], cam_intr, depth fn in closure? Use existing evaluation on common holdout
-                    # We reuse the evaluate_geometry helper that was used for val_frames, but on common holdout subset
-                    # For now, record that common holdout was used for comparison
-                    out_c["common_holdout_evaluated"] = True
-                    out_c["common_holdout_size"] = len(common_holdout)
-                except Exception:
-                    pass
+            # The deliver_candidate already evaluated the delivery mesh on benchmark_holdout via real evaluate_geometry
+            # Enforce that evaluation succeeded; otherwise mark NOT_EVALUATED
+            geo = out_c.get("geometry_eval", {})
+            if geo.get("status") != "ok":
+                out_c["evaluation_status"] = "NOT_EVALUATED"
+                decide("dual_delivery", "NOT_EVALUATED", f"{b} benchmark evaluation failed: {geo.get('reason') or geo.get('status')}", backend=b)
+            else:
+                out_c["evaluation_status"] = "EVALUATED"
+                # Record mandatory SHAs for provenance
+                out_c["evaluation_frame_ids_sha256"] = out_c.get("evaluation_frame_ids_sha256")
+                out_c["evaluation_mesh_sha256"] = out_c.get("evaluation_mesh_sha256")
+                out_c["fusion_frame_ids_sha256"] = out_c.get("fusion_frame_ids_sha256")
             if out_c.get("ok"):
                 any_ok = True
-            else:
-                any_fail = True
             result[f"candidate_{b}"] = out_c
-        # Build standard_comparison.json payload for dual delivery
+
+        # SUSPECT_ARTIFACT_REUSE detection: different identities must not have identical OBJ hash
+        obj_hashes = {}
+        for b, c in final_candidates.items():
+            h = c.get("evaluation_mesh_sha256") or c.get("texture_contract", {}).get("obj_hash")
+            if h:
+                obj_hashes.setdefault(h, []).append(b)
+        for h, bs in obj_hashes.items():
+            if len(bs) > 1 and h != "no_obj":
+                # Check if identities differ: fusion frame counts or SHAs differ but OBJ same
+                fusion_shas = {final_candidates[b].get("fusion_frame_ids_sha256") for b in bs}
+                if len(fusion_shas) > 1:
+                    err = f"SUSPECT_ARTIFACT_REUSE: OBJ hash {h[:16]} identical for backends {bs} with different fusion identities {fusion_shas}"
+                    decide("artifact_provenance", "SUSPECT_ARTIFACT_REUSE", err, obj_hash=h, backends=bs)
+                    # Fail the run
+                    for b in bs:
+                        final_candidates[b]["ok"] = False
+                        final_candidates[b]["reason"] = err
+                    any_ok = False
+
+        # Build standard_comparison.json with real evaluation values
         try:
             comparison = {}
             for b in requested:
@@ -1613,7 +1893,15 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                     "reason": c.get("reason"),
                     "voxel_mm_effective": c.get("voxel_mm_effective"),
                     "n_delivery_frames": c.get("n_delivery_frames"),
-                    "n_holdout_frames": c.get("n_holdout_frames"),
+                    "n_benchmark_frames": c.get("n_holdout_frames"),
+                    "fusion_frame_ids_sha256": c.get("fusion_frame_ids_sha256"),
+                    "evaluation_frame_ids_sha256": c.get("evaluation_frame_ids_sha256"),
+                    "evaluation_mesh_sha256": c.get("evaluation_mesh_sha256"),
+                    "evaluation_status": c.get("evaluation_status"),
+                    "frame_count": c.get("n_delivery_frames"),
+                    "voxel": c.get("voxel_mm_effective"),
+                    "runtime_s": round(time.time()-t0,1),
+                    "quality_status": geo.get("quality", {}).get("status") if isinstance(geo.get("quality"), dict) else None,
                     "heldout": {
                         "depth_mae_mm": geo.get("depth_mae_mm"),
                         "depth_rmse_mm": geo.get("depth_rmse_mm"),
@@ -1626,44 +1914,63 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                     },
                     "texture_contract": tex.get("gate_status"),
                     "textured_face_coverage": tex.get("textured_face_coverage"),
-                    "topology": {},  # placeholder for mesh topology metrics
+                    "quality": geo.get("quality"),
                 }
             (out_dir / "standard_comparison.json").write_text(json.dumps({
                 "requested_backends": requested,
+                "benchmark_holdout_ids": list(benchmark_split.benchmark_holdout_ids),
+                "benchmark_holdout_sha256": benchmark_split.benchmark_holdout_ids_sha256,
+                "evaluation_frame_ids_sha256": benchmark_split.benchmark_holdout_ids_sha256,
                 "common_holdout_size": len(common_holdout),
                 "is_comparable": is_comparable,
                 "backends": comparison,
+                "benchmark_split": benchmark_split.to_dict(),
                 "wall_s": round(time.time()-t0,1),
             }, indent=2))
-            # standard_report.md
             lines = ["# Standard Dual-Backend Delivery Report", "",
                      f"- Requested: {', '.join(requested)}",
-                     f"- Common holdout: {len(common_holdout)} frames ({'COMPARABLE' if is_comparable else 'NON_COMPARABLE'})",
+                     f"- Benchmark holdout: {len(common_holdout)} frames ({'COMPARABLE' if is_comparable else 'NON_COMPARABLE'}) SHA {benchmark_split.benchmark_holdout_ids_sha256}",
+                     f"- Fusion: train+ tuning frames (benchmark excluded)",
                      f"- Wall: {round(time.time()-t0,1)}s", "",
-                     "| Backend | OK | MAE | P95 | Coverage | Texture |",
-                     "|:---|:---:|---|---|---|---|",
+                     "| Backend | OK | Fused Frames | Voxel | MAE | P95 | Coverage | Within20 | FreeSpace | Mesh SHA | Texture |",
+                     "|:---|:---:|---:|---:|---|---|---|---|---|---|---|",
                      ]
             for b in requested:
                 c = final_candidates.get(b, {})
                 geo = c.get("geometry_eval", {})
                 tex = c.get("texture_contract", {})
-                lines.append(f"| {b} | {c.get('ok')} | {geo.get('depth_mae_mm','-')} | {geo.get('depth_p95_mm','-')} | {geo.get('depth_coverage_ratio','-')} | {tex.get('gate_status','-')} |")
+                lines.append(f"| {b} | {c.get('ok')} | {c.get('n_delivery_frames','-')} | {c.get('voxel_mm_effective','-')} | {geo.get('depth_mae_mm','-')} | {geo.get('depth_p95_mm','-')} | {geo.get('depth_coverage_ratio','-')} | {geo.get('within_20mm_ratio','-')} | {geo.get('free_space_correctness_ratio','-')} | {str(c.get('evaluation_mesh_sha256','-'))[:12]} | {tex.get('gate_status','-')} |")
+            # Add benchmark provenance note
+            lines += ["", f"**Benchmark split:** {benchmark_split.generation_rule}", f"**Common pose count:** {benchmark_split.common_pose_count}", ""]
             (out_dir / "standard_report.md").write_text("\n".join(lines)+"\n")
-        except Exception:
-            pass
+        except Exception as exc:
+            decide("standard_comparison", "FAILED", f"failed to write comparison: {exc}")
         result["final_candidates"] = final_candidates
         result["is_comparable"] = is_comparable
         result["common_holdout_size"] = len(common_holdout)
-        # Overall ok: require all requested backends to pass mandatory gates (geometry+appearance) unless? Spec: exit non-zero if any mandatory gate fails
-        all_ok = all(final_candidates.get(b, {}).get("ok") for b in requested)
-        result["ok"] = bool(all_ok and any_ok)
+        result["benchmark_split"] = benchmark_split.to_dict()
+        # Overall ok: require all requested backends to pass mandatory gates (geometry+appearance) and be EVALUATED
+        all_ok = all(final_candidates.get(b, {}).get("ok") and final_candidates.get(b, {}).get("evaluation_status")=="EVALUATED" for b in requested)
+        # Also require texture and geometry quality PASS
+        for b in requested:
+            c = final_candidates.get(b, {})
+            if c.get("ok"):
+                geo_q = c.get("geometry_eval", {}).get("quality", {})
+                tex_gate = c.get("texture_contract", {}).get("gate_status")
+                if geo_q.get("status") != "PASS" or tex_gate != "PASS":
+                    all_ok = False
+        result["ok"] = bool(all_ok and any_ok and is_comparable)
         if not result["ok"]:
-            result["reason"] = "one or more backends failed mandatory gates (see final_candidates)"
+            # Determine reason: NOT_EVALUATED blocks comparison
+            not_eval = [b for b in requested if final_candidates.get(b, {}).get("evaluation_status") != "EVALUATED"]
+            if not_eval:
+                result["reason"] = f"NOT_EVALUATED for backends {not_eval} – comparison/quality gate blocked"
+            elif not is_comparable:
+                result["reason"] = "NON_COMPARABLE benchmark holdout"
+            else:
+                result["reason"] = "one or more backends failed mandatory geometry/appearance gates (see final_candidates)"
         else:
-            # Determine winner only if comparable and at least one passes geometry quality gates
-            # Use lowest MAE among passing candidates
             passing = [b for b in requested if final_candidates.get(b, {}).get("ok") and final_candidates[b].get("geometry_eval", {}).get("quality", {}).get("status")=="PASS"]
-            # fallback to lowest MAE if quality status not PASS but ok True
             if not passing:
                 passing = [b for b in requested if final_candidates.get(b, {}).get("ok")]
             if is_comparable and passing:

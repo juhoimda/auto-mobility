@@ -479,21 +479,17 @@ def extract_dataset_from_bag(bag_path_or_name: str, out_dir: Optional[str] = Non
         K_color_arr = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=float)
 
     # --- Attempt to recover K_depth and T_color_depth from bag metadata ---
+    # STRICT: do NOT fabricate K_depth/T by copying color values based on frame_id alone.
+    # Only genuine sensor metadata (depth CameraInfo or tf_static chain) counts.
     K_depth_arr = None
     T_color_depth_arr = None
     depth_scale = 1.0
+    has_genuine_depth_info = False
     if depth_camera_info_record is not None:
         Kd_raw = depth_camera_info_record.get("K")
         if Kd_raw is not None:
             K_depth_arr = np.array(Kd_raw, dtype=float).reshape(3, 3)
-        # depth frame from depth info
-        # also record depth scale if available (assume mm)
-    # If depth is already in color frame (driver-aligned), K_depth equals K_color
-    # This is NOT an estimation: it is driver-provided aligned depth semantics
-    if K_depth_arr is None and color_fid == depth_fid and first_w == 640 and first_h == 480:
-        # Hallway bag: depth frame_id == color frame_id, same resolution, TF indicates identity
-        # Treat as driver-aligned: depth K is color K
-        K_depth_arr = K_color_arr.copy()
+            has_genuine_depth_info = True
 
     # Build T_color_depth from tf_static if available
     if tf_static_transforms:
@@ -514,9 +510,17 @@ def extract_dataset_from_bag(bag_path_or_name: str, out_dir: Optional[str] = Non
             M[:3,3]=t["translation"]
             return M
         tf_map = {f"{e['parent']}->{e['child']}": _tf_to_matrix(e) for e in tf_static_transforms}
-        # Try to derive T_color_depth
+        # Try to derive T_color_depth strictly from TF chain (no frame_id-only fabrication)
+        # Case 1: same frame_id — only valid if TF confirms identity via common parent
         if color_fid == depth_fid:
-            T_color_depth_arr = np.eye(4)
+            # Look for explicit TF that links this frame_id to its parent and verify identity
+            # If both color and depth share same frame_id, they are by definition same optical frame,
+            # so T is identity ONLY if we have at least one TF entry proving this frame exists in TF tree.
+            # We consider TF proof valid if the frame_id appears as child in tf_static.
+            tf_children = {e["child"] for e in tf_static_transforms}
+            if color_fid in tf_children:
+                T_color_depth_arr = np.eye(4)
+            # else remain None -> fail-closed (no independent TF proof)
         else:
             # Look for camera_link as common parent
             # need T_link_color and T_link_depth
@@ -545,9 +549,8 @@ def extract_dataset_from_bag(bag_path_or_name: str, out_dir: Optional[str] = Non
                         T_color_depth_arr = np.linalg.inv(T_link_color) @ T_link_depth
                     except Exception:
                         pass
-    # If still None but driver-aligned due to same frame_id, use identity
-    if T_color_depth_arr is None and color_fid == depth_fid:
-        T_color_depth_arr = np.eye(4)
+    # Strict: do NOT fabricate T identity from frame_id equality alone without TF evidence.
+    # If still None, leave as None -> prove_alignment will fail-closed.
 
     alignment_contract = prove_alignment(
         color_frame_id=color_fid,

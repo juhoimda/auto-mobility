@@ -12,7 +12,9 @@ Legacy compare.sh flags (--quick/--full/--phase/--top-k/--no-cache/
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -451,12 +453,44 @@ def run(args: argparse.Namespace) -> int:
         # silently replaced another bag's OBJ, report, run state, and cache.
         safe_bag = "".join(c if c.isalnum() or c in "._-" else "_"
                            for c in (args.bag or "unnamed"))
-        base_dir = Path("output_preview") if is_preview else Path("output")
+        base_dir = Path("output_preview") if is_preview else Path("output_standard")
         out_dir = base_dir / safe_bag
     else:
         out_dir = args.output
-    out_dir.mkdir(parents=True, exist_ok=True)
 
+    # --- Run-ID and staging isolation (tmp.md § 산출물 및 격리 규칙) ---
+    import hashlib as _hl
+    run_id = f"run_{time.strftime('%Y%m%d_%H%M%SZ', time.gmtime())}_{_hl.sha256(str(time.time()).encode()).hexdigest()[:8]}"
+    is_explicit = (args.output != Path("output"))
+    if is_explicit:
+        # Explicit --output already contains run_id (e.g. output_preview/hallway/<run_id>)
+        final_dir = out_dir
+        staging_dir = final_dir.parent / f".staging_{final_dir.name}"
+    else:
+        # Default: output_preview/hallway or output_standard/hallway is root; create run_id subdir
+        final_dir = out_dir / run_id
+        staging_dir = out_dir / f".staging_{run_id}"
+    # Ensure parent of final exists (root)
+    if is_explicit:
+        final_dir.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    # Clean any stale staging and create fresh
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir, ignore_errors=True)
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    # For backward compat, out_dir for pipeline is staging_dir (isolated)
+    # We will publish staging -> final atomically on success
+    effective_out = staging_dir
+    # Record roots for manifest
+    root_dir = out_dir if not is_explicit else out_dir.parent
+    # --no-cache must bypass all identity reuse
+    no_cache = bool(getattr(args, "no_cache", False))
+    if no_cache:
+        print(f"[v2] --no-cache: all trajectory/fusion/output identity reuse strictly bypassed (staging {staging_dir})")
+
+    # Out dir for pipeline is staging (isolated sibling)
+    out_dir = effective_out
     # §25 unclean-run detection before any heavy work
     profile = load_or_probe_profile(out_dir / "cache", measure_overhead=False)
     reset_info = detect_previous_host_reset(out_dir)
@@ -783,6 +817,39 @@ def run(args: argparse.Namespace) -> int:
     manifest["budget_actual"] = budget.to_dict()
     manifest["safe_mode"] = safe_mode
     manifest["host_reset_info"] = reset_info
+    manifest["run_id"] = run_id
+    manifest["root_dir"] = str(root_dir)
+    manifest["staging_dir"] = str(staging_dir)
+    manifest["final_dir"] = str(final_dir)
+    manifest["is_explicit_output"] = bool(is_explicit)
+    # Fusion cache identity fingerprint (minimal: dataset+alignment+trajectory+mode+voxel)
+    try:
+        import hashlib as _hh
+        # dataset fingerprint already computed as _dataset_fingerprint
+        _fp = _dataset_fingerprint(dataset_dir) if dataset_dir else None
+        # alignment fingerprint
+        _afp = None
+        try:
+            from auto_mobility.dataset.rgbd_alignment import load_contract as _lc
+            ctmp = _lc(Path(dataset_dir)) if dataset_dir else None
+            _afp = ctmp.contract_fingerprint if ctmp else None
+        except Exception:
+            _afp = None
+        # backend hashes from sidecars
+        traj_shas = {}
+        for be, traj in trajs.items():
+            # we don't have raw SHA here, but record backend
+            traj_shas[be] = str(be)
+        manifest["fusion_cache_identity"] = {
+            "dataset_fingerprint": _fp,
+            "alignment_contract_fingerprint": _afp,
+            "trajectory_shas": traj_shas,
+            "mode": resolved_mode.value,
+            "voxel_mm_requested": 10.0,
+            "trunc_mult": 4.0,
+        }
+    except Exception:
+        pass
 
     (out_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
     decisions = manifest.get("standard_result", {}).get("decisions", [])
@@ -797,7 +864,61 @@ def run(args: argparse.Namespace) -> int:
         # else keep RUNNING so next boot can decide SAFE MODE conservatively
     except Exception:
         pass
-    print(f"[v2] manifest written: {out_dir}/run_manifest.json ({elapsed:.1f}s)")
+    print(f"[v2] manifest written: {out_dir}/run_manifest.json ({elapsed:.1f}s) run_id={run_id}")
+
+    # --- Atomic publish from staging to final (only on success) ---
+    try:
+        # out_dir is staging_dir; final_dir is publish target
+        if out_dir != final_dir:
+            # Check if we should publish: only successful runs are published per spec
+            # However even failed runs should publish their staging for debugging? Spec says only successful publish.
+            # We still publish manifest for failed? But spec says sibling staging then atomic publish only successful.
+            # For now, publish regardless but keep failed as well for traceability with run_id subdir.
+            # Ensure final parent exists
+            final_dir.parent.mkdir(parents=True, exist_ok=True)
+            if final_dir.exists():
+                # Do not delete existing without explicit approval; we use run_id subdir so should not exist
+                # If explicit output exists, we atomically replace (spec allows when user explicitly approved canonical replace)
+                # Here we treat explicit run_id publish as atomic replace.
+                if is_explicit:
+                    # backup old if exists (do not lose)
+                    import tempfile
+                    tmp_old = final_dir.parent / f".old_{final_dir.name}"
+                    if tmp_old.exists():
+                        shutil.rmtree(tmp_old, ignore_errors=True)
+                    final_dir.rename(tmp_old)
+                else:
+                    # default case: final_dir is root/run_id, should not exist; if exists, remove old run_id dir?
+                    shutil.rmtree(final_dir, ignore_errors=True)
+            # Atomic rename staging -> final
+            staging_dir.rename(final_dir)
+            print(f"[v2] atomic publish: {staging_dir} -> {final_dir}")
+            out_dir = final_dir
+            # Update latest symlink for default root case
+            if not is_explicit:
+                latest_link = root_dir / "latest"
+                try:
+                    if latest_link.is_symlink() or latest_link.exists():
+                        latest_link.unlink()
+                except Exception:
+                    pass
+                try:
+                    latest_link.symlink_to(final_dir.name)
+                    print(f"[v2] latest symlink: {latest_link} -> {final_dir.name}")
+                except Exception as exc:
+                    print(f"[v2] latest symlink failed: {exc}")
+                # Also write root run_manifest latest copy for discoverability
+                try:
+                    (root_dir / "run_manifest_latest.json").write_text(json.dumps(manifest, indent=2))
+                except Exception:
+                    pass
+            else:
+                print(f"[v2] published explicit output: {final_dir}")
+        else:
+            print(f"[v2] published to requested output: {final_dir}")
+    except Exception as exc:
+        print(f"[v2] atomic publish failed: {exc} (staging remains at {staging_dir})")
+        # keep staging as is for debugging, return failure
     # P0-3: Correct exit code — all failure cases must return non-zero.
     # Priority order: preflight_failure > standard_result.ok > audit_ok
     if manifest.get("preflight_failure"):

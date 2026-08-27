@@ -76,12 +76,27 @@ def prove_alignment(
         evidence.append(f"image_size_match: {image_size_color}")
 
     # Check if K matrices are the same (driver-aligned depth uses color K)
+    # Only valid when K_depth comes from genuine sensor metadata, not fabricated copy.
     k_match = False
+    k_match_genuine = False
     if K_depth is not None and K_color is not None:
         diff = np.abs(np.array(K_color, dtype=float) - np.array(K_depth, dtype=float))
         k_match = bool(np.max(diff) < 1.0)  # within 1 pixel
         if k_match:
             evidence.append("K_match: depth K equals color K (driver-aligned)")
+            # K_match is only genuine if K_depth was from sensor (not fabricated) — caller must not fabricate.
+            # We treat any provided K_depth as genuine here; circular case is prevented by not fabricating.
+            k_match_genuine = True
+
+    # Check if T_color_depth indicates identity (depth already in color frame via TF)
+    t_is_identity = False
+    if T_color_depth is not None:
+        try:
+            t_is_identity = bool(np.allclose(np.asarray(T_color_depth, dtype=float), np.eye(4), atol=1e-3))
+            if t_is_identity:
+                evidence.append("T_identity: T_color_depth is identity (depth already in color frame via TF)")
+        except Exception:
+            t_is_identity = False
 
     # Determine method
     method = "UNPROVEN"
@@ -94,8 +109,14 @@ def prove_alignment(
     if is_aligned_topic:
         evidence.append(f"aligned_depth_topic: {depth_topic}")
 
-    if same_size and (k_match or is_aligned_topic):
-        # DRIVER_ALIGNED: image sizes match AND structural evidence beyond frame_id
+    # DRIVER_ALIGNED requires same_size AND independent evidence beyond frame_id:
+    #   - aligned topic name (driver metadata), OR
+    #   - genuine K_match from sensor depth CameraInfo, OR
+    #   - TF-proven identity transform plus same frame_id (depth already expressed in color frame)
+    # Frame_id/resolution/K copied by code alone is NOT sufficient (fail-closed).
+    driver_evidence = (k_match_genuine or is_aligned_topic or (same_fid and t_is_identity))
+    if same_size and driver_evidence:
+        # DRIVER_ALIGNED: image sizes match AND structural independent evidence beyond frame_id
         method = "DRIVER_ALIGNED"
         evidence.append("conclusion: driver provides color-aligned depth")
     elif K_depth is not None and K_color is not None and T_color_depth is not None:
@@ -107,8 +128,8 @@ def prove_alignment(
     else:
         reject_reason = (
             f"Cannot prove alignment: frame_id_same={same_fid}, "
-            f"size_same={same_size}, k_match={k_match}, "
-            f"aligned_topic={is_aligned_topic}, "
+            f"size_same={same_size}, k_match={k_match}, k_genuine={k_match_genuine}, "
+            f"aligned_topic={is_aligned_topic}, t_is_identity={t_is_identity}, "
             f"has_T_color_depth={T_color_depth is not None}"
         )
         evidence.append(f"FAIL: {reject_reason}")

@@ -99,10 +99,15 @@ if [ -z "$1" ]; then
     echo " 기타 옵션:"
     echo "   --safe-mode : SAFE MODE 강제 활성화 (보수적 메모리/동시성 제한)"
     echo "   --top-k N   : Review 디렉터리에 내보낼 상위 후보 수 (기본: 2, Preview: 1)"
-    echo "   --run-slam  : 누락된 SLAM 궤적을 run_slam.sh / worker 로 자동 생성"
-    echo "   --no-cache  : 기존 캐시 무시하고 강제 재생성 (--force 동일)"
+    echo "   --run-slam  : 누락된 SLAM 궤적을 run_slam.sh / worker 로 자동 생성 (fingerprint 불일치 시에만 생성, 없으면 fail-closed)"
+    echo "   --no-cache  : 기존 캐시 무시하고 강제 재생성 (--force 동일, trajectory/fusion/output 모든 재사용 bypass)"
     echo "   --no-resume : 이전 실행 상태 복원 비활성화"
-    echo "   --output DIR: 커스텀 평가 결과 저장 디렉터리 (Preview 기본: output_preview/<bag>)"
+    echo "   --compare-backends : dual delivery (RTAB & cuVSLAM) 비교 모드 — standard에서 명시 안 해도 이번 품질비교 실행은 RTAB/cuvslam 둘 다 요구"
+    echo "   --deliver-backends LIST : 표준 듀얼/단일 전달 지정 (예: rtab,cuvslam 또는 all) — 미지정 시 단일/듀얼 동작은 help/report에 명시"
+    echo "   --output DIR: 커스텀 평가 결과 저장 디렉터리"
+    echo "                 Preview 기본: output_preview/<bag>  (이번 benchmark 실행은 output_preview/hallway/<run_id> 권장)"
+    echo "                 Standard 기본: output_standard/<bag> (이번 benchmark 실행은 output_standard/hallway/<run_id> 권장)"
+    echo "                 standard에 --compare-backends 미지정 시 단일/듀얼 차이는 report/help에 구분 표기됨"
     echo "=========================================================="
     exit 1
 fi

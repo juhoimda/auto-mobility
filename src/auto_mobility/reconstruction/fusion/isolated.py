@@ -63,6 +63,7 @@ def integrate_frames_isolated(
     work_dir.mkdir(parents=True, exist_ok=True)
 
     poses_npz = work_dir / f"{tag}_poses.npz"
+    poses_npz.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         poses_npz,
         **{str(fid): np.asarray(T) for fid, T in pose_by_frame.items()},
@@ -71,14 +72,18 @@ def integrate_frames_isolated(
     masks_npz = None
     if masks_by_frame:
         masks_npz = work_dir / f"{tag}_masks.npz"
+        masks_npz.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
             masks_npz,
             **{str(fid): np.asarray(m, dtype=bool) for fid, m in masks_by_frame.items()},
         )
 
     mesh_out = work_dir / f"{tag}_mesh.ply"
+    mesh_out.parent.mkdir(parents=True, exist_ok=True)
     pcd_out = work_dir / f"{tag}_pcd.ply"
+    pcd_out.parent.mkdir(parents=True, exist_ok=True)
     stats_out = work_dir / f"{tag}_stats.json"
+    stats_out.parent.mkdir(parents=True, exist_ok=True)
     spec = {
         "dataset_dir": str(dataset_dir),
         "frame_ids": [int(i) for i in frame_ids],
@@ -104,6 +109,7 @@ def integrate_frames_isolated(
         "stats_out": str(stats_out),
     }
     spec_path = work_dir / f"{tag}_spec.json"
+    spec_path.parent.mkdir(parents=True, exist_ok=True)
     spec_path.write_text(json.dumps(spec, indent=2))
 
     cmd = [
@@ -127,9 +133,11 @@ def integrate_frames_isolated(
     env["OPENCV_NUM_THREADS"] = "1"
     env["VECLIB_MAXIMUM_THREADS"] = "1"
 
+    log_path = work_dir / f"{tag}_worker.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     outcome = run_monitored_process(
         cmd,
-        log_path=work_dir / f"{tag}_worker.log",
+        log_path=log_path,
         env=env,
         cwd=str(work_dir),
         timeout_s=timeout_s,
