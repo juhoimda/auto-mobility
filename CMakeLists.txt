@@ -52,8 +52,6 @@ install(
     src/auto_mobility/mesh/view_pointcloud.py
     src/auto_mobility/isaac/load_isaac_mesh.py
     src/auto_mobility/slam/benchmark_slam.py
-    src/auto_mobility/slam/compare_algorithms.py
-    src/auto_mobility/benchmark/cli.py
     src/auto_mobility/utils/benchmark_hw.py
     src/auto_mobility/utils/inspect_system.py
     src/auto_mobility/utils/validate.py

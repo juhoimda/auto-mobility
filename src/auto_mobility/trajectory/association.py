@@ -66,7 +66,7 @@ def associate_trajectory_to_frames(
     h.update(np.ascontiguousarray(trajectory.timestamps, dtype=np.float64).tobytes())
     h.update(np.ascontiguousarray(trajectory.positions, dtype=np.float64).tobytes())
     h.update(np.ascontiguousarray(trajectory.orientations, dtype=np.float64).tobytes())
-    key = (h.hexdigest(), len(trajectory), float(max_pose_gap_ms), bool(enable_interpolation))
+    key = (h.hexdigest(), len(getattr(trajectory, "timestamps", trajectory)), float(max_pose_gap_ms), bool(enable_interpolation))
 
     with _ASSOC_CACHE_LOCK:
         cached = _ASSOC_CACHE.get(key)
@@ -108,8 +108,8 @@ def _associate_trajectory_to_frames_impl(
         summary: AssociationSummary
     """
     n_frames = len(frame_stamps)
-
-    if len(trajectory) == 0:
+    n_traj = len(getattr(trajectory, "timestamps", trajectory))
+    if n_traj == 0:
         summary = AssociationSummary(
             num_frames=n_frames,
             pose_match_count=0,
@@ -123,9 +123,9 @@ def _associate_trajectory_to_frames_impl(
         )
         return {}, [], summary
 
-    traj_stamps = trajectory.timestamps
-    traj_positions = trajectory.positions
-    traj_orientations = trajectory.orientations
+    traj_stamps = np.asarray(trajectory.timestamps, dtype=np.float64)
+    traj_positions = np.asarray(trajectory.positions, dtype=np.float64)
+    traj_orientations = np.asarray(trajectory.orientations, dtype=np.float64)
 
     # Ensure trajectory is sorted by timestamp
     sort_idx = np.argsort(traj_stamps)

@@ -407,9 +407,28 @@ def extract_dataset_from_bag(bag_path_or_name: str, out_dir: Optional[str] = Non
     duration = float(r_stamps[-1] - r_stamps[0]) if len(r_stamps) > 1 else 0.0
     est_hz = round(saved_pairs_count / duration, 2) if duration > 0 else 0.0
 
+    def _bag_fingerprint(bp: Path) -> str:
+        import hashlib
+        h = hashlib.sha256()
+        if bp.is_file():
+            stat = bp.stat()
+            h.update(f"{bp.name}:{stat.st_size}:{stat.st_mtime}".encode())
+        elif bp.is_dir():
+            for f in sorted(bp.iterdir()):
+                if f.is_file():
+                    stat = f.stat()
+                    h.update(f"{f.name}:{stat.st_size}:{stat.st_mtime}".encode())
+        return h.hexdigest()[:16]
+
+    same_optical_frame = all(
+        p["rgb_frame_id"] == p["depth_frame_id"] for p in matched_pairs)
+
     dataset_info = {
+        "extraction_schema_version": "canonical-v3",
+        "extraction_code_version": "3.0.0",
         "dataset_name": bag_name,
         "source_bag": str(bag_path),
+        "source_bag_fingerprint": _bag_fingerprint(bag_path),
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "frame_count": saved_pairs_count,
         "duration_sec": round(duration, 3),
@@ -417,6 +436,13 @@ def extract_dataset_from_bag(bag_path_or_name: str, out_dir: Optional[str] = Non
         "raw_rgb_count": len(rgb_frames),
         "raw_depth_count": len(depth_frames),
         "imu_sample_count": len(imu_records),
+        "rgb_topic": selected_rgb,
+        "depth_topic": selected_depth,
+        "camera_info_topic": selected_info,
+        "imu_topic": selected_imu,
+        "rgb_frame_id": rgb_frames[0][4] if rgb_frames else "unknown",
+        "depth_camera_frame_id": depth_frames[0][4] if depth_frames else "unknown",
+        "sync_threshold_ms": max_sync_dt_ms,
         "sync_dt_mean_ms": round(float(np.mean(dt_arr)), 3) if len(dt_arr) else 0.0,
         "sync_dt_p95_ms": round(float(np.percentile(dt_arr, 95)), 3) if len(dt_arr) else 0.0,
         "sync_dt_max_ms": round(float(np.max(dt_arr)), 3) if len(dt_arr) else 0.0,
@@ -424,20 +450,9 @@ def extract_dataset_from_bag(bag_path_or_name: str, out_dir: Optional[str] = Non
         "frame_interval_std_ms": round(float(np.std(r_diffs) * 1000.0), 3) if len(r_diffs) else 0.0,
         "frame_interval_p95_ms": round(float(np.percentile(r_diffs, 95) * 1000.0), 3) if len(r_diffs) else 0.0,
         "timestamp_reversal_count": int(np.sum(r_diffs < 0)),
-        "is_camera_info_fallback": camera_info_record.get("is_fallback", False)
-    }
-    same_optical_frame = all(
-        p["rgb_frame_id"] == p["depth_frame_id"] for p in matched_pairs)
-    dataset_info.update({
-        "rgb_topic": selected_rgb,
-        "depth_topic": selected_depth,
-        "rgb_frame_id": rgb_frames[0][4],
-        "depth_frame_id": depth_frames[0][4],
-        # A matching optical frame is the only safe no-extrinsic path for the
-        # one-intrinsic RGB-D consumers.  Raw-depth topics with different
-        # frames are explicitly rejected downstream rather than silently fused.
+        "is_camera_info_fallback": camera_info_record.get("is_fallback", False),
         "depth_color_alignment": "aligned" if same_optical_frame else "not_aligned",
-    })
+    }
 
     dataset_info_path = out_path / "dataset_info.json"
     with open(dataset_info_path, "w", encoding="utf-8") as f_meta:

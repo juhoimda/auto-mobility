@@ -17,6 +17,13 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # itself continues in the clean environment prepared by this script.
 _extract_frames_with_ros() {
     local bag_input="$1"
+    local force_flag=""
+    for arg in "$@"; do
+        if [ "$arg" = "--no-cache" ] || [ "$arg" = "--force" ]; then
+            force_flag="--force"
+            break
+        fi
+    done
     local ros_distro="${ROS_DISTRO:-humble}"
     local ros_setup="/opt/ros/${ros_distro}/setup.bash"
 
@@ -30,8 +37,12 @@ _extract_frames_with_ros() {
     bash -c '
         source "$1"
         export PYTHONPATH="$2/src:$2${PYTHONPATH:+:$PYTHONPATH}"
-        exec python3 "$2/src/auto_mobility/dataset/extract_frames.py" "$3"
-    ' _ "$ros_setup" "$PROJECT_DIR" "$bag_input"
+        if [ -n "$4" ]; then
+            exec python3 "$2/src/auto_mobility/dataset/extract_frames.py" "$3" "$4"
+        else
+            exec python3 "$2/src/auto_mobility/dataset/extract_frames.py" "$3"
+        fi
+    ' _ "$ros_setup" "$PROJECT_DIR" "$bag_input" "$force_flag"
 }
 
 # HW 과부하 및 WSL2 셧다운/발열 스로틀링 방지 — phase-specific (§7).
@@ -98,7 +109,7 @@ fi
 
 # Do this before stripping ROS paths below.  The extractor is cache-aware, so
 # invoking it on an already prepared dataset only validates and reuses frames.
-_extract_frames_with_ros "$1" || exit $?
+_extract_frames_with_ros "$@" || exit $?
 
 export PYTHONPATH="$PROJECT_DIR/src:$PROJECT_DIR"
 exec python3 -m auto_mobility.reconstruction.cli "$@"

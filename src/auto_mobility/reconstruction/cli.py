@@ -137,21 +137,27 @@ def _verify_trajectory_cache(tp: Path, dataset_dir: Path | None = None) -> bool:
         # Pose export semantics changed: CUVSLAM now uses retrospective SLAM
         # poses and RTAB uses graph-corrected dense poses. Never reuse a
         # sidecar produced by the old raw-odometry exporters.
-        if meta.get("schema_version") != "recon-v2/sidecar-2":
-            print(f"[v2] trajectory cache rejected (old export schema): {tp}")
+        if meta.get("schema_version") != "recon-v3/sidecar-3":
+            print(f"[v3] trajectory cache rejected (old export schema {meta.get('schema_version')}): {tp}")
+            return False
+        if meta.get("pose_convention") != "T_world_camera":
+            print(f"[v3] trajectory cache rejected (invalid pose_convention {meta.get('pose_convention')}): {tp}")
+            return False
+        if meta.get("pose_frame") != "camera_color_optical_frame":
+            print(f"[v3] trajectory cache rejected (invalid pose_frame {meta.get('pose_frame')}): {tp}")
             return False
         sha = hashlib.sha256(Path(tp).read_bytes()).hexdigest()
         if str(meta.get("trajectory_sha256", "")) != sha:
-            print(f"[v2] trajectory cache rejected (sha mismatch): {tp}")
+            print(f"[v3] trajectory cache rejected (sha mismatch): {tp}")
             return False
         fp = _dataset_fingerprint(dataset_dir)
         want_fp = meta.get("dataset_fingerprint")
         if fp is not None and want_fp is not None and want_fp != fp:
-            print(f"[v2] trajectory cache rejected (dataset changed): {tp}")
+            print(f"[v3] trajectory cache rejected (dataset changed): {tp}")
             return False
         if fp is not None and want_fp is None:
             # legacy sidecar without provenance: fail-closed
-            print(f"[v2] trajectory cache rejected (sidecar lacks dataset "
+            print(f"[v3] trajectory cache rejected (sidecar lacks dataset "
                   f"fingerprint): {tp}")
             return False
         return True

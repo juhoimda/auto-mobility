@@ -95,10 +95,11 @@ def main() -> int:
     )
     # SLAM must be explicitly enabled.  Without this config the second return
     # value of track() is always None, so a corridor is exported as raw VO.
-    slam_cfg = cuvslam.Tracker.SlamConfig(use_gpu=True, sync_mode=True,
-                                   retention_time_ms=0)
+    slam_cfg = cuvslam.Tracker.SlamConfig(
+        use_gpu=True, sync_mode=True, retention_time_ms=0, max_map_size=0
+    )
     tracker = cuvslam.Tracker(rig, odom_cfg, slam_cfg)
-    print(f"[cuvslam_worker] RGBD SLAM tracker {W}x{H} fx={fx:.1f}")
+    print(f"[cuvslam_worker] RGBD SLAM tracker {W}x{H} fx={fx:.1f} (max_map_size=0 unlimited)")
 
     # Tracking samples are used only for progress logging.  The delivered
     # trajectory must be the retrospectively optimized SLAM export.
@@ -116,9 +117,14 @@ def main() -> int:
         depth = cv2.imread(str(depth_path), cv2.IMREAD_UNCHANGED)
         if bgr is None or depth is None:
             continue
-        odom_est, _slam_est = tracker.track(ts_ns, [bgr], depths=[depth])
-        pose_estimate = getattr(odom_est, "world_from_rig", None)
-        pose = getattr(pose_estimate, "pose", pose_estimate)
+        odom_est, slam_est = tracker.track(ts_ns, [bgr], depths=[depth])
+        pose = None
+        if slam_est is not None:
+            pose_estimate = getattr(slam_est, "world_from_rig", None)
+            pose = getattr(pose_estimate, "pose", pose_estimate)
+        if pose is None and odom_est is not None:
+            pose_estimate = getattr(odom_est, "world_from_rig", None)
+            pose = getattr(pose_estimate, "pose", pose_estimate)
         if pose is None:
             if i % 200 == 0:
                 print(f"  [{i}/{len(rows)}] lost")
@@ -141,11 +147,19 @@ def main() -> int:
     # sidecar (#50): content hash + dataset fingerprint for verified reuse
     import hashlib
 
-    meta = {"schema_version": "recon-v2/sidecar-2", "backend": "cuvslam",
-            "pose_export": "retrospective_slam",
-            "profile": "standard", "n_frames": len(rows), "n_poses": len(traj),
-            "trajectory_sha256": hashlib.sha256(out_traj.read_bytes()).hexdigest(),
-            "dataset_fingerprint": _dataset_fingerprint(dataset)}
+    meta = {
+        "schema_version": "recon-v3/sidecar-3",
+        "backend": "cuvslam",
+        "pose_convention": "T_world_camera",
+        "pose_frame": "camera_color_optical_frame",
+        "pose_export": "retrospective_slam",
+        "pose_export_semantics": "optical_frame_retrospective_slam",
+        "profile": "standard",
+        "n_frames": len(rows),
+        "n_poses": len(traj),
+        "trajectory_sha256": hashlib.sha256(out_traj.read_bytes()).hexdigest(),
+        "dataset_fingerprint": _dataset_fingerprint(dataset),
+    }
     meta_json = json.dumps(meta, indent=2)
     Path(str(out_traj) + ".meta.json").write_text(meta_json)
     print(f"[cuvslam_worker] wrote {len(traj)}/{len(rows)} -> {out_traj} {time.time()-t0:.1f}s")

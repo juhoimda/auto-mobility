@@ -139,16 +139,26 @@ def bake_atlas(
                 np.float32(-1.0),
             )
             img = img_by_fid[fid]
-            cols, _ = sample_view_color(
+            cols, ok_mask = sample_view_color(
                 img, K, T_wc, c_tris.reshape(-1, 3), img.shape[1], img.shape[0])
-            cols = cols.reshape(n_c, 3, 3).mean(axis=1).astype(np.float32)
+            cols_3 = cols.reshape(n_c, 3, 3).astype(np.float32)
+            ok_3 = ok_mask.reshape(n_c, 3)
+            ok_tri_any = ok_3.any(axis=1)
+            cnt_valid = np.maximum(ok_3.sum(axis=1, keepdims=True), 1)
+            cols_mean = (cols_3 * ok_3[..., None]).sum(axis=1) / cnt_valid
+
+            scores = np.where(
+                visible & (facing > 0.1) & c_valid & ok_tri_any,
+                (facing / np.log2(2.0 + dist)).astype(np.float32),
+                np.float32(-1.0),
+            )
             min_idx = np.argmin(top_scores[s0:s1], axis=1)
             min_val = top_scores[np.arange(s0, s1), min_idx]
             better = scores > min_val
             rows_b = np.nonzero(better)[0]
             if len(rows_b):
                 gi = rows_b + s0
-                top_colors[gi, min_idx[rows_b]] = cols[rows_b]
+                top_colors[gi, min_idx[rows_b]] = cols_mean[rows_b]
                 top_scores[gi, min_idx[rows_b]] = scores[rows_b]
 
     face_colors = {}
@@ -163,10 +173,7 @@ def bake_atlas(
         face_colors[tid] = ((top_colors[tid, best] * w[:, None]).sum(axis=0)
                             / w.sum()).astype(np.uint8)
 
-    # Vertex colours are the guaranteed appearance representation.  A tiny
-    # fixed grid cannot represent a multi-million-face mesh; binding that
-    # partial atlas as map_Kd made nearly every face render as one grey patch.
-    # Accumulate the occlusion/facing-filtered face colours onto vertices.
+    # Vertex colours are the guaranteed appearance representation.
     pts = np.asarray(vertices, dtype=np.float64)
     vw_sum = np.zeros((len(vertices), 3), dtype=np.float64)
     vw_cnt = np.zeros(len(vertices), dtype=np.float64)
@@ -174,16 +181,16 @@ def bake_atlas(
         vw_sum[triangles[tid]] += color
         vw_cnt[triangles[tid]] += 1.0
     has_vcol = vw_cnt > 0
-    vcol = np.full((len(vertices), 3), 0.7)
+    mean_vcol = (vw_sum[has_vcol] / vw_cnt[has_vcol][:, None] / 255.0).mean(axis=0) if has_vcol.any() else np.array([0.7, 0.7, 0.7])
+    vcol = np.full((len(vertices), 3), mean_vcol)
     vcol[has_vcol] = vw_sum[has_vcol] / vw_cnt[has_vcol][:, None] / 255.0
 
-    # Initialize atlas with mean surface color so fallback UVs render naturally, not pitch black
+    # Initialize atlas with mean surface color
     mean_rgb = (vcol[has_vcol].mean(axis=0) * 255.0) if has_vcol.any() else np.array([180.0, 180.0, 180.0])
     atlas = np.full((atlas_size, atlas_size, 3), mean_rgb.astype(np.uint8), dtype=np.uint8)
 
     # Keep a bounded diagnostic atlas for tooling, but never bind it to the
-    # material unless it covers every colourable face.  This preserves truthful
-    # output on huge meshes while MeshLab renders the real vertex colours.
+    # material unless it covers every colourable face.
     occupied = 0
     order = sorted(face_colors)
     cell_of_face = {}
@@ -201,7 +208,7 @@ def bake_atlas(
     atlas_path = out_dir / "textures" / f"{name}_atlas_0.png"
     cv2.imwrite(str(atlas_path), atlas[..., ::-1])
 
-    # Vertex normals for smooth MeshLab / Blender shading
+    # Vertex normals for smooth shading
     v_normals = np.zeros_like(pts)
     for tid in range(T_count):
         if valid_face[tid]:
@@ -258,6 +265,19 @@ def bake_atlas(
     if fully_atlased:
         mtl += f"map_Kd textures/{name}_atlas_0.png\n"
     (out_dir / f"{name}.mtl").write_text(mtl, encoding="utf-8")
+
+    # Companion PLY with native vertex colors
+    try:
+        mesh_o3d = _o3d.geometry.TriangleMesh()
+        mesh_o3d.vertices = _o3d.utility.Vector3dVector(vertices)
+        mesh_o3d.triangles = _o3d.utility.Vector3iVector(triangles)
+        mesh_o3d.vertex_colors = _o3d.utility.Vector3dVector(vcol)
+        if len(v_valid) and v_valid.any():
+            mesh_o3d.vertex_normals = _o3d.utility.Vector3dVector(v_normals)
+        _o3d.io.write_triangle_mesh(str(out_dir / f"{name}.ply"), mesh_o3d, write_ascii=False)
+    except Exception:
+        pass
+
     return BakeResult(obj_path, out_dir / f"{name}.mtl", (atlas_path,), untextured,
                       textured_faces=len(cell_of_face),
                       appearance_mode="texture_atlas" if fully_atlased else "vertex_color")

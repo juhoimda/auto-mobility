@@ -55,31 +55,23 @@ def _quat_to_R(q):
         [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
 
 
-def _nearest_pose_map(traj, frames, max_pose_gap_ms: float = 200.0,
+def _nearest_pose_map(traj, frames, max_pose_gap_ms: float = 50.0,
                       dropped=None):
-    """Nearest trajectory pose per frame with a gap guard.
+    """Authoritative frame-to-pose association with 50ms gap guard and SLERP interpolation."""
+    from auto_mobility.trajectory.association import associate_trajectory_to_frames
 
-    Frames whose nearest pose is farther than max_pose_gap_ms are DROPPED
-    instead of being bridged by a stale pose (sparse cuVSLAM trajectories
-    during tracking loss previously leaked stale poses into fusion).
-    dropped: optional list collecting dropped frame_ids.
-    """
-    ts_list = list(traj.timestamps)
+    frame_stamps = np.array([f.rgb_timestamp for f in frames], dtype=np.float64)
+    _, results, summary = associate_trajectory_to_frames(
+        frame_stamps, traj, max_pose_gap_ms=max_pose_gap_ms, enable_interpolation=True
+    )
     poses = {}
-    max_gap_s = max_pose_gap_ms / 1000.0
-    for f in frames:
-        i = int(np.searchsorted(traj.timestamps, f.rgb_timestamp))
-        i = min(max(i, 1), len(ts_list) - 1)
-        if abs(ts_list[i - 1] - f.rgb_timestamp) < abs(ts_list[i] - f.rgb_timestamp):
-            i -= 1
-        if abs(ts_list[i] - f.rgb_timestamp) > max_gap_s:
+    for res in results:
+        f = frames[res.frame_id]
+        if res.valid and res.T_world_camera is not None:
+            poses[f.frame_id] = res.T_world_camera
+        else:
             if dropped is not None:
                 dropped.append(f.frame_id)
-            continue
-        T = np.eye(4)
-        T[:3, :3] = _quat_to_R(traj.orientations[i])
-        T[:3, 3] = traj.positions[i]
-        poses[f.frame_id] = T
     return poses
 
 
@@ -500,13 +492,14 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             degraded = fit_voxel_to_vram(bbox_holder["diag_m"], vox_m * 1000.0 * 1.25)
             if degraded / 1000.0 > vox_m:
                 vox_m = degraded / 1000.0
-                degraded_plan = _plan_active_blocks_safe(frame_ids, pose_by_frame, degraded,
+                degraded_plan = _plan_active_blocks_safe(ids, pose_by_frame, degraded,
                                                         tag=f"{tag}_degraded")
                 if degraded_plan is not None:
                     active_plan = degraded_plan
-                    planned_peak_vram_mb = degraded_plan.vram_mb_for_admission
-                    planned_block_count = degraded_plan.safe_block_count
-                    vram_want = int(planned_peak_vram_mb)
+                    _d_mb, _d_cap = _resolve_planned_metrics(degraded_plan)
+                    planned_peak_vram_mb = _d_mb
+                    planned_block_count = _d_cap
+                    vram_want = int(planned_peak_vram_mb) if planned_peak_vram_mb else (int(required_vram_mb(bbox_holder["diag_m"], vox_m)) or 512)
                 else:
                     planned_peak_vram_mb = None
                     planned_block_count = None
@@ -565,12 +558,9 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                 hc_val = None
             if hc_val is None and vram_budget_mb:
                 hc_val = int(vram_budget_mb + 1536)
-            job_vram_limit = int(planned_mb_for_limit * 1.10 + 512)
+            job_vram_limit = max(int(planned_mb_for_limit * 1.25 + 768), int(vram_budget_mb) if vram_budget_mb else 0)
             if hc_val is not None:
                 job_vram_limit = min(job_vram_limit, int(hc_val))
-                # never exceed hard ceiling
-                if job_vram_limit > int(hc_val):
-                    job_vram_limit = int(hc_val)
             # P0 #14: per-job RAM limit is job RSS, not global budget
             job_ram_limit = int(ram_want * 1.20 + 512)
             gpu_limits_dict = {
@@ -1005,17 +995,32 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
         preview_cands = [c for c in scores if c.ok]
         if not preview_cands:
             preview_cands = top
-        poses_by_cand = {c.backend: _nearest_pose_map(trajectories[c.backend], frames)
-                         for c in preview_cands if c.backend in trajectories}
+        poses_by_cand = {}
+        assoc_by_cand = {}
+        for c in preview_cands:
+            if c.backend in trajectories:
+                traj = trajectories[c.backend]
+                from auto_mobility.trajectory.association import associate_trajectory_to_frames
+                frame_stamps = np.array([f.rgb_timestamp for f in frames], dtype=np.float64)
+                _, results, summary = associate_trajectory_to_frames(
+                    frame_stamps, traj, max_pose_gap_ms=50.0, enable_interpolation=True
+                )
+                p_map = {frames[r.frame_id].frame_id: r.T_world_camera for r in results if r.valid and r.T_world_camera is not None}
+                poses_by_cand[c.backend] = p_map
+                assoc_by_cand[c.backend] = (summary, results)
+
         fuse_ids = {f.frame_id for f in frames if roles.get(f.frame_id) == FrameRole.FUSE}
         if len(fuse_ids) < 20:
             fuse_ids = {f.frame_id for f in frames if roles.get(f.frame_id) != FrameRole.REJECT}
         valid_sets = [set(poses_by_cand[c.backend].keys()) for c in preview_cands if c.backend in poses_by_cand]
         common_ids = sorted(fuse_ids & set.intersection(*valid_sets)) if valid_sets else []
+        is_comparable = True
         if len(common_ids) < 20 and preview_cands:
+            is_comparable = False
+            decide("preview_frame_selection", "NON_COMPARABLE_SPARSE_INTERSECTION",
+                   "common frame intersection between backends is sparse (<20); previews marked non-comparable",
+                   common_pool=len(common_ids))
             first_name = preview_cands[0].backend
-            decide("preview_frame_selection", "UNFAIR_FALLBACK_TRACKING_GAP",
-                   "common frame intersection between backends is sparse; using best available valid frames")
             common_ids = sorted(fuse_ids & set(poses_by_cand.get(first_name, {}).keys()))
 
         target_n = policy.geometry_frame_target or 800
@@ -1023,7 +1028,8 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
         preview_frame_ids = select_pose_coverage_frames(common_ids, ref_poses, target_count=target_n)
         decide("preview_frame_selection", "SELECTED",
                f"selected {len(preview_frame_ids)} representative FUSE frames via pose-space coverage for dual preview",
-               n_preview_frames=len(preview_frame_ids), target=target_n, common_pool=len(common_ids))
+               n_preview_frames=len(preview_frame_ids), target=target_n, common_pool=len(common_ids),
+               is_comparable=is_comparable)
 
         all_pts = []
         for c in preview_cands:
@@ -1056,6 +1062,42 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             cand_dir = preview_dir / cand_name
             cand_dir.mkdir(parents=True, exist_ok=True)
             (cand_dir / "textures").mkdir(parents=True, exist_ok=True)
+
+            # Save association diagnostics
+            if cand_name in assoc_by_cand:
+                p_sum, p_res = assoc_by_cand[cand_name]
+                assoc_report = {
+                    "backend": cand_name,
+                    "num_frames": p_sum.num_frames,
+                    "num_slam_poses": len(trajectories[cand_name]),
+                    "pose_match_count": p_sum.pose_match_count,
+                    "pose_missing_count": p_sum.pose_missing_count,
+                    "pose_coverage_ratio": p_sum.pose_coverage_ratio,
+                    "pose_dt_mean_ms": p_sum.pose_dt_mean_ms,
+                    "pose_dt_median_ms": p_sum.pose_dt_median_ms,
+                    "pose_dt_p95_ms": p_sum.pose_dt_p95_ms,
+                    "pose_dt_max_ms": p_sum.pose_dt_max_ms,
+                    "warning": p_sum.warning,
+                }
+                (cand_dir / "pose_association_report.json").write_text(
+                    json.dumps(assoc_report, indent=2)
+                )
+                with open(cand_dir / "pose_association.csv", "w", newline="", encoding="utf-8") as f_assoc:
+                    import csv
+                    w = csv.DictWriter(f_assoc, fieldnames=[
+                        "frame_id", "frame_timestamp", "matched_pose_timestamp",
+                        "pose_dt_ms", "association_method", "valid"
+                    ])
+                    w.writeheader()
+                    for r in p_res:
+                        w.writerow({
+                            "frame_id": r.frame_id,
+                            "frame_timestamp": f"{r.frame_timestamp:.6f}",
+                            "matched_pose_timestamp": f"{r.matched_pose_timestamp:.6f}",
+                            "pose_dt_ms": f"{r.pose_dt_ms:.3f}",
+                            "association_method": r.association_method,
+                            "valid": r.valid,
+                        })
 
             print(f"\n▶ [{c_idx}/{len(preview_cands)}] Processing Backend: {cand_name.upper()}", flush=True)
             split = split_from_poses(cand_frame_ids, [poses[fid] for fid in cand_frame_ids])

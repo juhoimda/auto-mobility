@@ -47,19 +47,23 @@ def compute_consistency_mask(
     edge_protect: bool = True,
 ) -> np.ndarray:
     """True = keep pixel for final fusion."""
-    both = (real_mm > 0) & (rendered_mm > 0)
-    keep = real_mm <= 0
+    valid_real = real_mm > 0
+    valid_rendered = rendered_mm > 0
+    both = valid_real & valid_rendered
+    # Preserve valid measured depth where coarse mesh has no rendered surface
+    unrendered_real = valid_real & (~valid_rendered)
+    invalid_real = ~valid_real
+
     err = np.abs(real_mm - rendered_mm)
     tol = allowed_error_mm(real_mm, pose_uncertainty_mm=pose_uncertainty_mm)
     agree = both & (err <= tol)
     disagree = both & (err > 3.0 * tol)
 
-    out = keep | agree
     if edge_protect:
         protected = _edge_protection(real_mm)
-        out = keep | agree | (disagree & protected)
+        out = invalid_real | unrendered_real | agree | (disagree & protected)
     else:
-        out = keep | (both & ~disagree)
+        out = invalid_real | unrendered_real | (both & ~disagree)
     return out
 
 

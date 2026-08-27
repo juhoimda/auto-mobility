@@ -245,6 +245,8 @@ int main(int argc, char** argv) {
     rtabmap::CameraModel camera_model(fx, fy, cx, cy, rtabmap::Transform(0,0,1,0, -1,0,0,0, 0,-1,0,0));
     camera_model.setImageSize(cv::Size(width, height));
 
+    const rtabmap::Transform T_base_cam = camera_model.localTransform();
+
     rtabmap::ParametersMap custom_params;
     custom_params.insert(rtabmap::ParametersPair(rtabmap::Parameters::kRtabmapDetectionRate(), "0"));
     custom_params.insert(rtabmap::ParametersPair(rtabmap::Parameters::kRtabmapPublishRAMUsage(), "false"));
@@ -284,6 +286,7 @@ int main(int argc, char** argv) {
         double timestamp;
         rtabmap::Transform odom_pose;
         bool is_keyframe;
+        int location_id;
     };
 
     std::vector<FrameRecord> frame_records;
@@ -310,6 +313,7 @@ int main(int argc, char** argv) {
 
         if (!odom_pose.isNull()) {
             bool should_be_kf = false;
+            int location_id = 0;
             if (!has_first_kf) {
                 should_be_kf = true;
                 has_first_kf = true;
@@ -325,10 +329,12 @@ int main(int argc, char** argv) {
             }
 
             if (should_be_kf) {
-                rtabmap.process(data, odom_pose);
+                if (rtabmap.process(data, odom_pose)) {
+                    location_id = rtabmap.getLastLocationId();
+                }
             }
 
-            frame_records.push_back({lf.id, lf.timestamp, odom_pose, should_be_kf});
+            frame_records.push_back({lf.id, lf.timestamp, odom_pose, should_be_kf, location_id});
         }
 
         processed_count++;
@@ -341,24 +347,14 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::cout << "💾 Finalizing RTAB-Map memory and saving database..." << std::endl;
-    // Rtabmap::close(true) releases the in-memory optimized-pose cache in
-    // this RTAB-Map build. Copy it before close; otherwise a safe exporter
-    // would see an empty map and be forced to reject the run.
-    std::map<int, rtabmap::Transform> optimized;
-    optimized = rtabmap.getLocalOptimizedPoses();
+    std::cout << "💾 Finalizing RTAB-Map memory and optimizing graph..." << std::endl;
+    std::map<int, rtabmap::Transform> optimized_poses;
+    std::multimap<int, rtabmap::Link> constraints;
+    rtabmap.getGraph(optimized_poses, constraints, true, true);
+    std::cout << "  📊 Graph nodes count: " << optimized_poses.size()
+              << ", Constraints count: " << constraints.size() << std::endl;
     rtabmap.close(true);
 
-    // rtabmap.process() optimizes only graph/keyframe poses.  Exporting
-    // FrameRecord::odom_pose directly (as the previous code did) discards
-    // loop closure and creates folded/doubled rooms in dense TSDF fusion.
-    // Convert optimized keyframe poses into an odom->map correction and
-    // interpolate that correction for every non-keyframe record.
-    if (optimized.empty()) {
-        // Some builds only populate the cache during close; retain a guarded
-        // fallback for those versions, still rejecting raw odometry below.
-        optimized = rtabmap.getLocalOptimizedPoses();
-    }
     struct KeyframeCorrection {
         double timestamp;
         rtabmap::Transform correction;
@@ -366,9 +362,9 @@ int main(int argc, char** argv) {
     std::vector<KeyframeCorrection> corrections;
     corrections.reserve(frame_records.size());
     for (const auto & rec : frame_records) {
-        if (!rec.is_keyframe) continue;
-        auto it = optimized.find(rec.id);
-        if (it == optimized.end() || it->second.isNull()) continue;
+        if (!rec.is_keyframe || rec.location_id <= 0) continue;
+        auto it = optimized_poses.find(rec.location_id);
+        if (it == optimized_poses.end() || it->second.isNull()) continue;
         corrections.push_back({rec.timestamp, it->second * rec.odom_pose.inverse()});
     }
     if (corrections.empty()) {
@@ -381,7 +377,7 @@ int main(int argc, char** argv) {
     }
     delete odom;
 
-    // Export full-density, graph-corrected trajectory to TUM format.
+    // Export full-density, graph-corrected trajectory in camera optical frame (T_world_camera)
     std::ofstream traj_file(out_trajectory);
     if (!traj_file.is_open()) {
         std::cerr << "❌ Failed to open trajectory output file: " << out_trajectory << std::endl;
@@ -391,7 +387,7 @@ int main(int argc, char** argv) {
     traj_file << "# TUM format: timestamp tx ty tz qx qy qz qw\n";
     for (const auto& rec : frame_records) {
         double ts = rec.timestamp;
-        rtabmap::Transform T = rec.odom_pose;
+        rtabmap::Transform T_map_base = rec.odom_pose;
         if (!corrections.empty()) {
             auto hi = std::lower_bound(
                 corrections.begin(), corrections.end(), ts,
@@ -407,12 +403,15 @@ int main(int argc, char** argv) {
                 const float a = static_cast<float>((ts - lo.timestamp) / span);
                 C = lo.correction.interpolate(std::clamp(a, 0.0f, 1.0f), hi->correction);
             }
-            T = C * rec.odom_pose;
+            T_map_base = C * rec.odom_pose;
         }
-        Eigen::Quaternionf q = T.getQuaternionf();
+
+        // T_world_camera_optical = T_world_base * T_base_cam
+        rtabmap::Transform T_world_camera = T_map_base * T_base_cam;
+        Eigen::Quaternionf q = T_world_camera.getQuaternionf();
         traj_file << std::fixed << std::setprecision(6) << ts << " "
                   << std::setprecision(6)
-                  << T.x() << " " << T.y() << " " << T.z() << " "
+                  << T_world_camera.x() << " " << T_world_camera.y() << " " << T_world_camera.z() << " "
                   << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << "\n";
     }
     traj_file.close();

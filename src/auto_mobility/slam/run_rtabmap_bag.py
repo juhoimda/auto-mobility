@@ -95,9 +95,12 @@ def run_rtabmap_on_bag(
             return h.hexdigest()[:16]
 
         meta = {
-            "schema_version": "recon-v2/sidecar-2",
-            "pose_export": "graph_corrected_dense",
+            "schema_version": "recon-v3/sidecar-3",
             "backend": "rtab",
+            "pose_convention": "T_world_camera",
+            "pose_frame": "camera_color_optical_frame",
+            "pose_export": "graph_corrected_dense",
+            "pose_export_semantics": "optical_frame_global_graph",
             "profile": profile,
             "candidate_key": key,
             "replay_rate": 1.0,

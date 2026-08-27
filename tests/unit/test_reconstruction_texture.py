@@ -38,7 +38,7 @@ def test_bake_produces_obj_mtl_atlas(tmp_path):
     view_img = np.zeros((480, 640, 3), dtype=np.uint8)
     view_img[:, :, 0] = 255
     views = [(0, view_img)]
-    poses = {0: np.eye(4) @ np.diag([1, 1, -1, 1])}
+    poses = {0: np.eye(4)}
     poses[0][:3, 3] = [0, 0, -3.0]
 
     result = bake_atlas(vertices, triangles, views, K, poses,
@@ -69,7 +69,7 @@ def test_bake_writes_per_face_uvs_and_vertex_colors(tmp_path):
     view_img = np.zeros((480, 640, 3), dtype=np.uint8)
     view_img[:, :, 2] = 255  # BGR red
     views = [(0, view_img)]
-    poses = {0: np.eye(4) @ np.diag([1, 1, -1, 1])}
+    poses = {0: np.eye(4)}
     poses[0][:3, 3] = [0, 0, -3.0]
 
     result = bake_atlas(vertices, triangles, views, K, poses,

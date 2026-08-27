@@ -40,42 +40,39 @@ except ImportError:
 import numpy as np
 
 
-def load_mesh_preserve(path: str):
-    """바이너리 캐시 우선, 품질 무손실 로드. 실패 시 Open3D 직접 로드."""
-    base, _ = os.path.splitext(path)
-    for ext in [".ply", ".glb"]:
-        cached = base + ext
-        if os.path.exists(cached) and os.path.getmtime(cached) > os.path.getmtime(path):
-            try:
-                m = o3d.io.read_triangle_mesh(cached)
-                if not m.is_empty() and len(m.vertices) > 0:
-                    print(f"  ⚡ 바이너리 캐시 사용: {os.path.basename(cached)} (원본보다 ~8배 빠름)")
-                    return m, "mesh"
-            except Exception:
-                pass
-            try:
-                p = o3d.io.read_point_cloud(cached)
-                if not p.is_empty() and len(p.points) > 0:
-                    print(f"  ⚡ 바이너리 캐시 사용: {os.path.basename(cached)}")
-                    return p, "pcd"
-            except Exception:
-                pass
+def load_mesh_preserve(path: str, no_cache: bool = False):
+    """바이너리 캐시 또는 원본 로드. no_cache=True 시 캐시 무시."""
+    base, ext = os.path.splitext(path)
+    if not no_cache:
+        for c_ext in [".ply", ".glb"]:
+            cached = base + c_ext
+            if os.path.exists(cached) and os.path.getmtime(cached) >= os.path.getmtime(path):
+                # Ensure related files (.mtl, textures) are not newer than cached PLY
+                mtl_path = base + ".mtl"
+                is_stale = os.path.exists(mtl_path) and os.path.getmtime(mtl_path) > os.path.getmtime(cached)
+                if not is_stale:
+                    try:
+                        m = o3d.io.read_triangle_mesh(cached)
+                        if not m.is_empty() and len(m.vertices) > 0:
+                            print(f"  ⚡ 바이너리 캐시 사용: {os.path.basename(cached)}")
+                            return m, "mesh"
+                    except Exception:
+                        pass
 
     # 원본 로드
     try:
         m = o3d.io.read_triangle_mesh(path)
         if not m.is_empty() and len(m.vertices) > 0:
-            # Open3D가 quad 등을 skip해 triangles==0 인 경우 수동 triangulate fallback
             if len(m.triangles) == 0 and path.lower().endswith(".obj"):
                 raise ValueError("no triangles - fallback to manual")
-            # 다음 실행 위해 바이너리 캐시 생성 (무손실)
-            try:
-                cache_path = base + ".ply"
-                if not os.path.exists(cache_path):
-                    print(f"  💾 바이너리 캐시 생성: {os.path.basename(cache_path)} (다음 실행부터 고속 로드)")
-                    o3d.io.write_triangle_mesh(cache_path, m, write_ascii=False)
-            except Exception:
-                pass
+            if not no_cache:
+                try:
+                    cache_path = base + ".ply"
+                    if not os.path.exists(cache_path):
+                        print(f"  💾 바이너리 캐시 생성: {os.path.basename(cache_path)}")
+                        o3d.io.write_triangle_mesh(cache_path, m, write_ascii=False)
+                except Exception:
+                    pass
             return m, "mesh"
     except Exception:
         pass
@@ -98,7 +95,6 @@ def load_mesh_preserve(path: str):
                         parts = line.strip().split()[1:]
                         idx = [int(p.split("/")[0]) - 1 for p in parts]
                         if len(idx) >= 3:
-                            # fan triangulate (quad -> 2 tris, n-gon -> n-2 tris)
                             for k in range(1, len(idx) - 1):
                                 faces.append([idx[0], idx[k], idx[k + 1]])
             if verts and faces:
@@ -108,7 +104,7 @@ def load_mesh_preserve(path: str):
                 if colors and len(colors) == len(verts):
                     mesh.vertex_colors = o3d.utility.Vector3dVector(np.array(colors, dtype=np.float64))
                 if not mesh.is_empty():
-                    print(f"  ℹ️ 수동 OBJ 파싱으로 로드 (quad triangulate): {len(verts):,} verts / {len(faces):,} tris")
+                    print(f"  ℹ️ 수동 OBJ 파싱으로 로드: {len(verts):,} verts / {len(faces):,} tris")
                     return mesh, "mesh"
         except Exception:
             pass
@@ -120,63 +116,41 @@ def load_mesh_preserve(path: str):
     except Exception:
         pass
 
-    # Fallback: vertex-only OBJ (면 없이 점만 있는 경우) 수동 파싱
-    if path.lower().endswith(".obj"):
-        try:
-            verts, colors = [], []
-            with open(path, "r", errors="ignore") as f:
-                for line in f:
-                    if line.startswith("v "):
-                        parts = line.strip().split()
-                        verts.append([float(parts[1]), float(parts[2]), float(parts[3])])
-                        if len(parts) >= 7:
-                            # 0-1 또는 0-255 정규화
-                            c = [float(parts[4]), float(parts[5]), float(parts[6])]
-                            if max(c) > 1.0:
-                                c = [x / 255.0 for x in c]
-                            colors.append(c)
-            if verts:
-                pcd = o3d.geometry.PointCloud()
-                pcd.points = o3d.utility.Vector3dVector(np.array(verts, dtype=np.float64))
-                if colors and len(colors) == len(verts):
-                    pcd.colors = o3d.utility.Vector3dVector(np.array(colors, dtype=np.float64))
-                print(f"  ℹ️ 면 없는 OBJ -> 포인트 클라우드로 로드: {len(verts):,} points")
-                return pcd, "pcd"
-        except Exception:
-            pass
-
-    raise RuntimeError(f"로드 실패: {path}")
+    return None, None
 
 
-def view_native(path: str, decimate: int = 0, point_size: float = 2.0):
+def view_native(path: str, decimate: int = 0, point_size: float = 2.0, no_cache: bool = False):
+    """Open3D OpenGL 뷰어로 원본 품질 무손실 렌더링."""
     if o3d is None:
-        print("❌ open3d 미설치: pip install open3d==0.19.0")
-        sys.exit(1)
+        print("❌ Open3D가 설치되어 있지 않습니다.")
+        return
 
-    print(f"📂 3D 파일 로드 중: {path}")
-    geom, gtype = load_mesh_preserve(path)
+    geom, kind = load_mesh_preserve(path, no_cache=no_cache)
+    if geom is None:
+        print(f"❌ 3D 파일을 로드할 수 없습니다: {path}")
+        return
 
-    if gtype == "mesh":
-        mesh = geom
-        print(f"  원본: {len(mesh.vertices):,} verts / {len(mesh.triangles):,} tris  (품질 100% 무손실)")
+    # Diagnostics
+    if kind == "mesh":
+        n_verts = len(geom.vertices)
+        n_tris = len(geom.triangles)
+        has_vc = geom.has_vertex_colors()
+        has_tex = geom.has_textures()
+        has_vn = geom.has_vertex_normals()
+        print(f"  📊 메시 정보: {n_verts:,} Vertices, {n_tris:,} Triangles | VertexColors: {has_vc} | Textures: {has_tex} | Normals: {has_vn}")
 
-        if decimate and len(mesh.triangles) > decimate:
-            print(f"  🔧 Decimate {len(mesh.triangles):,} -> {decimate:,} (quadric, 색상 보존)")
-            mesh = mesh.simplify_quadric_decimation(decimate)
-            mesh.remove_duplicated_vertices()
-            mesh.remove_degenerate_triangles()
-            mesh.remove_unreferenced_vertices()
-            print(f"  결과: {len(mesh.vertices):,} verts / {len(mesh.triangles):,} tris")
+    if kind == "mesh" and decimate > 0 and len(geom.triangles) > decimate:
+        orig_t = len(geom.triangles)
+        geom = geom.simplify_quadric_decimation(target_number_of_triangles=decimate)
+        print(f"  ⚡ 데시메이션 적용: {orig_t:,} -> {len(geom.triangles):,} triangles")
 
-        if not mesh.has_vertex_colors():
-            mesh.paint_uniform_color([0.78, 0.78, 0.78])
-        mesh.compute_vertex_normals()
-        geometries = [mesh]
+    if kind == "mesh":
+        if not geom.has_vertex_normals():
+            geom.compute_vertex_normals()
+        geometries = [geom]
     else:
         pcd = geom
-        print(f"  포인트 클라우드: {len(pcd.points):,} points")
         if not pcd.has_colors():
-            # 높이 기반 그라데이션은 Open3D에서 직접 처리 불가하므로 기본 회색
             pcd.paint_uniform_color([0.7, 0.7, 0.7])
         geometries = [pcd]
 
@@ -212,7 +186,7 @@ def view_native(path: str, decimate: int = 0, point_size: float = 2.0):
 def main():
     parser = argparse.ArgumentParser(description="Optimized 3D Mesh/PointCloud Viewer (WSL GPU, 무손실)")
     parser.add_argument("input", help="Path to 3D file (.obj, .ply, .pcd, .stl, .glb)")
-    # 하위호환: 기존 --points 유지, 내부적으로는 decimate로 매핑 안함 (품질 보존 위해 무시, 경고만)
+    parser.add_argument("--no-cache", action="store_true", help="Bypass cached .ply binary")
     parser.add_argument("--points", type=int, default=None, help="(deprecated) 기존 호환용, 무시됨. 대신 --decimate 사용")
     parser.add_argument("--decimate", type=int, default=0, help="0=무손실 원본(추천), 1500000=육안 무손실, 800000=고속")
     parser.add_argument("--point_size", type=float, default=2.0, help="포인트 크기")
@@ -227,7 +201,7 @@ def main():
         print(f"     속도가 필요하면 --decimate 1500000 을 사용하세요.")
 
     try:
-        view_native(args.input, decimate=args.decimate, point_size=args.point_size)
+        view_native(args.input, decimate=args.decimate, point_size=args.point_size, no_cache=args.no_cache)
     except KeyboardInterrupt:
         print("\n👋 뷰어를 종료합니다.")
         sys.exit(0)
