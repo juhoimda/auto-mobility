@@ -1735,6 +1735,123 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
                    "OBJ/MTL/UV/coverage contract satisfied",
                    tag=tag, bundle_hash=tc.artifact_bundle_hash,
                    textured_face_coverage=tc.textured_face_coverage)
+        # ---- Full refusion for production quality preservation (benchmark-included) ----
+        # QA mesh (model.obj) stays benchmark-excluded for unbiased report.
+        # Full mesh (model_full.obj) re-fuses train|tuning|benchmark for deployment,
+        # reusing same voxel and chunked fusion. Overhead is benchmark-only (≈12-15% frames).
+        full_mesh_sha = None
+        full_fusion_hash = None
+        full_n_frames = 0
+        if not preview and bench_split is not None and hasattr(bench_split, "benchmark_holdout_ids") and benchmark_ids_for_eval:
+            try:
+                # full = delivery ∪ benchmark (filtered to valid poses)
+                full_ids_raw = sorted(set(delivery_ids) | set(benchmark_ids_for_eval))
+                full_ids = [fid for fid in full_ids_raw if fid in poses and fid in id_to_frame]
+                full_n_frames = len(full_ids)
+                if full_n_frames > len(delivery_ids):
+                    # Apply same fast-compare pose-coverage sampling if needed for VRAM
+                    if is_fast_compare and len(full_ids) > FAST_GEOMETRY_MAX:
+                        target_full = compute_fast_geometry_target(len(full_ids))
+                        orig_full = len(full_ids)
+                        full_ids = select_pose_coverage_frames(full_ids, poses, target_count=min(target_full, len(full_ids)))
+                        decide("full_refusion", "FAST_GEOMETRY_REPRESENTATIVE",
+                               f"full sampled {len(full_ids)} from {orig_full} via pose coverage (target {target_full})",
+                               tag=tag, full_target=target_full)
+                    # Plan and fuse full (chunked path reuses VRAM budget)
+                    if len(full_ids) > 900 and is_fast_compare:
+                        full_plan = None
+                        decide("active_block_plan", "SKIPPED_GLOBAL_FOR_CHUNKED_FULL",
+                               "chunked full avoids global planner duplication",
+                               tag=f"{tag}_full", frames=len(full_ids))
+                    else:
+                        full_plan = _plan_active_blocks_safe(full_ids, poses, info["eff_voxel"], tag=f"{tag}_full")
+                    full_final = submit_fusion(full_ids, poses, info["eff_voxel"] / 1000.0,
+                                               info["masks"] or None, f"{tag}_full", active_plan=full_plan)
+                    if full_final is not None and full_final.mesh_obj is not None and len(full_final.mesh_obj.triangles) > 0:
+                        # Write full mesh alongside QA mesh
+                        try:
+                            o3d.io.write_triangle_mesh(str(rank_dir / "model_full.obj"), full_final.mesh_obj)
+                            o3d.io.write_triangle_mesh(str(rank_dir / "model_full.ply"), full_final.mesh_obj)
+                        except Exception:
+                            pass
+                        # Texture bake for full mesh (reuses same view budget, must not leak benchmark is now INCLUDED)
+                        try:
+                            # reuse view selection logic but now full_ids is the pool (benchmark intentionally included)
+                            n_views_full = min(initial_target if 'initial_target' in locals() else (48 if is_fast_compare else 80), len(full_ids))
+                            sel_full = select_texture_views_pose_coverage(full_ids, poses, target_views=n_views_full) if n_views_full>0 else []
+                            views_full, poses_wc_full = [], {}
+                            for fid in sel_full:
+                                img = rgb(fid)
+                                if img is None:
+                                    continue
+                                views_full.append((fid, normalize_exposure(img)))
+                                poses_wc_full[fid] = poses[fid]
+                            if views_full:
+                                bake_scene_full = build_scene(full_final.mesh_obj)
+                                cur_tris_full = len(full_final.mesh_obj.triangles)
+                                do_simp_full = is_fast_compare or (cur_tris_full > TEXTURE_SIMPLIFICATION_TARGET)
+                                bake_full = bake_atlas(np.asarray(full_final.mesh_obj.vertices),
+                                                       np.asarray(full_final.mesh_obj.triangles),
+                                                       views_full, K, poses_wc_full, scene=bake_scene_full,
+                                                       out_dir=rank_dir, name="model_full",
+                                                       enable_simplification=do_simp_full,
+                                                       simplification_target=TEXTURE_SIMPLIFICATION_TARGET,
+                                                       simplification_max=TEXTURE_SIMPLIFICATION_MAX)
+                                decide("full_refusion_texture", "COMPLETED",
+                                       f"baked {len(views_full)} views onto full {cur_tris_full} tris",
+                                       tag=tag)
+                        except Exception as tex_exc:
+                            decide("full_refusion_texture", "FAILED", str(tex_exc), tag=tag)
+                        # Hashes and checkpoint for full
+                        import hashlib as _h_full
+                        full_fusion_hash = _h_full.sha256(",".join(map(str, sorted(full_ids))).encode()).hexdigest()[:16]
+                        try:
+                            import open3d as _o3d_tmp
+                            # compute obj hash if model_full.obj exists
+                            p = rank_dir / "model_full.obj"
+                            if p.is_file():
+                                full_mesh_sha = _h_full.sha256(p.read_bytes()).hexdigest()[:16]
+                        except Exception:
+                            full_mesh_sha = None
+                        decide("full_refusion", "COMPLETED",
+                               f"full mesh {full_final.mesh_triangles} tris from {len(full_ids)} frames (qa {len(delivery_ids)} + bench {len(benchmark_ids_for_eval)})",
+                               tag=tag, full_frames=len(full_ids), qa_frames=len(delivery_ids),
+                               bench_frames=len(benchmark_ids_for_eval),
+                               fusion_full_sha=full_fusion_hash)
+                        # Persist full provenance alongside QA provenance
+                        try:
+                            (rank_dir / "geometry_quality_full.json").write_text(json.dumps({
+                                "status": "FULL_FUSION",
+                                "note": "benchmark-included deployment mesh; QA remains on qa-excluded mesh",
+                                "qa_geometry": delivery_geo_eval,
+                                "full_frames": len(full_ids),
+                                "qa_frames": len(delivery_ids),
+                                "bench_frames": len(benchmark_ids_for_eval),
+                                "fusion_full_sha": full_fusion_hash,
+                                "mesh_full_sha": full_mesh_sha,
+                            }, indent=2))
+                            # Patch config.json to include full provenance (non-destructive)
+                            cfg_path = rank_dir / "config.json"
+                            if cfg_path.is_file():
+                                try:
+                                    cfg_j = json.loads(cfg_path.read_text())
+                                    cfg_j["full_fusion_frame_ids_sha256"] = full_fusion_hash
+                                    cfg_j["full_mesh_sha256"] = full_mesh_sha
+                                    cfg_j["full_n_frames"] = full_n_frames
+                                    cfg_j["qa_n_frames"] = len(delivery_ids)
+                                    cfg_j["benchmark_included_in_full"] = True
+                                    cfg_path.write_text(json.dumps(cfg_j, indent=2))
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                    else:
+                        decide("full_refusion", "FAILED", "full fusion produced empty mesh", tag=tag)
+                else:
+                    decide("full_refusion", "SKIPPED", "no additional benchmark frames", tag=tag)
+            except Exception as exc:
+                decide("full_refusion", "FAILED", str(exc), tag=tag)
+
         # If benchmark not evaluated, block promotion (NOT_EVALUATED)
         if delivery_geo_eval.get("status") != "ok":
             decide("geometry_gate", "NOT_EVALUATED", f"benchmark evaluation failed: {delivery_geo_eval.get('reason') or delivery_geo_eval.get('status')}", tag=tag)
@@ -1773,6 +1890,9 @@ def run_standard(dataset_dir: Path, trajectories: dict, out_dir: Path,
             "fusion_frames_sha256": fusion_frame_hash,
             "artifact_origin": "freshly_fused",
             "benchmark_holdout_ids": benchmark_ids_for_eval,
+            "full_fusion_frame_ids_sha256": full_fusion_hash,
+            "full_mesh_sha256": full_mesh_sha,
+            "full_n_frames": full_n_frames,
         }
 
 
